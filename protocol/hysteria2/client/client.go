@@ -59,6 +59,8 @@ type clientImpl struct {
 }
 
 func (c *clientImpl) connect(ctx context.Context) (*HandshakeInfo, error) {
+	ctx, cancel := netproxy.NewDialTimeoutContextFrom(ctx)
+	defer cancel()
 	pktConn, err := c.config.ConnFactory.New(ctx)
 	if err != nil {
 		return nil, err

@@ -6,7 +6,7 @@ import (
 )
 
 var (
-	DialTimeout = 10 * time.Second
+	DialTimeout = 8 * time.Second
 )
 
 func NewDialTimeoutContextFrom(ctx context.Context) (context.Context, context.CancelFunc) {
