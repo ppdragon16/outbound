@@ -18,7 +18,6 @@ var (
 type MagicNetwork struct {
 	Network string
 	Mark    uint32
-	Mptcp   bool
 }
 
 func (mn MagicNetwork) Encode() string {
@@ -30,9 +29,6 @@ func (mn MagicNetwork) Encode() string {
 	b[1] = byte(len([]byte(mn.Network)))
 	copy(b[2:], mn.Network)
 	binary.BigEndian.PutUint32(b[2+len([]byte(mn.Network)):], uint32(mn.Mark))
-	if mn.Mptcp {
-		b[2+len([]byte(mn.Network))+4] = 1
-	}
 	return string(b)
 }
 
@@ -44,14 +40,13 @@ func ParseMagicNetwork(network string) (mn *MagicNetwork, err error) {
 		return &MagicNetwork{
 			Network: network,
 			Mark:    0,
-			Mptcp:   false,
 		}, nil
 	}
 	b := []byte(network)
 	if len(b) < 2 || b[0] != MagicNetworkType {
 		return nil, UnknownMagicNetworkEncodingError
 	}
-	// flag(1B) network len (1B) network (variable length) mark(4B) mptcp(1B)
+	// flag(1B) network len (1B) network (variable length) mark(4B)
 	networkLen := b[1]
 	if len(b) < 2+int(networkLen)+4+1 {
 		return nil, UnknownMagicNetworkEncodingError
@@ -61,11 +56,9 @@ func ParseMagicNetwork(network string) (mn *MagicNetwork, err error) {
 	if bits.Len32(mark) >= common.IntSize {
 		return nil, fmt.Errorf("mark is too big")
 	}
-	mptcp := b[2+int(networkLen)+4] == 1
 
 	return &MagicNetwork{
 		Network: network,
 		Mark:    mark,
-		Mptcp:   mptcp,
 	}, nil
 }

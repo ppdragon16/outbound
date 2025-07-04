@@ -6,19 +6,12 @@
 package common
 
 import (
-	"context"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
-	"errors"
-	"fmt"
-	"net"
-	"net/netip"
 	"net/url"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/eknkc/basex"
 )
@@ -185,39 +178,6 @@ func StringsHas(strs []string, str string) bool {
 
 func HeadOverlap(p, b []byte) bool {
 	return len(p) > 0 && len(b) > 0 && &p[0] == &b[0]
-}
-
-func ResolveUDPAddr(resolver *net.Resolver, hostport string) (*net.UDPAddr, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	host, _port, err := net.SplitHostPort(hostport)
-	if err != nil {
-		return nil, err
-	}
-	port, err := strconv.ParseUint(_port, 10, 16)
-	if err != nil {
-		return nil, fmt.Errorf("invalid port: %v", _port)
-	}
-	addrs, err := resolver.LookupNetIP(ctx, "ip", host)
-	if err != nil {
-		return nil, err
-	}
-	// Prefer ipv4.
-	var ip netip.Addr
-	for _, addr := range addrs {
-		if !ip.IsValid() {
-			ip = addr
-			continue
-		}
-		if addr.Is4() {
-			ip = addr
-			break
-		}
-	}
-	if !ip.IsValid() {
-		return nil, errors.New("no suitable address found")
-	}
-	return net.UDPAddrFromAddrPort(netip.AddrPortFrom(ip, uint16(port))), nil
 }
 
 // // MultiWrite uses io.Copy to try to avoid seperated packets.

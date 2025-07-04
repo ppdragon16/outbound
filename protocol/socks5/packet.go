@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 
 	"github.com/daeuniverse/outbound/pool"
@@ -79,7 +80,7 @@ func (pc *PktConn) readFrom(b []byte) (int, netip.AddrPort, netip.AddrPort, erro
 		return n, raddr, netip.AddrPort{}, errors.New("can not get target addr")
 	}
 
-	target, err := net.ResolveUDPAddr("udp", tgtAddr.String())
+	target, err := common.ResolveUDPAddr(tgtAddr.String())
 	if err != nil {
 		return n, raddr, netip.AddrPort{}, errors.New("wrong target addr")
 	}

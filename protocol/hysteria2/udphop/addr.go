@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/daeuniverse/outbound/common"
 )
 
 type InvalidPortError struct {
@@ -49,7 +51,7 @@ func ResolveUDPHopAddr(addr string) (*UDPHopAddr, error) {
 	if err != nil {
 		return nil, err
 	}
-	ip, err := net.ResolveIPAddr("ip", host)
+	ip, err := common.ResolveIPAddr(host)
 	if err != nil {
 		return nil, err
 	}

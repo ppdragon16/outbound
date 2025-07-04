@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/client"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/udphop"
-	"github.com/daeuniverse/outbound/protocol/tuic/common"
 )
 
 func init() {
@@ -29,12 +29,7 @@ type Feature1 struct {
 }
 
 func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
-	host, port, hostPort := parseServerAddrString(header.ProxyAddress)
-
-	metadata := protocol.Metadata{
-		IsClient: header.IsClient,
-	}
-
+	host, port, proxyAddress := parseServerAddrString(header.ProxyAddress)
 	config := &client.Config{
 		TLSConfig: client.TLSConfig{
 			ServerName:            header.TlsConfig.ServerName,
@@ -42,9 +37,12 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 			VerifyPeerCertificate: header.TlsConfig.VerifyPeerCertificate,
 			RootCAs:               header.TlsConfig.RootCAs,
 		},
-		Auth:     header.User,
-		FastOpen: true,
+		Auth:         header.User,
+		FastOpen:     true,
+		NextDialer:   nextDialer,
+		ProxyAddress: proxyAddress,
 	}
+
 	if header.SNI == "" {
 		config.TLSConfig.ServerName = host
 	}
@@ -57,46 +55,13 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	}
 
 	var err error
-	if !isPortHoppingPort(port) {
-		config.ServerAddr, err = net.ResolveUDPAddr("udp", hostPort)
+	if isPortHoppingPort(port) {
+		config.Addr, err = udphop.ResolveUDPHopAddr(proxyAddress)
 	} else {
-		config.ServerAddr, err = udphop.ResolveUDPHopAddr(hostPort)
+		config.Addr, err = common.ResolveUDPAddr(proxyAddress)
 	}
 	if err != nil {
 		return nil, err
-	}
-
-	if config.ServerAddr.Network() == "udphop" {
-		config.ConnFactory = &client.UdpConnFactory{
-			NewFunc: func(ctx context.Context) (net.PacketConn, error) {
-				dialFunc := func(addr net.Addr) (net.PacketConn, error) {
-					conn, err := nextDialer.DialContext(ctx, "udp", addr.String())
-					if err != nil {
-						return nil, err
-					}
-					return netproxy.NewFakeNetPacketConn(
-						conn.(netproxy.PacketConn),
-						net.UDPAddrFromAddrPort(common.GetUniqueFakeAddrPort()),
-						addr,
-					), nil
-				}
-				return udphop.NewUDPHopPacketConn(config.ServerAddr.(*udphop.UDPHopAddr), config.UDPHopInterval, dialFunc)
-			},
-		}
-	} else {
-		config.ConnFactory = &client.UdpConnFactory{
-			NewFunc: func(ctx context.Context) (net.PacketConn, error) {
-				conn, err := nextDialer.DialContext(ctx, "udp", config.ServerAddr.String())
-				if err != nil {
-					return nil, err
-				}
-				return netproxy.NewFakeNetPacketConn(
-					conn.(netproxy.PacketConn),
-					net.UDPAddrFromAddrPort(common.GetUniqueFakeAddrPort()),
-					config.ServerAddr,
-				), nil
-			},
-		}
 	}
 
 	client, err := client.NewClient(config)
@@ -105,8 +70,10 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	}
 
 	return &Dialer{
-		client:   client,
-		metadata: metadata,
+		client: client,
+		metadata: protocol.Metadata{
+			IsClient: header.IsClient,
+		},
 	}, nil
 }
 

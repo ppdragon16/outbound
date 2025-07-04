@@ -26,7 +26,7 @@ func (c *directPacketConn) WriteTo(b []byte, addr string) (int, error) {
 		return c.Write(b)
 	}
 
-	uAddr, err := common.ResolveUDPAddr(c.resolver, addr)
+	uAddr, err := common.ResolveUDPAddrWithResolver(c.resolver, addr)
 	if err != nil {
 		return 0, err
 	}
@@ -53,7 +53,7 @@ func (c *directPacketConn) Write(b []byte) (int, error) {
 		return c.UDPConn.Write(b)
 	}
 	if !c.cachedDialTgt.IsValid() {
-		ua, err := common.ResolveUDPAddr(c.resolver, c.dialTgt)
+		ua, err := common.ResolveUDPAddrWithResolver(c.resolver, c.dialTgt)
 		if err != nil {
 			return 0, err
 		}

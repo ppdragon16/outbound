@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/netip"
@@ -8,11 +9,11 @@ import (
 	"time"
 
 	rand "github.com/daeuniverse/outbound/pkg/fastrand"
+	"github.com/samber/oops"
 
 	"github.com/daeuniverse/quic-go"
 
 	"github.com/daeuniverse/outbound/netproxy"
-	coreErrs "github.com/daeuniverse/outbound/protocol/hysteria2/errors"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/frag"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
 )
@@ -22,7 +23,7 @@ const (
 )
 
 type udpIO interface {
-	ReceiveMessage() (*protocol.UDPMessage, error)
+	ReceiveMessage(context.Context) (*protocol.UDPMessage, error)
 	SendMessage([]byte, *protocol.UDPMessage) error
 }
 
@@ -136,38 +137,42 @@ type udpSessionManager struct {
 	m      map[uint32]*udpConn
 	nextID uint32
 
-	closed bool
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func newUDPSessionManager(io udpIO) *udpSessionManager {
+	ctx, cancel := context.WithCancel(context.Background())
 	m := &udpSessionManager{
 		io:     io,
 		m:      make(map[uint32]*udpConn),
 		nextID: 1,
+		ctx:    ctx,
+		cancel: cancel,
 	}
 	go m.run()
 	return m
 }
 
 func (m *udpSessionManager) run() error {
-	defer m.closeCleanup()
 	for {
-		msg, err := m.io.ReceiveMessage()
+		msg, err := m.io.ReceiveMessage(m.ctx)
 		if err != nil {
-			return err
+			m.Close()
+			return oops.In("UDP session manager").With("ctx", m.ctx).Wrapf(err, "failed to receive message")
 		}
 		m.feed(msg)
 	}
 }
 
-func (m *udpSessionManager) closeCleanup() {
+func (m *udpSessionManager) Close() {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
 	for _, conn := range m.m {
 		m.close(conn)
 	}
-	m.closed = true
+	m.cancel()
 }
 
 func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
@@ -193,8 +198,8 @@ func (m *udpSessionManager) NewUDP(addr string) (netproxy.Conn, error) {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
-	if m.closed {
-		return nil, coreErrs.ClosedError{}
+	if m.ctx.Err() != nil {
+		return nil, oops.In("New udpSM").New("UDP session manager closed")
 	}
 
 	id := m.nextID

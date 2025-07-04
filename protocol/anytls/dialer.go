@@ -78,7 +78,6 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 		tcpNetwork := netproxy.MagicNetwork{
 			Network: "tcp",
 			Mark:    magicNetwork.Mark,
-			Mptcp:   magicNetwork.Mptcp,
 		}.Encode()
 
 		s, err := d.getSession(ctx, tcpNetwork)

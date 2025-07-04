@@ -43,7 +43,6 @@ func (s *Socks5) DialContext(ctx context.Context, network, addr string) (netprox
 		tcpNetwork := netproxy.MagicNetwork{
 			Network: "tcp",
 			Mark:    magicNetwork.Mark,
-			Mptcp:   magicNetwork.Mptcp,
 		}.Encode()
 		c, err := s.dialer.DialContext(ctx, tcpNetwork, s.addr)
 		if err != nil {

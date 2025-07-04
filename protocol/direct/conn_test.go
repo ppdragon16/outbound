@@ -11,6 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Initialize the global dialers for testing
+func init() {
+	InitDirectDialers("8.8.8.8:53", false)
+}
+
 func TestFakeNetPacketConn(t *testing.T) {
 	t.Run("positive", func(t *testing.T) {
 		c, err := SymmetricDirect.DialContext(context.TODO(), "udp", "223.5.5.5:53")

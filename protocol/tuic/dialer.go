@@ -11,6 +11,8 @@ import (
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
 	"github.com/daeuniverse/quic-go"
 	"github.com/google/uuid"
+
+	C "github.com/daeuniverse/outbound/common"
 )
 
 func init() {
@@ -114,7 +116,7 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 			return nil, err
 		}
 		mdata.IsClient = d.metadata.IsClient
-		proxyAddr, err := net.ResolveUDPAddr("udp", d.proxyAddress)
+		proxyAddr, err := C.ResolveUDPAddr(d.proxyAddress)
 		if err != nil {
 			return nil, err
 		}

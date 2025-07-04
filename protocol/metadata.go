@@ -6,6 +6,8 @@ import (
 	"net/netip"
 	"strconv"
 	"sync"
+
+	"github.com/daeuniverse/outbound/common"
 )
 
 type Metadata struct {
@@ -23,7 +25,7 @@ func (m *Metadata) DomainIpMapping(cache *sync.Map) (addrPort netip.AddrPort, er
 		if _addr, ok := cache.Load(m.Hostname); ok {
 			addrPort = netip.AddrPortFrom(_addr.(netip.Addr), m.Port)
 		} else {
-			uAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(m.Hostname, strconv.Itoa(int(m.Port))))
+			uAddr, err := common.ResolveUDPAddr(net.JoinHostPort(m.Hostname, strconv.Itoa(int(m.Port))))
 			if err != nil {
 				return netip.AddrPort{}, err
 			}

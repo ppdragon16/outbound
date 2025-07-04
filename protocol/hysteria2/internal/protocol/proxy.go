@@ -6,9 +6,8 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/daeuniverse/outbound/protocol/hysteria2/errors"
-
 	"github.com/daeuniverse/quic-go/quicvarint"
+	"github.com/samber/oops"
 )
 
 const (
@@ -42,7 +41,7 @@ func ReadTCPRequest(r io.Reader) (string, error) {
 		return "", err
 	}
 	if addrLen == 0 || addrLen > MaxAddressLength {
-		return "", errors.ProtocolError{Message: "invalid address length"}
+		return "", oops.Tags("protocol error").New("invalid address length")
 	}
 	addrBuf := make([]byte, addrLen)
 	_, err = io.ReadFull(r, addrBuf)
@@ -54,7 +53,7 @@ func ReadTCPRequest(r io.Reader) (string, error) {
 		return "", err
 	}
 	if paddingLen > MaxPaddingLength {
-		return "", errors.ProtocolError{Message: "invalid padding length"}
+		return "", oops.Tags("protocol error").New("invalid padding length")
 	}
 	if paddingLen > 0 {
 		_, err = io.CopyN(io.Discard, r, int64(paddingLen))
@@ -100,7 +99,7 @@ func ReadTCPResponse(r io.Reader) (bool, string, error) {
 		return false, "", err
 	}
 	if msgLen > MaxMessageLength {
-		return false, "", errors.ProtocolError{Message: "invalid message length"}
+		return false, "", oops.Tags("protocol error").New("invalid message length")
 	}
 	var msgBuf []byte
 	// No message is fine
@@ -116,7 +115,7 @@ func ReadTCPResponse(r io.Reader) (bool, string, error) {
 		return false, "", err
 	}
 	if paddingLen > MaxPaddingLength {
-		return false, "", errors.ProtocolError{Message: "invalid padding length"}
+		return false, "", oops.Tags("protocol error").New("invalid padding length")
 	}
 	if paddingLen > 0 {
 		_, err = io.CopyN(io.Discard, r, int64(paddingLen))
@@ -209,12 +208,12 @@ func ParseUDPMessage(msg []byte) (*UDPMessage, error) {
 		return nil, err
 	}
 	if lAddr == 0 || lAddr > MaxMessageLength {
-		return nil, errors.ProtocolError{Message: "invalid address length"}
+		return nil, oops.Tags("protocol error").New("invalid address length")
 	}
 	bs := buf.Bytes()
 	if len(bs) <= int(lAddr) {
 		// We use <= instead of < here as we expect at least one byte of data after the address
-		return nil, errors.ProtocolError{Message: "invalid message length"}
+		return nil, oops.Tags("protocol error").New("invalid message length")
 	}
 	m.Addr = string(bs[:lAddr])
 	m.Data = bs[lAddr:]

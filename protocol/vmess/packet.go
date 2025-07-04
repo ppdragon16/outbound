@@ -2,9 +2,9 @@ package vmess
 
 import (
 	"fmt"
-	"net"
 	"net/netip"
 
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/pool"
 )
 
@@ -26,7 +26,7 @@ func (c *Conn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
 		return n - addrLen, address, err
 	} else {
 		if !c.dialTgtAddrPort.IsValid() {
-			tgt, err := net.ResolveUDPAddr("udp", c.dialTgt)
+			tgt, err := common.ResolveUDPAddr(c.dialTgt)
 			if err != nil {
 				return 0, netip.AddrPort{}, err
 			}
@@ -40,7 +40,7 @@ func (c *Conn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
 func (c *Conn) WriteTo(p []byte, addr string) (n int, err error) {
 	if c.metadata.IsPacketAddr() {
 		// VMess packet addr does not support domain.
-		address, err := net.ResolveUDPAddr("udp", addr)
+		address, err := common.ResolveUDPAddr(addr)
 		if err != nil {
 			return 0, err
 		}

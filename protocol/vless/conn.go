@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/vmess"
@@ -55,7 +56,7 @@ func NewConn(conn netproxy.Conn, metadata Metadata, cmdKey []byte) (c *Conn, err
 		cmdKey:   key,
 	}
 	if metadata.Network == "udp" {
-		proxyAddrIp, err := net.ResolveUDPAddr("udp", net.JoinHostPort(c.metadata.Hostname, strconv.Itoa(int(c.metadata.Port))))
+		proxyAddrIp, err := common.ResolveUDPAddr(net.JoinHostPort(c.metadata.Hostname, strconv.Itoa(int(c.metadata.Port))))
 		if err != nil {
 			return nil, err
 		}

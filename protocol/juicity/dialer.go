@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	C "github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks"
@@ -115,7 +116,7 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 			return nil, err
 		}
 		mdata.IsClient = true
-		proxyAddr, err := net.ResolveUDPAddr("udp", d.proxyAddress)
+		proxyAddr, err := C.ResolveUDPAddr(d.proxyAddress)
 		if err != nil {
 			return nil, err
 		}
@@ -141,7 +142,7 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 				if err != nil {
 					return nil, err
 				}
-				innerAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(mdata.Hostname, strconv.Itoa(int(mdata.Port))))
+				innerAddr, err := C.ResolveUDPAddr(net.JoinHostPort(mdata.Hostname, strconv.Itoa(int(mdata.Port))))
 				if err != nil {
 					return nil, err
 				}
@@ -194,7 +195,7 @@ func underlayKey(psk []byte) (key *shadowsocks.Key, err error) {
 }
 
 func (d *Dialer) DialCmdMsg(ctx context.Context, cmd protocol.MetadataCmd) (c netproxy.Conn, err error) {
-	proxyAddr, err := net.ResolveUDPAddr("udp", d.proxyAddress)
+	proxyAddr, err := C.ResolveUDPAddr(d.proxyAddress)
 	if err != nil {
 		return nil, err
 	}

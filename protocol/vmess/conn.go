@@ -221,7 +221,7 @@ func (c *Conn) WriteReqHeader() (err error) {
 func (c *Conn) Write(b []byte) (n int, err error) {
 	if c.metadata.IsPacketAddr() {
 		if !c.dialTgtAddrPort.IsValid() {
-			tgt, err := net.ResolveUDPAddr("udp", c.dialTgt)
+			tgt, err := common.ResolveUDPAddr(c.dialTgt)
 			if err != nil {
 				return 0, err
 			}
