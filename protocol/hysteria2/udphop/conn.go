@@ -1,12 +1,16 @@
 package udphop
 
 import (
+	"context"
 	"errors"
 	"math/rand"
 	"net"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/daeuniverse/outbound/pool"
+	"github.com/samber/oops"
 )
 
 const (
@@ -17,33 +21,33 @@ const (
 )
 
 type udpHopPacketConn struct {
-	Addr        net.Addr
-	Addrs       []net.Addr
 	HopInterval time.Duration
-	dialFunc    dialFunc
+
+	addrs []net.Addr
+
+	dialFunc dialFunc
 
 	connMutex   sync.RWMutex
-	prevConn    net.PacketConn
-	currentConn net.PacketConn
+	prevConn    net.Conn
+	currentConn net.Conn
 
 	readBufferSize  int
 	writeBufferSize int
 
 	recvQueue chan *udpPacket
-	closeChan chan struct{}
-	closed    bool
 
-	bufPool sync.Pool
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 type udpPacket struct {
-	Buf  []byte
+	Buf  pool.PB
 	N    int
 	Addr net.Addr
 	Err  error
 }
 
-type dialFunc = func(addr net.Addr) (net.PacketConn, error)
+type dialFunc = func(addr net.Addr) (net.Conn, error)
 
 func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc dialFunc) (net.PacketConn, error) {
 	if hopInterval == 0 {
@@ -61,32 +65,27 @@ func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc d
 	if err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	hConn := &udpHopPacketConn{
-		Addr:        addr,
-		Addrs:       addrs,
 		HopInterval: hopInterval,
+		addrs:       addrs,
 		dialFunc:    dialFunc,
-		prevConn:    nil,
 		currentConn: curConn,
 		recvQueue:   make(chan *udpPacket, packetQueueSize),
-		closeChan:   make(chan struct{}),
-		bufPool: sync.Pool{
-			New: func() interface{} {
-				return make([]byte, udpBufferSize)
-			},
-		},
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 	go hConn.recvLoop(curConn)
 	go hConn.hopLoop()
 	return hConn, nil
 }
 
-func (u *udpHopPacketConn) recvLoop(conn net.PacketConn) {
+func (u *udpHopPacketConn) recvLoop(conn net.Conn) {
 	for {
-		buf := u.bufPool.Get().([]byte)
-		n, addr, err := conn.ReadFrom(buf)
+		buf := pool.GetFullCap(udpBufferSize)
+		n, err := conn.Read(buf)
 		if err != nil {
-			u.bufPool.Put(buf)
+			buf.Put()
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
 				// Only pass through timeout errors here, not permanent errors
@@ -97,11 +96,11 @@ func (u *udpHopPacketConn) recvLoop(conn net.PacketConn) {
 			return
 		}
 		select {
-		case u.recvQueue <- &udpPacket{buf, n, addr, nil}:
+		case u.recvQueue <- &udpPacket{buf, n, conn.RemoteAddr(), nil}:
 			// Packet successfully queued
 		default:
 			// Queue is full, drop the packet
-			u.bufPool.Put(buf)
+			buf.Put()
 		}
 	}
 }
@@ -111,10 +110,10 @@ func (u *udpHopPacketConn) hopLoop() {
 	defer ticker.Stop()
 	for {
 		select {
+		case <-u.ctx.Done():
+			return
 		case <-ticker.C:
 			u.hop()
-		case <-u.closeChan:
-			return
 		}
 	}
 }
@@ -122,11 +121,8 @@ func (u *udpHopPacketConn) hopLoop() {
 func (u *udpHopPacketConn) hop() {
 	u.connMutex.Lock()
 	defer u.connMutex.Unlock()
-	if u.closed {
-		return
-	}
-	newAddrIndex := rand.Intn(len(u.Addrs))
-	newConn, err := u.dialFunc(u.Addrs[newAddrIndex])
+	newAddrIndex := rand.Intn(len(u.addrs))
+	newConn, err := u.dialFunc(u.addrs[newAddrIndex])
 	if err != nil {
 		// Could be temporary, just skip this hop
 		return
@@ -140,7 +136,7 @@ func (u *udpHopPacketConn) hop() {
 	// set newConn as currentConn,
 	// start recvLoop on newConn.
 	if u.prevConn != nil {
-		_ = u.prevConn.Close() // recvLoop for this conn will exit
+		u.prevConn.Close() // recvLoop for this conn will exit
 	}
 	u.prevConn = u.currentConn
 	u.currentConn = newConn
@@ -155,50 +151,43 @@ func (u *udpHopPacketConn) hop() {
 }
 
 func (u *udpHopPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
-	for {
-		select {
-		case p := <-u.recvQueue:
-			if p.Err != nil {
-				return 0, nil, p.Err
-			}
-			// Currently we do not check whether the packet is from
-			// the server or not due to performance reasons.
-			n := copy(b, p.Buf[:p.N])
-			u.bufPool.Put(p.Buf)
-			return n, u.Addr, nil
-		case <-u.closeChan:
-			return 0, nil, net.ErrClosed
+	select {
+	case <-u.ctx.Done():
+		return 0, nil, net.ErrClosed
+	case p := <-u.recvQueue:
+		if p.Err != nil {
+			return 0, nil, p.Err
 		}
+		// Currently we do not check whether the packet is from
+		// the server or not due to performance reasons.
+		n := copy(b, p.Buf[:p.N])
+		p.Buf.Put()
+		return n, p.Addr, nil
 	}
 }
 
 func (u *udpHopPacketConn) WriteTo(b []byte, _ net.Addr) (n int, err error) {
-	u.connMutex.RLock()
-	defer u.connMutex.RUnlock()
-	if u.closed {
+	if u.ctx.Err() != nil {
 		return 0, net.ErrClosed
 	}
+	u.connMutex.RLock()
+	defer u.connMutex.RUnlock()
 	// Skip the check for now, always write to the server,
 	// for the same reason as in ReadFrom.
-	return u.currentConn.WriteTo(b, u.Addr)
+	return u.currentConn.Write(b)
 }
 
 func (u *udpHopPacketConn) Close() error {
+	u.cancel()
 	u.connMutex.Lock()
 	defer u.connMutex.Unlock()
-	if u.closed {
-		return nil
-	}
 	// Close prevConn and currentConn
 	// Close closeChan to unblock ReadFrom & hopLoop
 	// Set closed flag to true to prevent double close
-	if u.prevConn != nil {
-		_ = u.prevConn.Close()
-	}
 	err := u.currentConn.Close()
-	close(u.closeChan)
-	u.closed = true
-	u.Addrs = nil // For GC
+	if u.prevConn != nil {
+		err = oops.Join(err, u.prevConn.Close())
+	}
 	return err
 }
 
@@ -267,7 +256,7 @@ func (u *udpHopPacketConn) SyscallConn() (syscall.RawConn, error) {
 	return sc.SyscallConn()
 }
 
-func trySetReadBuffer(pc net.PacketConn, bytes int) error {
+func trySetReadBuffer(pc net.Conn, bytes int) error {
 	sc, ok := pc.(interface {
 		SetReadBuffer(bytes int) error
 	})
@@ -277,7 +266,7 @@ func trySetReadBuffer(pc net.PacketConn, bytes int) error {
 	return nil
 }
 
-func trySetWriteBuffer(pc net.PacketConn, bytes int) error {
+func trySetWriteBuffer(pc net.Conn, bytes int) error {
 	sc, ok := pc.(interface {
 		SetWriteBuffer(bytes int) error
 	})

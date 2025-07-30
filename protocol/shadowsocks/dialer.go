@@ -3,6 +3,7 @@ package shadowsocks
 import (
 	"context"
 	"fmt"
+	"net"
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/common"
@@ -17,59 +18,62 @@ func init() {
 type Dialer struct {
 	proxyAddress string
 	nextDialer   netproxy.Dialer
-	metadata     protocol.Metadata
+	conf         *ciphers.CipherConf
 	key          []byte
+	sg           SaltGenerator
 }
 
 func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
+	conf := ciphers.AeadCiphersConf[header.Cipher]
+	key := common.EVPBytesToKey(header.Password, conf.KeyLen)
+	sg, err := NewSaltGenerator(key, conf.SaltLen)
+	if err != nil {
+		return nil, err
+	}
 	//log.Trace("shadowsocks.NewDialer: metadata: %v, password: %v", metadata, password)
 	return &Dialer{
 		proxyAddress: header.ProxyAddress,
 		nextDialer:   nextDialer,
-		metadata: protocol.Metadata{
-			Cipher:   header.Cipher,
-			IsClient: header.IsClient,
-		},
-		key: common.EVPBytesToKey(header.Password, ciphers.AeadCiphersConf[header.Cipher].KeyLen),
+		conf:         conf,
+		key:          key,
+		sg:           sg,
 	}, nil
 }
 
-func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netproxy.Conn, error) {
-	magicNetwork, err := netproxy.ParseMagicNetwork(network)
-	if err != nil {
-		return nil, err
-	}
-	switch magicNetwork.Network {
+func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	switch network {
 	case "tcp":
-		mdata, err := protocol.ParseMetadata(addr)
+		addrInfo, err := AddressFromString(addr)
 		if err != nil {
 			return nil, err
 		}
-		mdata.Cipher = d.metadata.Cipher
-		mdata.IsClient = d.metadata.IsClient
-
 		// Shadowsocks transfer TCP traffic via TCP tunnel.
 		conn, err := d.nextDialer.DialContext(ctx, network, d.proxyAddress)
 		if err != nil {
 			return nil, err
 		}
-		return NewTCPConn(conn, mdata, d.key, nil)
+		return NewTCPConn(conn, d.conf, d.key, d.sg, addrInfo, nil)
 	case "udp":
-		mdata, err := protocol.ParseMetadata(addr)
+		conn, err := d.ListenPacket(ctx, d.proxyAddress)
 		if err != nil {
 			return nil, err
 		}
-		mdata.Cipher = d.metadata.Cipher
-		mdata.IsClient = d.metadata.IsClient
-
-		// Shadowsocks transfer UDP traffic via UDP tunnel.
-		magicNetwork.Network = "udp"
-		conn, err := d.nextDialer.DialContext(ctx, magicNetwork.Encode(), d.proxyAddress)
-		if err != nil {
-			return nil, err
-		}
-		return NewUdpConn(conn.(netproxy.PacketConn), d.proxyAddress, mdata, d.key, nil)
+		return &netproxy.BindPacketConn{
+			PacketConn: conn,
+			Address:    netproxy.NewProxyAddr("udp", addr),
+		}, nil
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
+}
+
+func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
+	// TODO: 这里不应该基于addr做决断
+
+	// Shadowsocks transfer UDP traffic via UDP tunnel.
+	conn, err := d.nextDialer.DialContext(ctx, "udp", d.proxyAddress)
+	if err != nil {
+		return nil, err
+	}
+	return NewUdpConn(conn, d.conf, d.key, d.sg, nil)
 }

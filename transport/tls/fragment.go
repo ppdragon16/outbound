@@ -2,12 +2,12 @@ package tls
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/daeuniverse/outbound/common"
-	"github.com/daeuniverse/outbound/netproxy"
 )
 
 func parseRange(str string) (min, max int64, err error) {
@@ -27,16 +27,16 @@ func parseRange(str string) (min, max int64, err error) {
 }
 
 type FragmentConn struct {
-	rawConn     netproxy.Conn
+	net.Conn
 	maxLength   int64
 	minLength   int64
 	maxInterval int64
 	minInterval int64
 }
 
-func NewFragmentConn(rawConn netproxy.Conn, minLength, maxLength, minInterval, maxInterval int64) *FragmentConn {
+func NewFragmentConn(conn net.Conn, minLength, maxLength, minInterval, maxInterval int64) *FragmentConn {
 	return &FragmentConn{
-		rawConn:     rawConn,
+		Conn:        conn,
 		maxLength:   maxLength,
 		minLength:   minLength,
 		maxInterval: maxInterval,
@@ -45,16 +45,16 @@ func NewFragmentConn(rawConn netproxy.Conn, minLength, maxLength, minInterval, m
 }
 
 func (f *FragmentConn) Read(b []byte) (n int, err error) {
-	return f.rawConn.Read(b)
+	return f.Conn.Read(b)
 }
 
 func (f *FragmentConn) Write(b []byte) (n int, err error) {
 	if len(b) <= 5 || b[0] != 22 {
-		return f.rawConn.Write(b)
+		return f.Conn.Write(b)
 	}
 	recordLen := 5 + ((int(b[3]) << 8) | int(b[4]))
 	if len(b) < recordLen {
-		return f.rawConn.Write(b)
+		return f.Conn.Write(b)
 	}
 	data := b[5:recordLen]
 	buf := make([]byte, 1024)
@@ -70,7 +70,7 @@ func (f *FragmentConn) Write(b []byte) (n int, err error) {
 		if f.maxInterval == 0 {
 			hello = append(hello, buf[:5+l]...)
 		} else {
-			if _, err := f.rawConn.Write(buf[:5+l]); err != nil {
+			if _, err := f.Conn.Write(buf[:5+l]); err != nil {
 				return 0, err
 			}
 			time.Sleep(time.Duration(randBetween(f.minInterval, f.maxInterval)) * time.Millisecond)
@@ -80,30 +80,14 @@ func (f *FragmentConn) Write(b []byte) (n int, err error) {
 		}
 	}
 	if len(hello) > 0 {
-		if _, err := f.rawConn.Write(hello); err != nil {
+		if _, err := f.Conn.Write(hello); err != nil {
 			return 0, err
 		}
 	}
 	if len(b) > recordLen {
-		if _, err := f.rawConn.Write(b[recordLen:]); err != nil {
+		if _, err := f.Conn.Write(b[recordLen:]); err != nil {
 			return 0, err
 		}
 	}
 	return len(b), nil
-}
-
-func (f *FragmentConn) Close() error {
-	return f.rawConn.Close()
-}
-
-func (f *FragmentConn) SetDeadline(t time.Time) error {
-	return f.rawConn.SetDeadline(t)
-}
-
-func (f *FragmentConn) SetReadDeadline(t time.Time) error {
-	return f.rawConn.SetReadDeadline(t)
-}
-
-func (f *FragmentConn) SetWriteDeadline(t time.Time) error {
-	return f.rawConn.SetWriteDeadline(t)
 }

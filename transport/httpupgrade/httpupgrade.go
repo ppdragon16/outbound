@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -66,12 +67,8 @@ func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 	return t, nil
 }
 
-func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c netproxy.Conn, err error) {
-	magicNetwork, err := netproxy.ParseMagicNetwork(network)
-	if err != nil {
-		return nil, err
-	}
-	switch magicNetwork.Network {
+func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
+	switch network {
 	case "tcp":
 		conn, err := t.nextDialer.DialContext(ctx, network, addr)
 		if err != nil {
@@ -79,7 +76,7 @@ func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c netpr
 		}
 
 		if t.tlsConfig != nil {
-			conn = tls.Client(&netproxy.FakeNetConn{Conn: conn}, t.tlsConfig)
+			conn = tls.Client(conn, t.tlsConfig)
 		}
 
 		req, err := http.NewRequest("GET", t.path, nil)

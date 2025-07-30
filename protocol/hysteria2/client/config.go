@@ -19,7 +19,6 @@ const (
 )
 
 type Config struct {
-	ProxyAddress    string
 	Addr            net.Addr
 	NextDialer      netproxy.Dialer
 	Auth            string
@@ -37,9 +36,6 @@ type Config struct {
 func (c *Config) verifyAndFill() error {
 	if c.filled {
 		return nil
-	}
-	if c.ProxyAddress == "" {
-		return oops.In("Hysteria2 Config Verify").With("field", "ProxyAddress").With("reason", "must be set").New("invalid config")
 	}
 	if c.NextDialer == nil {
 		return oops.In("Hysteria2 Config Verify").With("field", "NextDialer").With("reason", "must be set").New("invalid config")

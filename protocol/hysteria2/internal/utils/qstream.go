@@ -41,8 +41,8 @@ func (s *QStream) Write(p []byte) (n int, err error) {
 }
 
 func (s *QStream) Close() error {
-	s.Stream.CancelRead(0)
-	return s.Stream.Close()
+	s.Stream.CancelRead(0)  // Close read
+	return s.Stream.Close() // Close write
 }
 
 func (s *QStream) CancelWrite(code quic.StreamErrorCode) {

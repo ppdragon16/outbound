@@ -5,9 +5,9 @@ import (
 	"crypto/sha1"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
@@ -15,66 +15,33 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-type (
-	SaltGeneratorType int
-)
+type SaltGeneratorType int
 
 const (
 	IodizedSaltGeneratorType SaltGeneratorType = iota
 	RandomSaltGeneratorType
 )
 
-const DefaultBucketSize = 300
+const (
+	DefaultTokenLength   = 5
+	DefaultBucketSize    = 300
+	DefaultHTTPTimeout   = 10 * time.Second
+	DefaultIodizedSource = "https://github.com/explore"
+)
 
 var (
 	DefaultSaltGeneratorType = RandomSaltGeneratorType
-	DefaultIodizedSource     = "https://github.com/explore"
-	saltGenerators           = make(map[int]SaltGenerator)
-	muGenerators             sync.Mutex
 )
 
-func GetSaltGenerator(masterKey []byte, saltLen int) (sg SaltGenerator, err error) {
-	muGenerators.Lock()
-	sg, ok := saltGenerators[saltLen]
-	if !ok {
-		dummy := NewDummySaltGenerator()
-		saltGenerators[saltLen] = dummy
-		muGenerators.Unlock()
-		defer func() {
-			dummy.Success = err == nil
-			dummy.Closed = true
-		}()
-		switch DefaultSaltGeneratorType {
-		case IodizedSaltGeneratorType:
-			sg, err = NewIodizedSaltGenerator(masterKey, saltLen, DefaultBucketSize, true)
-			if err != nil {
-				return nil, err
-			}
-		case RandomSaltGeneratorType:
-			sg, err = NewRandomSaltGenerator(DefaultBucketSize, true)
-			if err != nil {
-				return nil, err
-			}
-		}
-		muGenerators.Lock()
-		saltGenerators[saltLen] = sg
-		muGenerators.Unlock()
-	} else {
-		muGenerators.Unlock()
-		if g, isBuilding := sg.(*DummySaltGenerator); isBuilding {
-			for !g.Closed {
-				// spinning
-			}
-			if g.Success {
-				muGenerators.Lock()
-				sg = saltGenerators[saltLen]
-				muGenerators.Unlock()
-			} else {
-				return GetSaltGenerator(masterKey, saltLen)
-			}
-		}
+func NewSaltGenerator(masterKey []byte, saltLen int) (SaltGenerator, error) {
+	switch DefaultSaltGeneratorType {
+	case IodizedSaltGeneratorType:
+		return NewIodizedSaltGenerator(masterKey, saltLen, DefaultBucketSize, true)
+	case RandomSaltGeneratorType:
+		return NewRandomSaltGenerator(saltLen, true)
+	default:
+		return nil, fmt.Errorf("unknown salt generator type: %v", DefaultSaltGeneratorType)
 	}
-	return sg, nil
 }
 
 type SaltGenerator interface {
@@ -82,100 +49,158 @@ type SaltGenerator interface {
 	Close() error
 }
 
+// IodizedSaltGenerator 使用外部熵源的 salt 生成器
 type IodizedSaltGenerator struct {
 	tokenBucket chan []byte
 	saltSize    int
 	fromPool    bool
-	muSource    sync.Mutex
-	source      []byte
-	begin       int
-	tokenLen    int
-	kdfInfo     []byte
-	salt        []byte
-	cnt         [32]byte
-	ctx         context.Context
-	cancel      func()
+
+	mu       sync.RWMutex
+	source   []byte
+	begin    int
+	tokenLen int
+	kdfInfo  []byte
+	salt     []byte
+	cnt      [32]byte
+
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func NewIodizedSaltGenerator(salt []byte, saltSize, bucketSize int, fromPool bool) (*IodizedSaltGenerator, error) {
-	resp, err := http.Get(DefaultIodizedSource)
+	// 获取外部熵源
+	source, kdfInfo, err := fetchEntropySource(salt)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to fetch entropy source: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	g := &IodizedSaltGenerator{
+		tokenBucket: make(chan []byte, bucketSize),
+		saltSize:    saltSize,
+		fromPool:    fromPool,
+		source:      source,
+		begin:       0,
+		tokenLen:    DefaultTokenLength,
+		kdfInfo:     kdfInfo,
+		salt:        append([]byte(nil), salt...), // 复制 salt 避免外部修改
+		ctx:         ctx,
+		cancel:      cancel,
+	}
+	go g.start()
+
+	return g, nil
+}
+
+func fetchEntropySource(salt []byte) ([]byte, []byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultHTTPTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", DefaultIodizedSource, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("error when fetching entropy source: %v %v", resp.StatusCode, resp.Status)
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, fmt.Errorf("HTTP error: %d %s", resp.StatusCode, resp.Status)
 	}
-	b, err := io.ReadAll(resp.Body)
+
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+
+	if len(body) == 0 {
+		return nil, nil, fmt.Errorf("empty response body")
+	}
+
+	// 生成 KDF info
 	var rnd [2]byte
 	fastrand.Read(rnd[:])
 	h := sha1.New()
 	h.Write(rnd[:])
 	h.Write(salt)
-	kdfInfo := h.Sum(b)
-	ctx, cancel := context.WithCancel(context.Background())
-	g := IodizedSaltGenerator{
-		tokenBucket: make(chan []byte, bucketSize),
-		saltSize:    saltSize,
-		fromPool:    fromPool,
-		source:      b,
-		begin:       0,
-		tokenLen:    5,
-		kdfInfo:     kdfInfo[:],
-		salt:        salt,
-		ctx:         ctx,
-		cancel:      cancel,
-	}
-	go g.start()
-	return &g, nil
+	kdfInfo := h.Sum(body)
+
+	return body, kdfInfo, nil
 }
 
 func (g *IodizedSaltGenerator) start() {
-	var salt []byte
 	for {
-		if g.fromPool {
-			salt = pool.Get(g.saltSize)
-		} else {
-			salt = make([]byte, g.saltSize)
+		salt := g.generateSalt()
+		if salt == nil {
+			continue
 		}
-		// lock has low cost for single thread
-		g.muSource.Lock()
-		tokenEnd := g.begin + g.tokenLen
-		if tokenEnd > len(g.source) {
-			g.begin = 0
-			g.tokenLen++
-			tokenEnd = g.begin + g.tokenLen
-		}
-		kdf := hkdf.New(sha1.New, g.source[g.begin:tokenEnd], g.cnt[:], g.kdfInfo)
-		g.begin += g.tokenLen / 3
-		common.BytesIncBigEndian(g.cnt[:])
-		g.muSource.Unlock()
-		if g.tokenLen >= 100 {
-			go func() {
-				// fetch the new source
-				if ns, e := NewIodizedSaltGenerator(g.salt, g.saltSize, 0, false); e == nil {
-					ns.Close()
-					g.muSource.Lock()
-					g.source = ns.source
-					g.kdfInfo = ns.kdfInfo
-					g.begin = ns.begin
-					g.tokenLen = ns.tokenLen
-					g.muSource.Unlock()
-				}
-			}()
-		}
-		_, err := io.ReadFull(kdf, salt)
-		if err != nil {
-			log.Fatal("IodizedSaltGenerator.start:", err)
-		}
+
 		select {
 		case <-g.ctx.Done():
-			break
+			g.putSalt(salt)
+			return
 		case g.tokenBucket <- salt:
 		}
+	}
+}
+
+func (g *IodizedSaltGenerator) generateSalt() []byte {
+	var salt []byte
+	if g.fromPool {
+		salt = pool.Get(g.saltSize)
+	} else {
+		salt = make([]byte, g.saltSize)
+	}
+
+	g.mu.Lock()
+
+	tokenEnd := g.begin + g.tokenLen
+	if tokenEnd > len(g.source) {
+		g.begin = 0
+		g.tokenLen++
+		tokenEnd = g.begin + g.tokenLen
+	}
+
+	kdf := hkdf.New(sha1.New, g.source[g.begin:tokenEnd], g.cnt[:], g.kdfInfo)
+	g.begin += g.tokenLen / 3
+	common.BytesIncBigEndian(g.cnt[:])
+
+	g.mu.Unlock()
+
+	// 检查是否需要刷新熵源
+	if g.tokenLen >= 100 {
+		go g.refreshSource()
+	}
+
+	if _, err := io.ReadFull(kdf, salt); err != nil {
+		panic(fmt.Sprintf("IodizedSaltGenerator.start: %v", err))
+	}
+
+	return salt
+}
+
+// refreshSource 刷新外部熵源
+func (g *IodizedSaltGenerator) refreshSource() {
+	newSource, newKdfInfo, err := fetchEntropySource(g.salt)
+	if err != nil {
+		g.Close()
+		return
+	}
+
+	g.mu.Lock()
+	g.source = newSource
+	g.kdfInfo = newKdfInfo
+	g.begin = 0
+	g.tokenLen = DefaultTokenLength
+	g.mu.Unlock()
+}
+
+func (g *IodizedSaltGenerator) putSalt(salt []byte) {
+	if g.fromPool {
+		pool.Put(salt)
 	}
 }
 
@@ -185,9 +210,16 @@ func (g *IodizedSaltGenerator) Get() []byte {
 
 func (g *IodizedSaltGenerator) Close() error {
 	g.cancel()
+
+	close(g.tokenBucket)
+	for salt := range g.tokenBucket {
+		g.putSalt(salt)
+	}
+
 	return nil
 }
 
+// RandomSaltGenerator 随机 salt 生成器
 type RandomSaltGenerator struct {
 	saltSize int
 	fromPool bool
@@ -212,23 +244,5 @@ func (g *RandomSaltGenerator) Get() []byte {
 }
 
 func (g *RandomSaltGenerator) Close() error {
-	return nil
-}
-
-type DummySaltGenerator struct {
-	Closed  bool
-	Success bool
-}
-
-func NewDummySaltGenerator() *DummySaltGenerator {
-	return &DummySaltGenerator{}
-}
-
-func (g *DummySaltGenerator) Get() []byte {
-	return nil
-}
-
-func (g *DummySaltGenerator) Close() error {
-	g.Closed = true
 	return nil
 }

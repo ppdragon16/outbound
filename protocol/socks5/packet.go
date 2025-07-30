@@ -6,10 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/netip"
 
 	"github.com/daeuniverse/outbound/common"
-	"github.com/daeuniverse/outbound/netproxy"
 
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/infra/socks"
@@ -17,56 +15,53 @@ import (
 
 // PktConn .
 type PktConn struct {
-	netproxy.PacketConn
-	ctrlConn  netproxy.Conn // tcp control conn
-	target    string
-	proxyAddr string
+	net.PacketConn
+	ctrlConn net.Conn // tcp control conn
+	server   net.Addr
 }
 
 // NewPktConn returns a PktConn, the writeAddr must be *net.UDPAddr or *net.UnixAddr.
-func NewPktConn(c netproxy.PacketConn, proxyAddr string, targetAddr string, ctrlConn netproxy.Conn) *PktConn {
+func NewPktConn(c net.PacketConn, ctrlConn net.Conn, server net.Addr) *PktConn {
 	pc := &PktConn{
 		PacketConn: c,
-		target:     targetAddr,
-		proxyAddr:  proxyAddr,
 		ctrlConn:   ctrlConn,
+		server:     server,
 	}
 
-	if ctrlConn != nil {
-		go func() {
-			buf := pool.Get(1)
-			defer pool.Put(buf)
-			for {
-				_, err := ctrlConn.Read(buf)
-				if err, ok := err.(net.Error); ok && err.Timeout() {
-					continue
-				}
-				// log.F("[socks5] dialudp udp associate end")
-				return
+	go func() {
+		buf := pool.Get(1)
+		defer pool.Put(buf)
+		for {
+			_, err := ctrlConn.Read(buf)
+			if err, ok := err.(net.Error); ok && err.Timeout() {
+				continue
 			}
-		}()
-	}
+			pc.PacketConn.Close()
+			// log.F("[socks5] dialudp udp associate end")
+			return
+		}
+	}()
 
 	return pc
 }
 
 // ReadFrom overrides the original function from transport.PacketConn.
-func (pc *PktConn) ReadFrom(b []byte) (int, netip.AddrPort, error) {
-	n, _, target, err := pc.readFrom(b)
-	return n, target, err
+func (pc *PktConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	n, _, from, err := pc.readFrom(b)
+	return n, from, err
 }
 
-func (pc *PktConn) readFrom(b []byte) (int, netip.AddrPort, netip.AddrPort, error) {
+func (pc *PktConn) readFrom(b []byte) (n int, lAddr net.Addr, rAddr net.Addr, err error) {
 	buf := pool.Get(len(b))
 	defer pool.Put(buf)
 
-	n, raddr, err := pc.PacketConn.ReadFrom(buf)
+	n, rAddr, err = pc.PacketConn.ReadFrom(buf)
 	if err != nil {
-		return n, raddr, netip.AddrPort{}, err
+		return
 	}
 
 	if n < 3 {
-		return n, raddr, netip.AddrPort{}, errors.New("not enough size to get addr")
+		return n, rAddr, nil, errors.New("not enough size to get addr")
 	}
 
 	// https://www.rfc-editor.org/rfc/rfc1928#section-7
@@ -77,22 +72,21 @@ func (pc *PktConn) readFrom(b []byte) (int, netip.AddrPort, netip.AddrPort, erro
 	// +----+------+------+----------+----------+----------+
 	tgtAddr := socks.SplitAddr(buf[3:n])
 	if tgtAddr == nil {
-		return n, raddr, netip.AddrPort{}, errors.New("can not get target addr")
+		return n, rAddr, nil, errors.New("can not get target addr")
 	}
 
-	target, err := common.ResolveUDPAddr(tgtAddr.String())
+	lAddr, err = common.ResolveUDPAddr(tgtAddr.String())
 	if err != nil {
-		return n, raddr, netip.AddrPort{}, errors.New("wrong target addr")
+		return n, rAddr, nil, errors.New("wrong target addr")
 	}
 
 	n = copy(b, buf[3+len(tgtAddr):n])
-	return n, raddr, target.AddrPort(), err
+	return
 }
 
 // WriteTo overrides the original function from transport.PacketConn.
-func (pc *PktConn) WriteTo(b []byte, addr string) (int, error) {
-	target, err := socks.ParseAddr(addr)
-
+func (pc *PktConn) WriteTo(b []byte, addr net.Addr) (int, error) {
+	target, err := socks.ParseAddr(addr.String())
 	if err != nil {
 		return 0, fmt.Errorf("invalid addr: %w", err)
 	}
@@ -105,7 +99,7 @@ func (pc *PktConn) WriteTo(b []byte, addr string) (int, error) {
 	copy(buf[3:], target)
 	copy(buf[3+tgtLen:], b)
 
-	n, err := pc.PacketConn.WriteTo(buf, pc.proxyAddr)
+	n, err := pc.PacketConn.WriteTo(buf, pc.server)
 	if n > tgtLen+3 {
 		return n - tgtLen - 3, err
 	}
@@ -115,18 +109,5 @@ func (pc *PktConn) WriteTo(b []byte, addr string) (int, error) {
 
 // Close .
 func (pc *PktConn) Close() error {
-	if pc.ctrlConn != nil {
-		pc.ctrlConn.Close()
-	}
-
-	return pc.PacketConn.Close()
-}
-
-func (c *PktConn) Read(b []byte) (n int, err error) {
-	n, _, err = c.ReadFrom(b)
-	return
-}
-
-func (c *PktConn) Write(b []byte) (n int, err error) {
-	return c.WriteTo(b, c.target)
+	return errors.Join(pc.ctrlConn.Close(), pc.PacketConn.Close())
 }

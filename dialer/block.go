@@ -17,26 +17,17 @@ type blockDialer struct {
 	DialCallback func()
 }
 
-func (d *blockDialer) DialContext(ctx context.Context, network, addr string) (c netproxy.Conn, err error) {
-	magicNetwork, err := netproxy.ParseMagicNetwork(network)
-	if err != nil {
-		return nil, err
-	}
-	switch magicNetwork.Network {
-	case "tcp":
-		return d.DialTcp(addr)
-	case "udp":
-		return d.DialUdp(addr)
+func (d *blockDialer) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
+	switch network {
+	case "tcp", "udp":
+		d.DialCallback()
+		return nil, net.ErrClosed
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
 }
 
-func (d *blockDialer) DialTcp(addr string) (c netproxy.Conn, err error) {
-	d.DialCallback()
-	return nil, net.ErrClosed
-}
-func (d *blockDialer) DialUdp(addr string) (c netproxy.PacketConn, err error) {
+func (d *blockDialer) ListenPacket(ctx context.Context, addr string) (c net.PacketConn, err error) {
 	d.DialCallback()
 	return nil, net.ErrClosed
 }

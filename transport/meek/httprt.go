@@ -69,11 +69,7 @@ func (c *httpTripperClient) getRoundTripper() http.RoundTripper {
 				if err != nil {
 					return nil, fmt.Errorf("[Meek]: dial to %s: %w", c.addr, err)
 				}
-				return &netproxy.FakeNetConn{
-					Conn:  rc,
-					LAddr: nil,
-					RAddr: nil,
-				}, nil
+				return rc, nil
 			},
 			TLSClientConfig: c.tlsConfig,
 		}

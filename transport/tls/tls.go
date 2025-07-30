@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -102,12 +103,8 @@ func NewTls(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string)
 	}, nil
 }
 
-func (s *Tls) DialContext(ctx context.Context, network, addr string) (c netproxy.Conn, err error) {
-	magicNetwork, err := netproxy.ParseMagicNetwork(network)
-	if err != nil {
-		return nil, err
-	}
-	switch magicNetwork.Network {
+func (s *Tls) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
+	switch network {
 	case "tcp":
 		rc, err := s.dialer.DialContext(ctx, network, s.addr)
 		if err != nil {
@@ -119,17 +116,13 @@ func (s *Tls) DialContext(ctx context.Context, network, addr string) (c netproxy
 		}
 
 		var tlsConn interface {
-			netproxy.Conn
+			net.Conn
 			Handshake() error
 		}
 
 		switch s.tlsImplentation {
 		case "tls":
-			tlsConn = tls.Client(&netproxy.FakeNetConn{
-				Conn:  rc,
-				LAddr: nil,
-				RAddr: nil,
-			}, s.tlsConfig)
+			tlsConn = tls.Client(rc, s.tlsConfig)
 
 		case "utls":
 			clientHelloID, err := nameToUtlsClientHelloID(s.utlsImitate)
@@ -137,11 +130,7 @@ func (s *Tls) DialContext(ctx context.Context, network, addr string) (c netproxy
 				return nil, err
 			}
 
-			tlsConn = utls.UClient(&netproxy.FakeNetConn{
-				Conn:  rc,
-				LAddr: nil,
-				RAddr: nil,
-			}, uTLSConfigFromTLSConfig(s.tlsConfig), *clientHelloID)
+			tlsConn = utls.UClient(rc, uTLSConfigFromTLSConfig(s.tlsConfig), *clientHelloID)
 
 		default:
 			return nil, fmt.Errorf("unknown tls implementation: %v", s.tlsImplentation)
@@ -159,4 +148,11 @@ func (s *Tls) DialContext(ctx context.Context, network, addr string) (c netproxy
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
+}
+
+func (s *Tls) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
+	if s.passthroughUdp {
+		return s.dialer.ListenPacket(ctx, addr)
+	}
+	return nil, fmt.Errorf("%w: tls+udp", netproxy.UnsupportedTunnelTypeError)
 }

@@ -2,19 +2,15 @@ package dialer
 
 import (
 	"github.com/daeuniverse/outbound/netproxy"
-	softwindDirect "github.com/daeuniverse/outbound/protocol/direct"
+	"github.com/daeuniverse/outbound/protocol/direct"
 )
 
-func NewDirectDialer(option *ExtraOption, fullcone bool) (netproxy.Dialer, *Property) {
+func NewDirectDialer(option *ExtraOption) (netproxy.Dialer, *Property) {
 	property := &Property{
 		Name:     "direct",
 		Address:  "",
 		Protocol: "",
 		Link:     "",
 	}
-	if fullcone {
-		return softwindDirect.FullconeDirect, property
-	} else {
-		return softwindDirect.SymmetricDirect, property
-	}
+	return direct.Direct, property
 }

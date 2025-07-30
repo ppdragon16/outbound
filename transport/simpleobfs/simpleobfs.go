@@ -64,12 +64,8 @@ func NewSimpleObfs(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link 
 	}, nil
 }
 
-func (s *SimpleObfs) DialContext(ctx context.Context, network, addr string) (c netproxy.Conn, err error) {
-	magicNetwork, err := netproxy.ParseMagicNetwork(network)
-	if err != nil {
-		return nil, err
-	}
-	switch magicNetwork.Network {
+func (s *SimpleObfs) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
+	switch network {
 	case "tcp":
 		rc, err := s.dialer.DialContext(ctx, network, s.addr)
 		if err != nil {
@@ -95,4 +91,8 @@ func (s *SimpleObfs) DialContext(ctx context.Context, network, addr string) (c n
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
+}
+
+func (s *SimpleObfs) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
+	return s.dialer.ListenPacket(ctx, addr)
 }

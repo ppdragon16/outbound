@@ -5,7 +5,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/quic-go"
 )
 
@@ -71,8 +70,6 @@ func (q *safeStreamConn) LocalAddr() net.Addr {
 func (q *safeStreamConn) RemoteAddr() net.Addr {
 	return q.rAddr
 }
-
-var _ netproxy.Conn = &safeStreamConn{}
 
 func NewSafeStreamConn(stream quic.Stream, lAddr, rAddr net.Addr, closeDeferFn func()) *safeStreamConn {
 	return &safeStreamConn{Stream: stream, lAddr: lAddr, rAddr: rAddr, closeDeferFn: closeDeferFn}

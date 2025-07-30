@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/netip"
 	"strconv"
 	"strings"
 
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 
 	"github.com/daeuniverse/outbound/pool"
@@ -23,70 +23,76 @@ func NewSocks5Dialer(s string, d netproxy.Dialer) (netproxy.Dialer, error) {
 	return NewSocks5(s, d)
 }
 
-func (s *Socks5) DialContext(ctx context.Context, network, addr string) (netproxy.Conn, error) {
-	magicNetwork, err := netproxy.ParseMagicNetwork(network)
-	if err != nil {
-		return nil, err
-	}
-	switch magicNetwork.Network {
+func (s *Socks5) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	switch network {
 	case "tcp":
-		c, err := s.dialer.DialContext(ctx, network, s.addr)
+		c, err := s.dialer.DialContext(ctx, "tcp", s.addr)
 		if err != nil {
 			return nil, fmt.Errorf("[socks5]: dial to %s error: %w", s.addr, err)
 		}
-		if _, err := s.connect(c, addr, socks.CmdConnect); err != nil {
+		_, err = common.Invoke(ctx, func() (socks.Addr, error) {
+			return s.connect(c, address, socks.CmdConnect)
+		}, func() {
 			c.Close()
-			return nil, err
-		}
-		return c, nil
+		})
+		return c, err
 	case "udp":
-		tcpNetwork := netproxy.MagicNetwork{
-			Network: "tcp",
-			Mark:    magicNetwork.Mark,
-		}.Encode()
-		c, err := s.dialer.DialContext(ctx, tcpNetwork, s.addr)
+		c, err := s.ListenPacket(ctx, address)
 		if err != nil {
-			return nil, fmt.Errorf("[socks5]: dial to %s error: %w", s.addr, err)
-		}
-
-		// Get the proxy addr we should dial.
-		var uAddr socks.Addr
-		if uAddr, err = s.connect(c, addr, socks.CmdUDPAssociate); err != nil {
-			c.Close()
 			return nil, err
 		}
-
-		buf := pool.Get(socks.MaxAddrLen)
-		defer pool.Put(buf)
-
-		uAddress := uAddr.String()
-		h, p, _ := net.SplitHostPort(uAddress)
-		// if returned bind ip is unspecified
-		if ip, err := netip.ParseAddr(h); err == nil && ip.IsUnspecified() {
-			// indicate using conventional addr
-			h, _, _ = net.SplitHostPort(s.addr)
-			uAddress = net.JoinHostPort(h, p)
-		}
-
-		conn, err := s.dialer.DialContext(ctx, network, uAddress)
-		if err != nil {
-			return nil, fmt.Errorf("[socks5] dialudp to %s error: %w", uAddress, err)
-		}
-		pc, ok := conn.(netproxy.PacketConn)
-		if !ok {
-			return nil, fmt.Errorf("[socks5] forwarder is not transport.PacketConn")
-		}
-
-		return NewPktConn(pc, uAddress, addr, c), nil
+		return &netproxy.BindPacketConn{
+			PacketConn: c,
+			Address:    netproxy.NewProxyAddr("udp", address),
+		}, nil
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
 }
 
+func (s *Socks5) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
+	ctrlConn, err := s.dialer.DialContext(ctx, "tcp", s.addr)
+	if err != nil {
+		return nil, fmt.Errorf("[socks5]: dial to %s error: %w", s.addr, err)
+	}
+	// Get the proxy addr we should dial.
+	// TODO: target should be laddr of udp conn
+	uAddr, err := common.Invoke(ctx, func() (socks.Addr, error) {
+		return s.connect(ctrlConn, addr, socks.CmdUDPAssociate)
+	}, func() {
+		ctrlConn.Close()
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	buf := pool.Get(socks.MaxAddrLen)
+	defer pool.Put(buf)
+
+	uAddress := uAddr.String()
+	h, p, err := net.SplitHostPort(uAddress)
+	if err != nil {
+		return nil, fmt.Errorf("[socks5] invalid bind address: %w", err)
+	}
+	// if returned bind ip is unspecified
+	if h == "" {
+		// indicate using conventional addr
+		h, _, _ = net.SplitHostPort(s.addr)
+		uAddress = net.JoinHostPort(h, p)
+	}
+
+	conn, err := s.dialer.ListenPacket(ctx, uAddress)
+	if err != nil {
+		return nil, fmt.Errorf("[socks5] dialudp to %s error: %w", uAddress, err)
+	}
+
+	return NewPktConn(conn, ctrlConn, netproxy.NewProxyAddr("udp", uAddress)), nil
+}
+
 // connect takes an existing connection to a socks5 proxy server,
 // and commands the server to extend that connection to target,
 // which must be a canonical address with a host and port.
-func (s *Socks5) connect(conn netproxy.Conn, target string, cmd byte) (addr socks.Addr, err error) {
+func (s *Socks5) connect(conn net.Conn, target string, cmd byte) (addr socks.Addr, err error) {
 	// the size here is just an estimate
 	buf := pool.Get(socks.MaxAddrLen)
 	defer pool.Put(buf)

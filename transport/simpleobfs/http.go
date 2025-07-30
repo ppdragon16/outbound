@@ -7,18 +7,18 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 )
 
 // HTTPObfs is shadowsocks http simple-obfs implementation
 type HTTPObfs struct {
-	netproxy.Conn
+	net.Conn
 	host          string
 	port          string
 	path          string
@@ -93,7 +93,7 @@ func (ho *HTTPObfs) Write(b []byte) (int, error) {
 }
 
 // NewHTTPObfs return a HTTPObfs
-func NewHTTPObfs(conn netproxy.Conn, host string, port string, path string) netproxy.Conn {
+func NewHTTPObfs(conn net.Conn, host string, port string, path string) net.Conn {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}

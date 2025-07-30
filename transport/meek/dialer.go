@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 
@@ -69,12 +70,8 @@ func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 	return m, nil
 }
 
-func (m *Dialer) DialContext(ctx context.Context, network, addr string) (c netproxy.Conn, err error) {
-	magicNetwork, err := netproxy.ParseMagicNetwork(network)
-	if err != nil {
-		return nil, err
-	}
-	switch magicNetwork.Network {
+func (m *Dialer) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
+	switch network {
 	case "tcp":
 		tripper := &httpTripperClient{
 			nextDialer: m.nextDialer,
@@ -98,7 +95,7 @@ func (m *Dialer) DialContext(ctx context.Context, network, addr string) (c netpr
 			return nil, err
 		}
 
-		return session.(netproxy.Conn), nil
+		return session.(net.Conn), nil
 	case "udp":
 		return nil, fmt.Errorf("%w: meek+udp", netproxy.UnsupportedTunnelTypeError)
 	default:

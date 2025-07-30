@@ -3,147 +3,136 @@ package shadowsocks
 import (
 	"encoding/binary"
 	"fmt"
-	"io"
 	"net"
+	"net/netip"
+	"strconv"
 
 	"github.com/daeuniverse/outbound/pool"
-	"github.com/daeuniverse/outbound/protocol"
 )
 
-func ParseMetadataType(t byte) protocol.MetadataType {
-	switch t {
-	case 1:
-		return protocol.MetadataTypeIPv4
-	case 3:
-		return protocol.MetadataTypeDomain
-	case 4:
-		return protocol.MetadataTypeIPv6
-	case 5:
-		return protocol.MetadataTypeMsg
-	default:
-		return protocol.MetadataTypeInvalid
-	}
-}
+type AddressType uint8
 
-func MetadataTypeToByte(typ protocol.MetadataType) byte {
-	switch typ {
-	case protocol.MetadataTypeIPv4:
-		return 1
-	case protocol.MetadataTypeDomain:
-		return 3
-	case protocol.MetadataTypeIPv6:
-		return 4
-	case protocol.MetadataTypeMsg:
-		return 5
-	default:
-		return 0
-	}
-}
-
-type Metadata struct {
-	protocol.Metadata
-	LenMsgBody uint32
-}
+// Address type constants for Shadowsocks protocol
+const (
+	AddressTypeIPv4   AddressType = 1
+	AddressTypeDomain AddressType = 3
+	AddressTypeIPv6   AddressType = 4
+)
 
 var (
-	ErrInvalidMetadata = fmt.Errorf("invalid metadata")
+	ErrInvalidAddress = fmt.Errorf("invalid address")
 )
 
-func BytesSizeForMetadata(firstTwoByte []byte) (int, error) {
-	if len(firstTwoByte) < 2 {
-		return 0, fmt.Errorf("%w: too short", ErrInvalidMetadata)
-	}
-	switch ParseMetadataType(firstTwoByte[0]) {
-	case protocol.MetadataTypeIPv4:
-		return 1 + 4 + 2, nil
-	case protocol.MetadataTypeIPv6:
-		return 1 + 16 + 2, nil
-	case protocol.MetadataTypeDomain:
-		lenDN := int(firstTwoByte[1])
-		return 1 + 1 + lenDN + 2, nil
-	case protocol.MetadataTypeMsg:
-		return 1 + 1 + 4, nil
-	default:
-		return 0, fmt.Errorf("BytesSizeForMetadata: %w: invalid type: %v", ErrInvalidMetadata, firstTwoByte[0])
-	}
+// AddressInfo represents decoded address information
+type AddressInfo struct {
+	Type     AddressType
+	Hostname string
+	IP       netip.Addr
+	Port     uint16
 }
 
-func NewMetadata(bytesMetadata []byte) (*Metadata, error) {
-	if len(bytesMetadata) < 2 {
-		return nil, io.ErrUnexpectedEOF
+// EncodeAddressToPool encodes address information to buffer from pool
+// The returned buffer MUST be put back to pool after use
+func EncodeAddress(addr *AddressInfo) (buf []byte, n int, err error) {
+	switch addr.Type {
+	case AddressTypeIPv4:
+		if !addr.IP.Is4() {
+			return nil, 0, fmt.Errorf("invalid IPv4 address: %v", addr.Hostname)
+		}
+		n = 1 + 4 + 2 // type + ip + port
+		buf = pool.Get(n)
+		buf[0] = byte(AddressTypeIPv4)
+		copy(buf[1:], addr.IP.AsSlice())
+		binary.BigEndian.PutUint16(buf[5:], addr.Port)
+	case AddressTypeIPv6:
+		if !addr.IP.Is6() {
+			return nil, 0, fmt.Errorf("invalid IPv6 address: %v", addr.Hostname)
+		}
+		n = 1 + 16 + 2 // type + ip + port
+		buf = pool.Get(n)
+		buf[0] = byte(AddressTypeIPv6)
+		copy(buf[1:], addr.IP.AsSlice())
+		binary.BigEndian.PutUint16(buf[17:], addr.Port)
+	case AddressTypeDomain:
+		lenDN := len(addr.Hostname)
+		if lenDN > 255 {
+			return nil, 0, fmt.Errorf("domain name too long: %d bytes", lenDN)
+		}
+		n = 1 + 1 + lenDN + 2 // type + len + domain + port
+		buf = pool.Get(n)
+		buf[0] = byte(AddressTypeDomain)
+		buf[1] = uint8(lenDN)
+		copy(buf[2:], addr.Hostname)
+		binary.BigEndian.PutUint16(buf[2+lenDN:], addr.Port)
+	default:
+		return nil, 0, fmt.Errorf("unsupported address type: %v", addr.Type)
 	}
-	meta := new(Metadata)
-	meta.Type = ParseMetadataType(bytesMetadata[0])
-	length, err := BytesSizeForMetadata(bytesMetadata)
+	return buf, n, nil
+}
+
+// DecodeAddress decodes address from buffer
+func DecodeAddress(data []byte) (info *AddressInfo, n int, err error) {
+	if len(data) < 2 {
+		return nil, 0, fmt.Errorf("%w: too short", ErrInvalidAddress)
+	}
+
+	info = &AddressInfo{Type: AddressType(data[0])}
+
+	switch info.Type {
+	case AddressTypeIPv4:
+		if len(data) < 7 { // 1 + 4 + 2
+			return nil, 0, fmt.Errorf("%w: IPv4 address too short", ErrInvalidAddress)
+		}
+		info.IP = netip.AddrFrom4([4]byte(data[1:5]))
+		info.Port = binary.BigEndian.Uint16(data[5:7])
+		n = 7
+	case AddressTypeIPv6:
+		if len(data) < 19 { // 1 + 16 + 2
+			return nil, 0, fmt.Errorf("%w: IPv6 address too short", ErrInvalidAddress)
+		}
+		info.IP = netip.AddrFrom16([16]byte(data[1:17]))
+		info.Port = binary.BigEndian.Uint16(data[17:19])
+		n = 19
+	case AddressTypeDomain:
+		if len(data) < 4 { // 1 + 1 + min_domain + 2
+			return nil, 0, fmt.Errorf("%w: domain address too short", ErrInvalidAddress)
+		}
+		domainLen := int(data[1])
+		n = 1 + 1 + domainLen + 2
+		if len(data) < n {
+			return nil, 0, fmt.Errorf("%w: domain address too short", ErrInvalidAddress)
+		}
+		info.Hostname = string(data[2 : 2+domainLen])
+		info.Port = binary.BigEndian.Uint16(data[2+domainLen : 4+domainLen])
+	default:
+		return nil, 0, fmt.Errorf("%w: invalid type: %v", ErrInvalidAddress, data[0])
+	}
+	return
+}
+
+func AddressFromString(addr string) (*AddressInfo, error) {
+	hostname, port_, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
 	}
-	if len(bytesMetadata) < length {
-		return nil, fmt.Errorf("%w: too short", ErrInvalidMetadata)
-	}
-	switch meta.Type {
-	case protocol.MetadataTypeIPv4:
-		meta.Hostname = net.IP(bytesMetadata[1:5]).String()
-		meta.Port = binary.BigEndian.Uint16(bytesMetadata[5:])
-		return meta, nil
-	case protocol.MetadataTypeIPv6:
-		meta.Hostname = net.IP(bytesMetadata[1:17]).String()
-		meta.Port = binary.BigEndian.Uint16(bytesMetadata[17:])
-		return meta, nil
-	case protocol.MetadataTypeDomain:
-		lenDN := int(bytesMetadata[1])
-		meta.Hostname = string(bytesMetadata[2 : 2+lenDN])
-		meta.Port = binary.BigEndian.Uint16(bytesMetadata[2+lenDN:])
-		return meta, nil
-	case protocol.MetadataTypeMsg:
-		meta.Cmd = protocol.MetadataCmd(bytesMetadata[1])
-		meta.LenMsgBody = binary.BigEndian.Uint32(bytesMetadata[2:])
-		return meta, nil
-	default:
-		return nil, fmt.Errorf("NewMetadata: %w: invalid type: %v", ErrInvalidMetadata, meta.Type)
-	}
-}
-
-func (meta *Metadata) Bytes() (b []byte, err error) {
-	poolBytes, err := meta.BytesFromPool()
+	port, err := strconv.ParseUint(port_, 10, 16)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid port: %v", port_)
 	}
-	b = make([]byte, len(poolBytes))
-	copy(b, poolBytes)
-	pool.Put(poolBytes)
-	return b, nil
-}
-func (meta *Metadata) BytesFromPool() (b []byte, err error) {
-	switch meta.Type {
-	case protocol.MetadataTypeIPv4:
-		ip := net.ParseIP(meta.Hostname)
-		if ip == nil {
-			return nil, fmt.Errorf("not a valid ipv4: %v", meta.Hostname)
+
+	info := &AddressInfo{Port: uint16(port)}
+
+	ip, err := netip.ParseAddr(hostname)
+	if err != nil {
+		info.Type = AddressTypeDomain
+		info.Hostname = hostname
+	} else {
+		info.IP = ip
+		if ip.Is4() {
+			info.Type = AddressTypeIPv4
+		} else {
+			info.Type = AddressTypeIPv6
 		}
-		b = pool.Get(1 + 4 + 2)
-		copy(b[1:], ip.To4()[:4])
-		binary.BigEndian.PutUint16(b[5:], meta.Port)
-	case protocol.MetadataTypeIPv6:
-		ip := net.ParseIP(meta.Hostname)
-		if ip == nil {
-			return nil, fmt.Errorf("not a valid ipv6: %v", meta.Hostname)
-		}
-		b = pool.Get(1 + 16 + 2)
-		copy(b[1:], ip[:16])
-		binary.BigEndian.PutUint16(b[17:], meta.Port)
-	case protocol.MetadataTypeDomain:
-		hostname := []byte(meta.Hostname)
-		lenDN := len(hostname)
-		b = pool.Get(1 + 1 + lenDN + 2)
-		b[1] = uint8(lenDN)
-		copy(b[2:], hostname)
-		binary.BigEndian.PutUint16(b[2+lenDN:], meta.Port)
-	case protocol.MetadataTypeMsg:
-		b = pool.Get(1 + 1 + 4)
-		b[1] = uint8(meta.Cmd)
-		binary.BigEndian.PutUint32(b[2:], meta.LenMsgBody)
 	}
-	b[0] = MetadataTypeToByte(meta.Type)
-	return b, nil
+	return info, nil
 }
