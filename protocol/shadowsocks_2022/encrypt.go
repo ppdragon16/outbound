@@ -9,25 +9,23 @@ import (
 )
 
 var (
-	Shadowsocks2022ReusedInfo = "shadowsocks 2022 session subkey"
+	Shadowsocks2022ReusedInfo         = "shadowsocks 2022 session subkey"
+	Shadowsocks2022IdentityHeaderInfo = "shadowsocks 2022 identity subkey"
 )
 
-func GenerateSubKey(masterKey []byte, salt []byte) (subKey []byte, err error) {
+func GenerateSubKey(psk []byte, salt []byte, context string) (subKey []byte) {
 	// TODO: SaltLen or KeyLen
-	subKey = pool.GetBuffer(len(masterKey))
+	subKey = pool.GetBuffer(len(psk))
 	keyMaterial := pool.GetBytesBuffer()
 	defer pool.PutBytesBuffer(keyMaterial)
-	keyMaterial.Write(masterKey)
+	keyMaterial.Write(psk)
 	keyMaterial.Write(salt)
-	blake3.DeriveKey(subKey, Shadowsocks2022ReusedInfo, keyMaterial.Bytes())
+	blake3.DeriveKey(subKey, context, keyMaterial.Bytes())
 	return
 }
 
 func CreateCipher(masterKey []byte, salt []byte, cipherConf *ciphers.CipherConf2022) (cipher cipher.AEAD, err error) {
-	subKey, err := GenerateSubKey(masterKey, salt)
+	subKey := GenerateSubKey(masterKey, salt, Shadowsocks2022ReusedInfo)
 	defer pool.PutBuffer(subKey)
-	if err != nil {
-		return nil, err
-	}
 	return cipherConf.NewCipher(subKey)
 }

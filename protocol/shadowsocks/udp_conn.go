@@ -68,7 +68,8 @@ func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	}
 	buf.Write(cipher.Seal(nil, ciphers.ZeroNonce[:c.cipherConf.NonceLen], payload.Bytes(), nil))
 
-	return c.Conn.Write(buf.Bytes())
+	_, err = c.Conn.Write(buf.Bytes())
+	return len(b), err
 }
 
 func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {

@@ -2,11 +2,13 @@ package shadowsocks_2022
 
 import (
 	"bytes"
+	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/daeuniverse/outbound/protocol/shadowsocks"
 	disk_bloom "github.com/mzz2017/disk-bloom"
 	"github.com/samber/oops"
+	"lukechampine.com/blake3"
 )
 
 const (
@@ -33,7 +36,8 @@ type TCPConn struct {
 	net.Conn
 	addr       *shadowsocks.AddressInfo
 	cipherConf *ciphers.CipherConf2022
-	masterKey  []byte
+	pskList    [][]byte
+	uPSK       []byte
 	sg         shadowsocks.SaltGenerator
 
 	cipherRead  cipher.AEAD
@@ -56,12 +60,13 @@ type Key struct {
 	MasterKey  []byte
 }
 
-func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf2022, masterKey []byte, sg shadowsocks.SaltGenerator, addr *shadowsocks.AddressInfo, bloom *disk_bloom.FilterGroup) (crw *TCPConn, err error) {
+func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf2022, pskList [][]byte, uPSK []byte, sg shadowsocks.SaltGenerator, addr *shadowsocks.AddressInfo, bloom *disk_bloom.FilterGroup) (crw *TCPConn, err error) {
 	return &TCPConn{
 		Conn:       conn,
 		addr:       addr,
 		cipherConf: conf,
-		masterKey:  masterKey,
+		pskList:    pskList,
+		uPSK:       uPSK,
 		sg:         sg,
 		nonceRead:  make([]byte, conf.NonceLen),
 		nonceWrite: make([]byte, conf.NonceLen),
@@ -98,7 +103,7 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 		if err != nil {
 			return 0, err
 		}
-		c.cipherRead, err = CreateCipher(c.masterKey, salt, c.cipherConf)
+		c.cipherRead, err = CreateCipher(c.uPSK, salt, c.cipherConf)
 		if err != nil {
 			return 0, oops.Wrapf(err, "fail to initiate cipher")
 		}
@@ -210,27 +215,53 @@ func EncodeRequestHeader(typ uint8, timestamp uint64, address *shadowsocks.Addre
 	return fixedHeader, varHeader, nil
 }
 
+func (c *TCPConn) writeIdentityHeader(buf *bytes.Buffer, salt []byte) error {
+	for i := 0; i < len(c.pskList)-1; i++ {
+		identity_subkey := GenerateSubKey(c.pskList[i], salt, Shadowsocks2022IdentityHeaderInfo)
+		plaintext := blake3.Sum512(c.pskList[i+1])
+		identityHeader := pool.GetBuffer(aes.BlockSize)
+		b, err := c.cipherConf.NewBlockCipher(identity_subkey)
+		if err != nil {
+			debug.PrintStack()
+			return err
+		}
+		b.Encrypt(identityHeader, plaintext[:aes.BlockSize])
+		buf.Write(identityHeader)
+	}
+	return nil
+}
+
 func (c *TCPConn) Write(b []byte) (n int, err error) {
+	n = len(b)
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
 	buf := pool.GetBytesBuffer()
 	defer pool.PutBytesBuffer(buf)
 	if !c.onceWrite {
-		// Generate salt and setup encryption
+		// Generate salt
 		salt := c.sg.Get()
 		defer pool.PutBuffer(salt)
-		c.cipherWrite, err = CreateCipher(c.masterKey, salt, c.cipherConf)
+		buf.Write(salt)
+
+		err := c.writeIdentityHeader(buf, salt)
 		if err != nil {
+			debug.PrintStack()
+			return 0, oops.Wrapf(err, "fail to write identity header")
+		}
+
+		// Setup encryption
+		c.cipherWrite, err = CreateCipher(c.uPSK, salt, c.cipherConf)
+		if err != nil {
+			debug.PrintStack()
 			return 0, oops.Wrapf(err, "fail to initiate cipher")
 		}
-		// Add salt
-		buf.Write(salt)
 
 		// Add Request headers
 		fixedHeader, varHeader, err := EncodeRequestHeader(HeaderTypeClientStream, uint64(time.Now().Unix()), c.addr, &b)
 		defer pool.PutBytesBuffer(fixedHeader)
 		defer pool.PutBytesBuffer(varHeader)
 		if err != nil {
+			debug.PrintStack()
 			return 0, oops.Wrapf(err, "fail to encode request header")
 		}
 		buf.Write(c.cipherWrite.Seal(nil, c.nonceWrite, fixedHeader.Bytes(), nil))
@@ -241,11 +272,12 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 		c.onceWrite = true
 	}
 	if c.cipherWrite == nil {
+		debug.PrintStack()
 		return 0, oops.Wrapf(err, "cipher is not initialized")
 	}
 	c.seal(buf, b)
 	_, err = c.Conn.Write(buf.Bytes())
-	return len(b), err
+	return n, err
 }
 
 func (c *TCPConn) seal(buf *bytes.Buffer, payload []byte) {

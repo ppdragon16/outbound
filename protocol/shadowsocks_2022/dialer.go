@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"fmt"
 	"net"
+	"strings"
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/netproxy"
@@ -17,35 +18,49 @@ func init() {
 }
 
 type Dialer struct {
-	proxyAddress string
-	nextDialer   netproxy.Dialer
-	conf         *ciphers.CipherConf2022
-	key          []byte
-	sg           shadowsocks.SaltGenerator
-	blockCipher  cipher.Block
+	proxyAddress       string
+	nextDialer         netproxy.Dialer
+	conf               *ciphers.CipherConf2022
+	pskList            [][]byte
+	uPSK               []byte
+	sg                 shadowsocks.SaltGenerator
+	blockCipherEncrypt cipher.Block
+	blockCipherDecrypt cipher.Block
 }
 
 func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
 	conf := ciphers.Aead2022CiphersConf[header.Cipher]
-	key, err := ciphers.ValidateBase64PSK(header.Password, conf.KeyLen)
+	keyStrList := strings.Split(header.Password, ":")
+	pskList := make([][]byte, len(keyStrList))
+	for i, keyStr := range keyStrList {
+		key, err := ciphers.ValidateBase64PSK(keyStr, conf.KeyLen)
+		if err != nil {
+			return nil, err
+		}
+		pskList[i] = key
+	}
+	uPSK := pskList[len(pskList)-1]
+	blockCipherEncrypt, err := conf.NewBlockCipher(pskList[0]) // iPSK0/uPSK
 	if err != nil {
 		return nil, err
 	}
-	sg, err := shadowsocks.NewSaltGenerator(key, conf.SaltLen)
+	blockCipherDecrypt, err := conf.NewBlockCipher(uPSK) // uPSK
 	if err != nil {
 		return nil, err
 	}
-	blockCipher, err := conf.NewBlockCipher(key)
+	sg, err := shadowsocks.NewRandomSaltGenerator(conf.SaltLen)
 	if err != nil {
 		return nil, err
 	}
 	return &Dialer{
-		proxyAddress: header.ProxyAddress,
-		nextDialer:   nextDialer,
-		conf:         conf,
-		key:          key,
-		sg:           sg,
-		blockCipher:  blockCipher,
+		proxyAddress:       header.ProxyAddress,
+		nextDialer:         nextDialer,
+		conf:               conf,
+		pskList:            pskList,
+		uPSK:               uPSK,
+		sg:                 sg,
+		blockCipherEncrypt: blockCipherEncrypt,
+		blockCipherDecrypt: blockCipherDecrypt,
 	}, nil
 }
 
@@ -61,7 +76,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 		if err != nil {
 			return nil, err
 		}
-		return NewTCPConn(conn, d.conf, d.key, d.sg, addrInfo, nil)
+		return NewTCPConn(conn, d.conf, d.pskList, d.uPSK, d.sg, addrInfo, nil)
 	case "udp":
 		conn, err := d.ListenPacket(ctx, d.proxyAddress)
 		if err != nil {
@@ -82,5 +97,5 @@ func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 	if err != nil {
 		return nil, err
 	}
-	return NewUdpConn(conn, d.conf, d.blockCipher, d.key, nil)
+	return NewUdpConn(conn, d.conf, d.blockCipherEncrypt, d.blockCipherDecrypt, d.pskList, d.uPSK, nil)
 }

@@ -36,19 +36,9 @@ type AddressInfo struct {
 // The returned buffer MUST be put back to pool after use
 func EncodeAddress(addr *AddressInfo) ([]byte, int, error) {
 	buf := pool.GetBytesBuffer()
-	defer pool.PutBytesBuffer(buf)
-	binary.Write(buf, binary.BigEndian, addr.Type)
+	buf.WriteByte(byte(addr.Type))
 	switch addr.Type {
-	case AddressTypeIPv4:
-		if !addr.IP.Is4() {
-			return nil, 0, fmt.Errorf("invalid IPv4 address: %v", addr.Hostname)
-		}
-		buf.Write(addr.IP.AsSlice())
-		binary.Write(buf, binary.BigEndian, addr.Port)
-	case AddressTypeIPv6:
-		if !addr.IP.Is6() {
-			return nil, 0, fmt.Errorf("invalid IPv6 address: %v", addr.Hostname)
-		}
+	case AddressTypeIPv4, AddressTypeIPv6:
 		buf.Write(addr.IP.AsSlice())
 		binary.Write(buf, binary.BigEndian, addr.Port)
 	case AddressTypeDomain:
@@ -56,7 +46,7 @@ func EncodeAddress(addr *AddressInfo) ([]byte, int, error) {
 		if lenDN > 255 {
 			return nil, 0, fmt.Errorf("domain name too long: %d bytes", lenDN)
 		}
-		binary.Write(buf, binary.BigEndian, uint8(lenDN))
+		buf.WriteByte(uint8(lenDN))
 		buf.WriteString(addr.Hostname)
 		binary.Write(buf, binary.BigEndian, addr.Port)
 	default:

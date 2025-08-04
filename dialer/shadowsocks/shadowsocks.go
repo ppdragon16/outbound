@@ -12,7 +12,6 @@ import (
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
-	"github.com/daeuniverse/outbound/protocol/shadowsocks"
 	"github.com/daeuniverse/outbound/transport/mux"
 	"github.com/daeuniverse/outbound/transport/simpleobfs"
 	"github.com/daeuniverse/outbound/transport/tls"
@@ -20,9 +19,6 @@ import (
 )
 
 func init() {
-	// Use random salt by default to decrease the boot time
-	shadowsocks.DefaultSaltGeneratorType = shadowsocks.RandomSaltGeneratorType
-
 	dialer.FromLinkRegister("shadowsocks", NewShadowsocksFromLink)
 	dialer.FromLinkRegister("ss", NewShadowsocksFromLink)
 }

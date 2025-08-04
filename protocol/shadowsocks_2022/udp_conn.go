@@ -2,7 +2,9 @@ package shadowsocks_2022
 
 import (
 	"bytes"
+	"crypto/aes"
 	"crypto/cipher"
+	"crypto/subtle"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -17,6 +19,7 @@ import (
 	"github.com/daeuniverse/outbound/protocol/shadowsocks"
 	disk_bloom "github.com/mzz2017/disk-bloom"
 	"github.com/samber/oops"
+	"lukechampine.com/blake3"
 )
 
 type UdpConn struct {
@@ -25,19 +28,24 @@ type UdpConn struct {
 	sessionID [8]byte
 	packetID  uint64
 
-	cipherConf  *ciphers.CipherConf2022
-	blockCipher cipher.Block
-	masterKey   []byte
-	bloom       *disk_bloom.FilterGroup
+	cipherConf         *ciphers.CipherConf2022
+	blockCipherEncrypt cipher.Block
+	blockCipherDecrypt cipher.Block
+
+	pskList [][]byte
+	uPSK    []byte
+	bloom   *disk_bloom.FilterGroup
 }
 
-func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipher cipher.Block, masterKey []byte, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
+func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipherEncrypt cipher.Block, blockCipherDecrypt cipher.Block, pskList [][]byte, uPSK []byte, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
 	u := UdpConn{
-		Conn:        conn,
-		cipherConf:  conf,
-		blockCipher: blockCipher,
-		masterKey:   masterKey,
-		bloom:       bloom,
+		Conn:               conn,
+		cipherConf:         conf,
+		blockCipherEncrypt: blockCipherEncrypt,
+		blockCipherDecrypt: blockCipherDecrypt,
+		pskList:            pskList,
+		uPSK:               uPSK,
+		bloom:              bloom,
 	}
 	// TODO: salt generator?
 	fastrand.Read(u.sessionID[:])
@@ -46,6 +54,23 @@ func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipher cipher.
 
 func (c *UdpConn) Close() error {
 	return c.Conn.Close()
+}
+
+func (c *UdpConn) writeIdentityHeader(buf *bytes.Buffer, separateHeader []byte) error {
+	for i := 0; i < len(c.pskList)-1; i++ {
+		identityHeader := pool.GetBuffer(aes.BlockSize)
+		defer pool.PutBuffer(identityHeader)
+
+		hash := blake3.Sum512(c.pskList[i+1])
+		subtle.XORBytes(identityHeader, hash[:aes.BlockSize], separateHeader)
+		b, err := c.cipherConf.NewBlockCipher(c.pskList[i])
+		if err != nil {
+			return err
+		}
+		b.Encrypt(identityHeader, identityHeader)
+		buf.Write(identityHeader)
+	}
+	return nil
 }
 
 func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
@@ -68,7 +93,7 @@ func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 
 	separateHeaderEncrypted := pool.GetBuffer(16)
 	defer pool.PutBuffer(separateHeaderEncrypted)
-	c.blockCipher.Encrypt(separateHeaderEncrypted, separateHeader.Bytes())
+	c.blockCipherEncrypt.Encrypt(separateHeaderEncrypted, separateHeader.Bytes())
 
 	// TODO: DEBUG
 	if len(separateHeaderEncrypted) != 16 {
@@ -77,6 +102,11 @@ func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 
 	buf.Write(separateHeaderEncrypted)
 
+	err = c.writeIdentityHeader(buf, separateHeader.Bytes())
+	if err != nil {
+		return 0, oops.Wrapf(err, "fail to write identity header")
+	}
+
 	message, err := EncodeMessage(HeaderTypeClientStream, uint64(time.Now().Unix()), targetAddr, b)
 	defer pool.PutBytesBuffer(message)
 	if err != nil {
@@ -84,13 +114,14 @@ func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	}
 
 	// Encrypt and send
-	cipher, err := CreateCipher(c.masterKey, separateHeader.Bytes()[:8], c.cipherConf)
+	cipher, err := CreateCipher(c.uPSK, separateHeader.Bytes()[:8], c.cipherConf)
 	if err != nil {
 		return 0, err
 	}
 	buf.Write(cipher.Seal(nil, separateHeader.Bytes()[4:16], message.Bytes(), nil))
 
-	return c.Conn.Write(buf.Bytes())
+	_, err = c.Conn.Write(buf.Bytes())
+	return len(b), err
 }
 
 func EncodeMessage(typ uint8, timestamp uint64, address *shadowsocks.AddressInfo, b []byte) (*bytes.Buffer, error) {
@@ -106,6 +137,7 @@ func EncodeMessage(typ uint8, timestamp uint64, address *shadowsocks.AddressInfo
 	binary.Write(message, binary.BigEndian, timestamp)
 	// No padding
 	binary.Write(message, binary.BigEndian, uint16(0))
+	// Socks Address
 	message.Write(addressBytes)
 	// Payload
 	message.Write(b)
@@ -124,10 +156,10 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 		return 0, nil, fmt.Errorf("short length to decrypt")
 	}
 
-	c.blockCipher.Decrypt(buf[:16], buf[:16])
+	c.blockCipherDecrypt.Decrypt(buf[:16], buf[:16])
 
 	payload := buf[16:n]
-	ciph, err := CreateCipher(c.masterKey, buf[:8], c.cipherConf)
+	ciph, err := CreateCipher(c.uPSK, buf[:8], c.cipherConf)
 	if err != nil {
 		return 0, nil, err
 	}

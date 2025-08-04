@@ -26,7 +26,7 @@ type Dialer struct {
 func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
 	conf := ciphers.AeadCiphersConf[header.Cipher]
 	key := common.EVPBytesToKey(header.Password, conf.KeyLen)
-	sg, err := NewSaltGenerator(key, conf.SaltLen)
+	sg, err := NewRandomSaltGenerator(conf.SaltLen)
 	if err != nil {
 		return nil, err
 	}
