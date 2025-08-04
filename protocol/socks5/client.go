@@ -66,8 +66,8 @@ func (s *Socks5) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 		return nil, err
 	}
 
-	buf := pool.Get(socks.MaxAddrLen)
-	defer pool.Put(buf)
+	buf := pool.GetBuffer(socks.MaxAddrLen)
+	defer pool.PutBuffer(buf)
 
 	uAddress := uAddr.String()
 	h, p, err := net.SplitHostPort(uAddress)
@@ -94,8 +94,8 @@ func (s *Socks5) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 // which must be a canonical address with a host and port.
 func (s *Socks5) connect(conn net.Conn, target string, cmd byte) (addr socks.Addr, err error) {
 	// the size here is just an estimate
-	buf := pool.Get(socks.MaxAddrLen)
-	defer pool.Put(buf)
+	buf := pool.GetBuffer(socks.MaxAddrLen)
+	defer pool.PutBuffer(buf)
 
 	buf = append(buf[:0], Version)
 	if len(s.user) > 0 && len(s.user) < 256 && len(s.password) < 256 {

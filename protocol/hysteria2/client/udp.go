@@ -77,8 +77,8 @@ func (u *udpConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
 		Addr:      addr.String(),
 		Data:      b,
 	}
-	buf := pool.Get(protocol.MaxUDPSize)
-	defer buf.Put()
+	buf := pool.GetBuffer(protocol.MaxUDPSize)
+	defer pool.PutBuffer(buf)
 	err = u.WritePacket(buf, msg)
 	var errTooLarge *quic.DatagramTooLargeError
 	if errors.As(err, &errTooLarge) {
@@ -114,7 +114,7 @@ func (u *udpConn) Close() error {
 }
 
 func (u *udpConn) SetDeadline(t time.Time) error {
-	return os.ErrInvalid
+	return oops.Join(u.SetReadDeadline(t), u.SetWriteDeadline(t))
 }
 
 func (u *udpConn) SetReadDeadline(t time.Time) error {
@@ -122,9 +122,9 @@ func (u *udpConn) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
-// QUIC does not support write deadline for raw datagram.
+// QUIC raw datagram will not block on write.
 func (u *udpConn) SetWriteDeadline(t time.Time) error {
-	return os.ErrInvalid
+	return nil
 }
 
 func (u *udpConn) LocalAddr() net.Addr {

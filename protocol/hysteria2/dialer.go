@@ -2,6 +2,7 @@ package hysteria2
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"strings"
 	"time"
@@ -32,7 +33,7 @@ type Feature1 struct {
 func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
 	host, port := parseServerAddrString(header.ProxyAddress)
 	config := &client.Config{
-		TLSConfig: client.TLSConfig{
+		TLSConfig: tls.Config{
 			ServerName:            header.TlsConfig.ServerName,
 			InsecureSkipVerify:    header.TlsConfig.InsecureSkipVerify,
 			VerifyPeerCertificate: header.TlsConfig.VerifyPeerCertificate,

@@ -3,6 +3,7 @@ package trojanc
 import (
 	"context"
 	"fmt"
+	"net"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
@@ -32,24 +33,8 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	}, nil
 }
 
-func (d *Dialer) DialTcp(ctx context.Context, addr string) (c netproxy.Conn, err error) {
-	return d.DialContext(ctx, "tcp", addr)
-}
-
-func (d *Dialer) DialUdp(ctx context.Context, addr string) (c netproxy.PacketConn, err error) {
-	pktConn, err := d.DialContext(ctx, "udp", addr)
-	if err != nil {
-		return nil, err
-	}
-	return pktConn.(netproxy.PacketConn), nil
-}
-
-func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (c netproxy.Conn, err error) {
-	magicNetwork, err := netproxy.ParseMagicNetwork(network)
-	if err != nil {
-		return nil, err
-	}
-	switch magicNetwork.Network {
+func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (c net.Conn, err error) {
+	switch network {
 	case "tcp", "udp":
 		mdata, err := protocol.ParseMetadata(addr)
 		if err != nil {
@@ -57,29 +42,46 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 		}
 		mdata.IsClient = d.metadata.IsClient
 
-		tcpNetwork := netproxy.MagicNetwork{
-			Network: "tcp",
-			Mark:    magicNetwork.Mark,
-		}.Encode()
-		conn, err := d.nextDialer.DialContext(ctx, tcpNetwork, d.proxyAddress)
+		conn, err := d.nextDialer.DialContext(ctx, "tcp", d.proxyAddress)
 		if err != nil {
 			return nil, err
 		}
 
 		tcpConn, err := NewConn(conn, Metadata{
 			Metadata: mdata,
-			Network:  magicNetwork.Network,
+			Network:  "tcp",
 		}, d.password)
 		if err != nil {
 			return nil, err
 		}
-		if magicNetwork.Network == "tcp" {
+		if network == "tcp" {
 			return tcpConn, nil
 		} else {
 			return &PacketConn{Conn: tcpConn}, nil
 		}
-
 	default:
-		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, magicNetwork.Network)
+		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
+}
+
+func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
+	mdata, err := protocol.ParseMetadata(addr)
+	if err != nil {
+		return nil, err
+	}
+	mdata.IsClient = d.metadata.IsClient
+
+	conn, err := d.nextDialer.DialContext(ctx, "tcp", d.proxyAddress)
+	if err != nil {
+		return nil, err
+	}
+
+	tcpConn, err := NewConn(conn, Metadata{
+		Metadata: mdata,
+		Network:  "tcp",
+	}, d.password)
+	if err != nil {
+		return nil, err
+	}
+	return &PacketConn{Conn: tcpConn}, nil
 }

@@ -2,8 +2,10 @@ package ws
 
 import (
 	"bytes"
-	"github.com/gorilla/websocket"
 	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/samber/oops"
 )
 
 type conn struct {
@@ -37,6 +39,5 @@ func (c *conn) Write(b []byte) (n int, err error) {
 }
 
 func (c *conn) SetDeadline(t time.Time) error {
-	_ = c.Conn.SetReadDeadline(t)
-	return c.Conn.SetWriteDeadline(t)
+	return oops.Join(c.Conn.SetReadDeadline(t), c.Conn.SetWriteDeadline(t))
 }

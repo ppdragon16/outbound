@@ -1,9 +1,9 @@
 package tuic
 
 import (
+	"bytes"
 	"net/netip"
 
-	"github.com/daeuniverse/outbound/pool/bytes"
 	"github.com/daeuniverse/quic-go"
 )
 

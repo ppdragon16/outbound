@@ -37,22 +37,22 @@ func (ho *HTTPObfs) Read(b []byte) (int, error) {
 		n := copy(b, ho.buf[ho.offset:])
 		ho.offset += n
 		if ho.offset == len(ho.buf) {
-			pool.Put(ho.buf)
+			pool.PutBuffer(ho.buf)
 			ho.buf = nil
 		}
 		return n, nil
 	}
 
 	if ho.firstResponse {
-		buf := pool.Get(1 << 15)
+		buf := pool.GetBuffer(1 << 15)
 		n, err := ho.Conn.Read(buf)
 		if err != nil {
-			pool.Put(buf)
+			pool.PutBuffer(buf)
 			return 0, err
 		}
 		idx := bytes.Index(buf[:n], []byte("\r\n\r\n"))
 		if idx == -1 {
-			pool.Put(buf)
+			pool.PutBuffer(buf)
 			return 0, io.EOF
 		}
 		ho.firstResponse = false
@@ -62,7 +62,7 @@ func (ho *HTTPObfs) Read(b []byte) (int, error) {
 			ho.buf = buf[:idx+4+length]
 			ho.offset = idx + 4 + n
 		} else {
-			pool.Put(buf)
+			pool.PutBuffer(buf)
 		}
 		return n, nil
 	}

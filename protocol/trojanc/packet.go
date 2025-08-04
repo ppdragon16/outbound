@@ -4,8 +4,6 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
-	"net/netip"
-	"strconv"
 	"sync"
 
 	"github.com/daeuniverse/outbound/pool"
@@ -17,41 +15,34 @@ type PacketConn struct {
 	domainIpMapping sync.Map
 }
 
-func (c *PacketConn) Write(b []byte) (int, error) {
-	return c.WriteTo(b, net.JoinHostPort(c.Conn.metadata.Hostname, strconv.Itoa(int(c.Conn.metadata.Port))))
-}
-
-func (c *PacketConn) Read(b []byte) (n int, err error) {
-	n, _, err = c.ReadFrom(b)
-	return n, err
-}
-
-func (c *PacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
+func (c *PacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	m := Metadata{}
 	if _, err = m.Unpack(c.Conn); err != nil {
-		return 0, netip.AddrPort{}, err
+		return 0, nil, err
 	}
-	if addr, err = m.DomainIpMapping(&c.domainIpMapping); err != nil {
-		return 0, netip.AddrPort{}, err
+	_addr, err := m.DomainIpMapping(&c.domainIpMapping)
+	if err != nil {
+		return 0, nil, err
 	}
+	addr = net.UDPAddrFromAddrPort(_addr)
 
-	buf := pool.Get(2)
-	defer buf.Put()
+	buf := pool.GetBuffer(2)
+	defer pool.PutBuffer(buf)
 	if _, err = io.ReadFull(c.Conn, buf[:2]); err != nil {
-		return 0, netip.AddrPort{}, err
+		return 0, nil, err
 	}
 	length := binary.BigEndian.Uint16(buf)
-	buf = pool.Get(2 + int(length))
-	defer buf.Put()
+	buf = pool.GetBuffer(2 + int(length))
+	defer pool.PutBuffer(buf)
 	if _, err = io.ReadFull(c.Conn, buf); err != nil {
-		return 0, netip.AddrPort{}, err
+		return 0, nil, err
 	}
 	n = copy(p, buf[2:])
 	return n, addr, nil
 }
 
-func (c *PacketConn) WriteTo(p []byte, addr string) (n int, err error) {
-	_metadata, err := protocol.ParseMetadata(addr)
+func (c *PacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
+	_metadata, err := protocol.ParseMetadata(addr.String())
 	if err != nil {
 		return 0, err
 	}
@@ -59,8 +50,8 @@ func (c *PacketConn) WriteTo(p []byte, addr string) (n int, err error) {
 		Metadata: _metadata,
 		Network:  "udp",
 	}
-	buf := pool.Get(metadata.Len() + 4 + len(p))
-	defer pool.Put(buf)
+	buf := pool.GetBuffer(metadata.Len() + 4 + len(p))
+	defer pool.PutBuffer(buf)
 	SealUDP(metadata, buf, p)
 	_, err = c.Conn.Write(buf)
 	if err != nil {

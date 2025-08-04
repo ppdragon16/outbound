@@ -21,8 +21,7 @@ func NewDialTimeoutContext() (context.Context, context.CancelFunc) {
 // A Dialer is a means to establish a connection.
 // Must return while the context is cancelled. Otherwise, everything will be blocked.
 // ListenPacket may not be fullcone for some protocols. For fullcone protocols, address will be ignored.
-// 对于 FullCone 协议，ListenPacket 通常不会在目标 dialer 上分配 lAddr, 通常是在 writeTo 时分配
-// 这些协议一般依赖于id等字段来区分返回的数据包属于哪个连接, 因为lAddr通常不会包括在报文内
+// 对于 FullCone 协议，ListenPacket 意味着在目标 dialer 上分配 lAddr, 并在收到数据包时回复
 type Dialer interface {
 	DialContext(ctx context.Context, network, address string) (net.Conn, error)
 	ListenPacket(ctx context.Context, address string) (net.PacketConn, error)

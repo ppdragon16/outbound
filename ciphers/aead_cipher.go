@@ -3,12 +3,8 @@ package ciphers
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/sha1"
-	"io"
 
-	"github.com/daeuniverse/outbound/pool"
 	"golang.org/x/crypto/chacha20poly1305"
-	"golang.org/x/crypto/hkdf"
 )
 
 type CipherConf struct {
@@ -21,9 +17,6 @@ type CipherConf struct {
 
 const (
 	MaxNonceSize = 12
-	ATypeIpv4    = 1
-	ATypeDomain  = 3
-	ATypeIpv6    = 4
 )
 
 var (
@@ -33,9 +26,8 @@ var (
 		"aes-256-gcm":            {KeyLen: 32, SaltLen: 32, NonceLen: 12, TagLen: 16, NewCipher: NewGcm},
 		"aes-128-gcm":            {KeyLen: 16, SaltLen: 16, NonceLen: 12, TagLen: 16, NewCipher: NewGcm},
 	}
-	ZeroNonce             [MaxNonceSize]byte
-	ShadowsocksReusedInfo = []byte("ss-subkey")
-	JuicityReusedInfo     = []byte("juicity-reused-info")
+	ZeroNonce         [MaxNonceSize]byte
+	JuicityReusedInfo = []byte("juicity-reused-info")
 )
 
 func NewGcm(key []byte) (cipher.AEAD, error) {
@@ -46,30 +38,30 @@ func NewGcm(key []byte) (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 
-func (conf *CipherConf) Verify(buf []byte, masterKey []byte, salt []byte, cipherText []byte, subKey *[]byte) ([]byte, bool) {
-	var sk []byte
-	if subKey != nil && len(*subKey) == conf.KeyLen {
-		sk = *subKey
-	} else {
-		sk = pool.Get(conf.KeyLen)
-		defer pool.Put(sk)
-		kdf := hkdf.New(
-			sha1.New,
-			masterKey,
-			salt,
-			ShadowsocksReusedInfo,
-		)
-		io.ReadFull(kdf, sk)
-		if subKey != nil && cap(*subKey) >= conf.KeyLen {
-			*subKey = (*subKey)[:conf.KeyLen]
-			copy(*subKey, sk)
-		}
-	}
+// func (conf *CipherConf) Verify(buf []byte, masterKey []byte, salt []byte, cipherText []byte, subKey *[]byte) ([]byte, bool) {
+// 	var sk []byte
+// 	if subKey != nil && len(*subKey) == conf.KeyLen {
+// 		sk = *subKey
+// 	} else {
+// 		sk = pool.Get(conf.KeyLen)
+// 		defer pool.Put(sk)
+// 		kdf := hkdf.New(
+// 			sha1.New,
+// 			masterKey,
+// 			salt,
+// 			ShadowsocksReusedInfo,
+// 		)
+// 		io.ReadFull(kdf, sk)
+// 		if subKey != nil && cap(*subKey) >= conf.KeyLen {
+// 			*subKey = (*subKey)[:conf.KeyLen]
+// 			copy(*subKey, sk)
+// 		}
+// 	}
 
-	ciph, _ := conf.NewCipher(sk)
+// 	ciph, _ := conf.NewCipher(sk)
 
-	if _, err := ciph.Open(buf[:0], ZeroNonce[:conf.NonceLen], cipherText, nil); err != nil {
-		return nil, false
-	}
-	return buf[:len(cipherText)-ciph.Overhead()], true
-}
+// 	if _, err := ciph.Open(buf[:0], ZeroNonce[:conf.NonceLen], cipherText, nil); err != nil {
+// 		return nil, false
+// 	}
+// 	return buf[:len(cipherText)-ciph.Overhead()], true
+// }

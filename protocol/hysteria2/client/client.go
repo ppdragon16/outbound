@@ -78,27 +78,10 @@ func (c *Client) connect(parent context.Context) (*HandshakeInfo, error) {
 		}
 	}
 
-	// Convert config to TLS config & QUIC config
-	tlsConfig := &tls.Config{
-		ServerName:            c.config.TLSConfig.ServerName,
-		InsecureSkipVerify:    c.config.TLSConfig.InsecureSkipVerify,
-		VerifyPeerCertificate: c.config.TLSConfig.VerifyPeerCertificate,
-		RootCAs:               c.config.TLSConfig.RootCAs,
-	}
-	quicConfig := &quic.Config{
-		InitialStreamReceiveWindow:     c.config.QUICConfig.InitialStreamReceiveWindow,
-		MaxStreamReceiveWindow:         c.config.QUICConfig.MaxStreamReceiveWindow,
-		InitialConnectionReceiveWindow: c.config.QUICConfig.InitialConnectionReceiveWindow,
-		MaxConnectionReceiveWindow:     c.config.QUICConfig.MaxConnectionReceiveWindow,
-		MaxIdleTimeout:                 c.config.QUICConfig.MaxIdleTimeout,
-		KeepAlivePeriod:                c.config.QUICConfig.KeepAlivePeriod,
-		DisablePathMTUDiscovery:        c.config.QUICConfig.DisablePathMTUDiscovery,
-		EnableDatagrams:                true,
-	}
 	// Prepare Transport
 	rt := &http3.Transport{
-		TLSClientConfig: tlsConfig,
-		QUICConfig:      quicConfig,
+		TLSClientConfig: &c.config.TLSConfig,
+		QUICConfig:      &c.config.QUICConfig,
 		Dial: func(ctx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 			qc, err := quic.DialEarly(ctx, c.pktConn, c.config.Addr, tlsCfg, cfg)
 			if err != nil {

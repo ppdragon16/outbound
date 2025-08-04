@@ -111,3 +111,7 @@ func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c net.C
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
 }
+
+func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
+	return nil, fmt.Errorf("%w: httpupgrade+udp", netproxy.UnsupportedTunnelTypeError)
+}

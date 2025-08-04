@@ -12,58 +12,63 @@ import (
 	"strconv"
 )
 
-func ResolveIPAddr(address string) (*net.IPAddr, error) {
+func ResolveIPAddrWithResolver(resolver *net.Resolver, address string) (*net.IPAddr, error) {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		host = address
 	}
-	addrs, err := net.DefaultResolver.LookupIPAddr(context.Background(), host)
+	addrs, err := resolver.LookupIPAddr(context.Background(), host)
 	if err != nil {
 		return nil, err
 	}
 	return &addrs[0], nil
 }
 
-func ResolveUDPAddrWithResolver(resolver *net.Resolver, address string) (*net.UDPAddr, error) {
+func resolveIPAddrWithResolver(resolver *net.Resolver, address string) (*net.IPAddr, int, error) {
 	host, _port, err := net.SplitHostPort(address)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	port, err := strconv.ParseUint(_port, 10, 16)
 	if err != nil {
-		return nil, fmt.Errorf("invalid port: %v", _port)
+		return nil, 0, fmt.Errorf("invalid port: %v", _port)
 	}
 	addrs, err := resolver.LookupIPAddr(context.Background(), host)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return &addrs[0], int(port), nil
+}
+
+func ResolveUDPAddrWithResolver(resolver *net.Resolver, address string) (*net.UDPAddr, error) {
+	addr, port, err := resolveIPAddrWithResolver(resolver, address)
 	if err != nil {
 		return nil, err
 	}
 
 	return &net.UDPAddr{
-		IP:   addrs[0].IP,
-		Zone: addrs[0].Zone,
-		Port: int(port),
+		IP:   addr.IP,
+		Zone: addr.Zone,
+		Port: port,
 	}, nil
 }
 
 func ResolveTCPAddrWithResolver(resolver *net.Resolver, address string) (*net.TCPAddr, error) {
-	host, _port, err := net.SplitHostPort(address)
-	if err != nil {
-		return nil, err
-	}
-	port, err := strconv.ParseUint(_port, 10, 16)
-	if err != nil {
-		return nil, fmt.Errorf("invalid port: %v", _port)
-	}
-	addrs, err := resolver.LookupIPAddr(context.Background(), host)
+	addr, port, err := resolveIPAddrWithResolver(resolver, address)
 	if err != nil {
 		return nil, err
 	}
 
 	return &net.TCPAddr{
-		IP:   addrs[0].IP,
-		Zone: addrs[0].Zone,
-		Port: int(port),
+		IP:   addr.IP,
+		Zone: addr.Zone,
+		Port: port,
 	}, nil
+}
+
+func ResolveIPAddr(address string) (*net.IPAddr, error) {
+	return ResolveIPAddrWithResolver(net.DefaultResolver, address)
 }
 
 func ResolveUDPAddr(address string) (*net.UDPAddr, error) {

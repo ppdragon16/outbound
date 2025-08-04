@@ -111,8 +111,8 @@ func (m *Metadata) PackTo(dst []byte) (n int) {
 }
 
 func (m *Metadata) Unpack(r io.Reader) (n int, err error) {
-	buf := pool.Get(256)
-	defer buf.Put()
+	buf := pool.GetBuffer(256)
+	defer pool.PutBuffer(buf)
 	if _, err = io.ReadFull(r, buf[:2]); err != nil {
 		return 0, err
 	}

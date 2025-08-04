@@ -41,7 +41,7 @@ type udpHopPacketConn struct {
 }
 
 type udpPacket struct {
-	Buf  pool.PB
+	Buf  []byte
 	N    int
 	Addr net.Addr
 	Err  error
@@ -82,10 +82,10 @@ func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc d
 
 func (u *udpHopPacketConn) recvLoop(conn net.Conn) {
 	for {
-		buf := pool.GetFullCap(udpBufferSize)
+		buf := pool.GetBuffer(udpBufferSize)
 		n, err := conn.Read(buf)
 		if err != nil {
-			buf.Put()
+			pool.PutBuffer(buf)
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
 				// Only pass through timeout errors here, not permanent errors
@@ -100,7 +100,7 @@ func (u *udpHopPacketConn) recvLoop(conn net.Conn) {
 			// Packet successfully queued
 		default:
 			// Queue is full, drop the packet
-			buf.Put()
+			pool.PutBuffer(buf)
 		}
 	}
 }
@@ -161,7 +161,7 @@ func (u *udpHopPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) 
 		// Currently we do not check whether the packet is from
 		// the server or not due to performance reasons.
 		n := copy(b, p.Buf[:p.N])
-		p.Buf.Put()
+		pool.PutBuffer(p.Buf)
 		return n, p.Addr, nil
 	}
 }

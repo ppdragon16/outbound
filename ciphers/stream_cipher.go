@@ -115,8 +115,8 @@ func (c *salsaStreamCipher) XORKeyStream(dst, src []byte) {
 	if cap(dst) >= dataSize {
 		buf = dst[:dataSize]
 	} else {
-		buf = pool.Get(dataSize)
-		defer pool.Put(buf)
+		buf = pool.GetBuffer(dataSize)
+		defer pool.PutBuffer(buf)
 	}
 
 	var subNonce [16]byte
@@ -269,8 +269,8 @@ func (c *StreamCipher) InitEncrypt() (iv []byte, err error) {
 
 func (c *StreamCipher) NewEncryptor(iv []byte) (enc cipher.Stream, err error) {
 	if iv == nil {
-		iv = pool.Get(c.info.ivLen)
-		defer pool.Put(iv)
+		iv = pool.GetBuffer(c.info.ivLen)
+		defer pool.PutBuffer(iv)
 	}
 	iv = iv[:c.info.ivLen]
 	rand.Read(iv)

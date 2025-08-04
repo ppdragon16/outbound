@@ -2,12 +2,13 @@ package client
 
 import (
 	"context"
-	"crypto/x509"
+	"crypto/tls"
 	"net"
 	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/pmtud"
+	"github.com/daeuniverse/quic-go"
 	"github.com/samber/oops"
 )
 
@@ -22,8 +23,8 @@ type Config struct {
 	Addr            net.Addr
 	NextDialer      netproxy.Dialer
 	Auth            string
-	TLSConfig       TLSConfig
-	QUICConfig      QUICConfig
+	TLSConfig       tls.Config
+	QUICConfig      quic.Config
 	BandwidthConfig BandwidthConfig
 	UDPHopInterval  time.Duration
 	FastOpen        bool
@@ -71,6 +72,7 @@ func (c *Config) verifyAndFill() error {
 		return oops.In("Hysteria2 Config Verify").With("field", "QUICConfig.KeepAlivePeriod").With("reason", "must be between 2s and 60s").New("invalid config")
 	}
 	c.QUICConfig.DisablePathMTUDiscovery = c.QUICConfig.DisablePathMTUDiscovery || pmtud.DisablePathMTUDiscovery
+	c.QUICConfig.EnableDatagrams = true
 
 	c.filled = true
 	return nil
@@ -86,25 +88,6 @@ type UdpConnFactory struct {
 
 func (f *UdpConnFactory) New(ctx context.Context) (net.PacketConn, error) {
 	return f.NewFunc(ctx)
-}
-
-// TLSConfig contains the TLS configuration fields that we want to expose to the user.
-type TLSConfig struct {
-	ServerName            string
-	InsecureSkipVerify    bool
-	VerifyPeerCertificate func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error
-	RootCAs               *x509.CertPool
-}
-
-// QUICConfig contains the QUIC configuration fields that we want to expose to the user.
-type QUICConfig struct {
-	InitialStreamReceiveWindow     uint64
-	MaxStreamReceiveWindow         uint64
-	InitialConnectionReceiveWindow uint64
-	MaxConnectionReceiveWindow     uint64
-	MaxIdleTimeout                 time.Duration
-	KeepAlivePeriod                time.Duration
-	DisablePathMTUDiscovery        bool // The server may still override this to true on unsupported platforms.
 }
 
 // BandwidthConfig describes the maximum bandwidth that the server can use, in bytes per second.

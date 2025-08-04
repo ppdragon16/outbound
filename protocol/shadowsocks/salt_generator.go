@@ -36,9 +36,9 @@ var (
 func NewSaltGenerator(masterKey []byte, saltLen int) (SaltGenerator, error) {
 	switch DefaultSaltGeneratorType {
 	case IodizedSaltGeneratorType:
-		return NewIodizedSaltGenerator(masterKey, saltLen, DefaultBucketSize, true)
+		return NewIodizedSaltGenerator(masterKey, saltLen, DefaultBucketSize)
 	case RandomSaltGeneratorType:
-		return NewRandomSaltGenerator(saltLen, true)
+		return NewRandomSaltGenerator(saltLen)
 	default:
 		return nil, fmt.Errorf("unknown salt generator type: %v", DefaultSaltGeneratorType)
 	}
@@ -53,7 +53,6 @@ type SaltGenerator interface {
 type IodizedSaltGenerator struct {
 	tokenBucket chan []byte
 	saltSize    int
-	fromPool    bool
 
 	mu       sync.RWMutex
 	source   []byte
@@ -67,7 +66,7 @@ type IodizedSaltGenerator struct {
 	cancel context.CancelFunc
 }
 
-func NewIodizedSaltGenerator(salt []byte, saltSize, bucketSize int, fromPool bool) (*IodizedSaltGenerator, error) {
+func NewIodizedSaltGenerator(salt []byte, saltSize, bucketSize int) (*IodizedSaltGenerator, error) {
 	// 获取外部熵源
 	source, kdfInfo, err := fetchEntropySource(salt)
 	if err != nil {
@@ -78,7 +77,6 @@ func NewIodizedSaltGenerator(salt []byte, saltSize, bucketSize int, fromPool boo
 	g := &IodizedSaltGenerator{
 		tokenBucket: make(chan []byte, bucketSize),
 		saltSize:    saltSize,
-		fromPool:    fromPool,
 		source:      source,
 		begin:       0,
 		tokenLen:    DefaultTokenLength,
@@ -140,20 +138,15 @@ func (g *IodizedSaltGenerator) start() {
 
 		select {
 		case <-g.ctx.Done():
-			g.putSalt(salt)
+			pool.PutBuffer(salt)
 			return
 		case g.tokenBucket <- salt:
 		}
 	}
 }
 
-func (g *IodizedSaltGenerator) generateSalt() []byte {
-	var salt []byte
-	if g.fromPool {
-		salt = pool.Get(g.saltSize)
-	} else {
-		salt = make([]byte, g.saltSize)
-	}
+func (g *IodizedSaltGenerator) generateSalt() (salt []byte) {
+	salt = pool.GetBuffer(g.saltSize)
 
 	g.mu.Lock()
 
@@ -179,7 +172,7 @@ func (g *IodizedSaltGenerator) generateSalt() []byte {
 		panic(fmt.Sprintf("IodizedSaltGenerator.start: %v", err))
 	}
 
-	return salt
+	return
 }
 
 // refreshSource 刷新外部熵源
@@ -198,12 +191,6 @@ func (g *IodizedSaltGenerator) refreshSource() {
 	g.mu.Unlock()
 }
 
-func (g *IodizedSaltGenerator) putSalt(salt []byte) {
-	if g.fromPool {
-		pool.Put(salt)
-	}
-}
-
 func (g *IodizedSaltGenerator) Get() []byte {
 	return <-g.tokenBucket
 }
@@ -213,7 +200,7 @@ func (g *IodizedSaltGenerator) Close() error {
 
 	close(g.tokenBucket)
 	for salt := range g.tokenBucket {
-		g.putSalt(salt)
+		pool.PutBuffer(salt)
 	}
 
 	return nil
@@ -222,24 +209,17 @@ func (g *IodizedSaltGenerator) Close() error {
 // RandomSaltGenerator 随机 salt 生成器
 type RandomSaltGenerator struct {
 	saltSize int
-	fromPool bool
 }
 
-func NewRandomSaltGenerator(saltSize int, fromPool bool) (*RandomSaltGenerator, error) {
+func NewRandomSaltGenerator(saltSize int) (*RandomSaltGenerator, error) {
 	return &RandomSaltGenerator{
 		saltSize: saltSize,
-		fromPool: fromPool,
 	}, nil
 }
 
 func (g *RandomSaltGenerator) Get() []byte {
-	var salt []byte
-	if g.fromPool {
-		salt = pool.Get(g.saltSize)
-	} else {
-		salt = make([]byte, g.saltSize)
-	}
-	_, _ = fastrand.Read(salt)
+	salt := pool.GetBuffer(g.saltSize)
+	fastrand.Read(salt)
 	return salt
 }
 

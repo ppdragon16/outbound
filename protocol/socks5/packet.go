@@ -29,8 +29,8 @@ func NewPktConn(c net.PacketConn, ctrlConn net.Conn, server net.Addr) *PktConn {
 	}
 
 	go func() {
-		buf := pool.Get(1)
-		defer pool.Put(buf)
+		buf := pool.GetBuffer(1)
+		defer pool.PutBuffer(buf)
 		for {
 			_, err := ctrlConn.Read(buf)
 			if err, ok := err.(net.Error); ok && err.Timeout() {
@@ -52,8 +52,8 @@ func (pc *PktConn) ReadFrom(b []byte) (int, net.Addr, error) {
 }
 
 func (pc *PktConn) readFrom(b []byte) (n int, lAddr net.Addr, rAddr net.Addr, err error) {
-	buf := pool.Get(len(b))
-	defer pool.Put(buf)
+	buf := pool.GetBuffer(len(b))
+	defer pool.PutBuffer(buf)
 
 	n, rAddr, err = pc.PacketConn.ReadFrom(buf)
 	if err != nil {
@@ -92,8 +92,8 @@ func (pc *PktConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	}
 
 	tgtLen := len(target)
-	buf := pool.Get(3 + tgtLen + len(b))
-	defer pool.Put(buf)
+	buf := pool.GetBuffer(3 + tgtLen + len(b))
+	defer pool.PutBuffer(buf)
 
 	copy(buf, []byte{0, 0, 0})
 	copy(buf[3:], target)

@@ -40,7 +40,7 @@ func EncodeAddress(addr *AddressInfo) (buf []byte, n int, err error) {
 			return nil, 0, fmt.Errorf("invalid IPv4 address: %v", addr.Hostname)
 		}
 		n = 1 + 4 + 2 // type + ip + port
-		buf = pool.Get(n)
+		buf = pool.GetBuffer(n)
 		buf[0] = byte(AddressTypeIPv4)
 		copy(buf[1:], addr.IP.AsSlice())
 		binary.BigEndian.PutUint16(buf[5:], addr.Port)
@@ -49,7 +49,7 @@ func EncodeAddress(addr *AddressInfo) (buf []byte, n int, err error) {
 			return nil, 0, fmt.Errorf("invalid IPv6 address: %v", addr.Hostname)
 		}
 		n = 1 + 16 + 2 // type + ip + port
-		buf = pool.Get(n)
+		buf = pool.GetBuffer(n)
 		buf[0] = byte(AddressTypeIPv6)
 		copy(buf[1:], addr.IP.AsSlice())
 		binary.BigEndian.PutUint16(buf[17:], addr.Port)
@@ -59,7 +59,7 @@ func EncodeAddress(addr *AddressInfo) (buf []byte, n int, err error) {
 			return nil, 0, fmt.Errorf("domain name too long: %d bytes", lenDN)
 		}
 		n = 1 + 1 + lenDN + 2 // type + len + domain + port
-		buf = pool.Get(n)
+		buf = pool.GetBuffer(n)
 		buf[0] = byte(AddressTypeDomain)
 		buf[1] = uint8(lenDN)
 		copy(buf[2:], addr.Hostname)

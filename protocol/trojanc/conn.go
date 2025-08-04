@@ -9,10 +9,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"time"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 )
 
@@ -22,7 +22,7 @@ var (
 )
 
 type Conn struct {
-	netproxy.Conn
+	net.Conn
 	metadata Metadata
 	pass     [56]byte
 
@@ -31,7 +31,7 @@ type Conn struct {
 	onceRead   sync.Once
 }
 
-func NewConn(conn netproxy.Conn, metadata Metadata, password string) (c *Conn, err error) {
+func NewConn(conn net.Conn, metadata Metadata, password string) (c *Conn, err error) {
 	hash := sha256.New224()
 	hash.Write([]byte(password))
 	c = &Conn{
@@ -53,7 +53,7 @@ func NewConn(conn netproxy.Conn, metadata Metadata, password string) (c *Conn, e
 
 func (c *Conn) reqHeaderFromPool(payload []byte) (buf []byte) {
 	reqLen := c.metadata.Len()
-	buf = pool.Get(56 + 2 + 1 + reqLen + 2 + len(payload))
+	buf = pool.GetBuffer(56 + 2 + 1 + reqLen + 2 + len(payload))
 	copy(buf, c.pass[:])
 	copy(buf[56:], CRLF)
 	buf[58] = NetworkToByte(c.metadata.Network)
@@ -70,7 +70,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	if !c.onceWrite {
 		if c.metadata.IsClient {
 			buf := c.reqHeaderFromPool(b)
-			defer pool.Put(buf)
+			defer pool.PutBuffer(buf)
 			if _, err = c.Conn.Write(buf); err != nil {
 				return 0, fmt.Errorf("write header: %w", err)
 			}
@@ -93,8 +93,8 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 }
 
 func (c *Conn) ReadReqHeader() (err error) {
-	buf := pool.Get(56)
-	defer pool.Put(buf)
+	buf := pool.GetBuffer(56)
+	defer pool.PutBuffer(buf)
 	if _, err = io.ReadFull(c.Conn, buf); err != nil {
 		return err
 	}

@@ -17,7 +17,7 @@ var (
 )
 
 func InitDirectDialers(fallbackDNS string, mptcp bool, mark int) {
-	Direct = NewDirectDialerLaddr(Option{FallbackDNS: fallbackDNS, Mptcp: mptcp, Mark: mark})
+	Direct = NewDirectDialer(Option{FallbackDNS: fallbackDNS, Mptcp: mptcp, Mark: mark})
 }
 
 type Option struct {
@@ -35,13 +35,17 @@ type directDialer struct {
 	option            Option
 }
 
-func NewDirectDialerLaddr(option Option) netproxy.Dialer {
+// TODO: Cache
+func NewDirectDialer(option Option) netproxy.Dialer {
 	resolver := createResolver(option.Mark, "")
 	fallbackResolver := createResolver(option.Mark, option.FallbackDNS)
 	tcpDialer := &net.Dialer{Resolver: resolver}
 	udpDialer := &net.Dialer{Resolver: resolver}
+	tcpFallbackDialer := &net.Dialer{Resolver: fallbackResolver}
+	udpFallbackDialer := &net.Dialer{Resolver: fallbackResolver}
 	if option.Mptcp {
 		tcpDialer.SetMultipathTCP(true)
+		tcpFallbackDialer.SetMultipathTCP(true)
 	}
 	if option.Mark != 0 {
 		control := func(_, _ string, c syscall.RawConn) error {
@@ -49,11 +53,9 @@ func NewDirectDialerLaddr(option Option) netproxy.Dialer {
 		}
 		tcpDialer.Control = control
 		udpDialer.Control = control
+		tcpFallbackDialer.Control = control
+		udpFallbackDialer.Control = control
 	}
-	tcpFallbackDialer := tcpDialer
-	udpFallbackDialer := udpDialer
-	tcpFallbackDialer.Resolver = fallbackResolver
-	udpFallbackDialer.Resolver = fallbackResolver
 
 	return &directDialer{
 		resolver:          resolver,

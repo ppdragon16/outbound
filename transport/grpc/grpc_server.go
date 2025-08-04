@@ -68,7 +68,7 @@ func (c *ServerConn) Read(p []byte) (n int, err error) {
 		n = copy(p, c.buf[c.offset:])
 		c.offset += n
 		if c.offset == len(c.buf) {
-			pool.Put(c.buf)
+			pool.PutBuffer(c.buf)
 			c.buf = nil
 		}
 		return n, nil
@@ -100,7 +100,7 @@ func (c *ServerConn) Read(p []byte) (n int, err error) {
 			return 0, err
 		}
 		n = copy(p, recvResp.hunk.Data)
-		c.buf = pool.Get(len(recvResp.hunk.Data) - n)
+		c.buf = pool.GetBuffer(len(recvResp.hunk.Data) - n)
 		copy(c.buf, recvResp.hunk.Data[n:])
 		c.offset = 0
 		return n, nil

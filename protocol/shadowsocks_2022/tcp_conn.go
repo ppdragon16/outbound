@@ -1,0 +1,263 @@
+package shadowsocks_2022
+
+import (
+	"bytes"
+	"crypto/cipher"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"net"
+	"sync"
+	"time"
+
+	"github.com/daeuniverse/outbound/ciphers"
+	"github.com/daeuniverse/outbound/common"
+	"github.com/daeuniverse/outbound/pool"
+	"github.com/daeuniverse/outbound/protocol"
+	"github.com/daeuniverse/outbound/protocol/shadowsocks"
+	disk_bloom "github.com/mzz2017/disk-bloom"
+	"github.com/samber/oops"
+)
+
+const (
+	TCPChunkMaxLen = (1 << 16) - 1
+
+	HeaderTypeClientStream = 0
+	HeaderTypeServerStream = 1
+	MinPaddingLength       = 0
+	MaxPaddingLength       = 900
+)
+
+// TCPConn represents a Shadowsocks TCP connection
+type TCPConn struct {
+	net.Conn
+	addr       *shadowsocks.AddressInfo
+	cipherConf *ciphers.CipherConf2022
+	masterKey  []byte
+	sg         shadowsocks.SaltGenerator
+
+	cipherRead  cipher.AEAD
+	cipherWrite cipher.AEAD
+	onceRead    bool
+	onceWrite   bool
+	nonceRead   []byte
+	nonceWrite  []byte
+
+	readMutex  sync.Mutex
+	writeMutex sync.Mutex
+
+	bufReader io.Reader
+
+	bloom *disk_bloom.FilterGroup
+}
+
+type Key struct {
+	CipherConf *ciphers.CipherConf
+	MasterKey  []byte
+}
+
+func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf2022, masterKey []byte, sg shadowsocks.SaltGenerator, addr *shadowsocks.AddressInfo, bloom *disk_bloom.FilterGroup) (crw *TCPConn, err error) {
+	return &TCPConn{
+		Conn:       conn,
+		addr:       addr,
+		cipherConf: conf,
+		masterKey:  masterKey,
+		sg:         sg,
+		nonceRead:  make([]byte, conf.NonceLen),
+		nonceWrite: make([]byte, conf.NonceLen),
+		bloom:      bloom,
+	}, nil
+}
+
+func (c *TCPConn) Close() error {
+	return c.Conn.Close()
+}
+
+func (c *TCPConn) Read(b []byte) (n int, err error) {
+	c.readMutex.Lock()
+	defer c.readMutex.Unlock()
+
+	if c.bufReader != nil {
+		n, err = c.bufReader.Read(b)
+		if err != nil {
+			c.bufReader = nil
+			if err != io.EOF {
+				return 0, err
+			}
+		}
+		return n, err
+	}
+
+	var payloadLength uint16
+
+	if !c.onceRead {
+		var salt = pool.GetBuffer(c.cipherConf.SaltLen)
+		defer pool.PutBuffer(salt)
+
+		n, err = io.ReadFull(c.Conn, salt)
+		if err != nil {
+			return 0, err
+		}
+		c.cipherRead, err = CreateCipher(c.masterKey, salt, c.cipherConf)
+		if err != nil {
+			return 0, oops.Wrapf(err, "fail to initiate cipher")
+		}
+
+		header := pool.GetBuffer(11 + c.cipherConf.SaltLen + c.cipherConf.TagLen)
+		defer pool.PutBuffer(header)
+		if _, err := io.ReadFull(c.Conn, header); err != nil {
+			return 0, err
+		}
+		header, err := c.cipherRead.Open(header[:0], c.nonceRead, header, nil)
+		if err != nil {
+			return 0, protocol.ErrFailAuth
+		}
+		common.BytesIncLittleEndian(c.nonceRead)
+		offset := 0
+		typ := uint8(header[offset])
+		offset += 1
+		timestamp := time.Unix(int64(binary.BigEndian.Uint64(header[offset:offset+8])), 0)
+		offset += 8
+
+		if typ != HeaderTypeServerStream {
+			return 0, fmt.Errorf("received unexpected header type: %d", typ)
+		}
+
+		if timestamp.Before(time.Now().Add(-ciphers.TimestampTolerance)) {
+			return 0, protocol.ErrReplayAttack
+		}
+
+		// TODO: 不应该使用 bloom filter
+		if c.bloom != nil {
+			if c.bloom.ExistOrAdd(salt) {
+				return 0, protocol.ErrReplayAttack
+			}
+		}
+
+		// Skip request salt
+		offset += c.cipherConf.SaltLen
+
+		payloadLength = binary.BigEndian.Uint16(header[offset : offset+2])
+
+		c.onceRead = true
+	} else {
+		payloadLengthBuf := pool.GetBuffer(2 + c.cipherConf.TagLen)
+		defer pool.PutBuffer(payloadLengthBuf)
+		if _, err := io.ReadFull(c.Conn, payloadLengthBuf); err != nil {
+			return 0, err
+		}
+		payloadLengthBuf, err := c.cipherRead.Open(payloadLengthBuf[:0], c.nonceRead, payloadLengthBuf, nil)
+		if err != nil {
+			return 0, protocol.ErrFailAuth
+		}
+		common.BytesIncLittleEndian(c.nonceRead)
+
+		payloadLength = binary.BigEndian.Uint16(payloadLengthBuf)
+	}
+
+	if c.cipherRead == nil {
+		return 0, oops.Wrapf(err, "cipher is not initialized")
+	}
+
+	payload := pool.GetBuffer(int(payloadLength) + c.cipherConf.TagLen)
+	defer pool.PutBuffer(payload)
+	if _, err = io.ReadFull(c.Conn, payload); err != nil {
+		return 0, err
+	}
+	payload, err = c.cipherRead.Open(payload[:0], c.nonceRead, payload, nil)
+	if err != nil {
+		return 0, protocol.ErrFailAuth
+	}
+	common.BytesIncLittleEndian(c.nonceRead)
+
+	n = copy(b, payload)
+	if len(payload) > n {
+		c.bufReader = bytes.NewReader(payload[n:])
+	}
+	return n, nil
+}
+
+func EncodeRequestHeader(typ uint8, timestamp uint64, address *shadowsocks.AddressInfo, b *[]byte) (*bytes.Buffer, *bytes.Buffer, error) {
+	addressBytes, _, err := shadowsocks.EncodeAddress(address)
+	defer pool.PutBuffer(addressBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	fixedHeader := pool.GetBytesBuffer()
+	varHeader := pool.GetBytesBuffer()
+
+	// Variable-length header: address (variable) + paddingLength (2) + padding (variable, 0) + payload (variable)
+	varHeader.Write(addressBytes)
+	// No padding
+	binary.Write(varHeader, binary.BigEndian, uint16(0))
+	initialPayloadMaxLength := TCPChunkMaxLen - varHeader.Len()
+	var n int
+	if len(*b) > initialPayloadMaxLength {
+		varHeader.Write((*b)[:initialPayloadMaxLength])
+		n = initialPayloadMaxLength
+	} else {
+		varHeader.Write(*b)
+		n = len(*b)
+	}
+	*b = (*b)[n:]
+
+	// Fixed-length header: type (1) + timestamp (8) + length (2) = 11 bytes
+	fixedHeader.WriteByte(typ)
+	binary.Write(fixedHeader, binary.BigEndian, timestamp)
+	binary.Write(fixedHeader, binary.BigEndian, uint16(varHeader.Len()))
+
+	return fixedHeader, varHeader, nil
+}
+
+func (c *TCPConn) Write(b []byte) (n int, err error) {
+	c.writeMutex.Lock()
+	defer c.writeMutex.Unlock()
+	buf := pool.GetBytesBuffer()
+	defer pool.PutBytesBuffer(buf)
+	if !c.onceWrite {
+		// Generate salt and setup encryption
+		salt := c.sg.Get()
+		defer pool.PutBuffer(salt)
+		c.cipherWrite, err = CreateCipher(c.masterKey, salt, c.cipherConf)
+		if err != nil {
+			return 0, oops.Wrapf(err, "fail to initiate cipher")
+		}
+		// Add salt
+		buf.Write(salt)
+
+		// Add Request headers
+		fixedHeader, varHeader, err := EncodeRequestHeader(HeaderTypeClientStream, uint64(time.Now().Unix()), c.addr, &b)
+		defer pool.PutBytesBuffer(fixedHeader)
+		defer pool.PutBytesBuffer(varHeader)
+		if err != nil {
+			return 0, oops.Wrapf(err, "fail to encode request header")
+		}
+		buf.Write(c.cipherWrite.Seal(nil, c.nonceWrite, fixedHeader.Bytes(), nil))
+		common.BytesIncLittleEndian(c.nonceWrite)
+		buf.Write(c.cipherWrite.Seal(nil, c.nonceWrite, varHeader.Bytes(), nil))
+		common.BytesIncLittleEndian(c.nonceWrite)
+
+		c.onceWrite = true
+	}
+	if c.cipherWrite == nil {
+		return 0, oops.Wrapf(err, "cipher is not initialized")
+	}
+	c.seal(buf, b)
+	_, err = c.Conn.Write(buf.Bytes())
+	return len(b), err
+}
+
+func (c *TCPConn) seal(buf *bytes.Buffer, payload []byte) {
+	chunkLengthBuf := pool.GetBuffer(2)
+	defer pool.PutBuffer(chunkLengthBuf)
+	for i := 0; i < len(payload); i += TCPChunkMaxLen {
+		// write chunk
+		var chunkLength = common.Min(TCPChunkMaxLen, len(payload)-i)
+		binary.BigEndian.PutUint16(chunkLengthBuf, uint16(chunkLength))
+		buf.Write(c.cipherWrite.Seal(nil, c.nonceWrite, chunkLengthBuf, nil))
+		common.BytesIncLittleEndian(c.nonceWrite)
+		buf.Write(c.cipherWrite.Seal(nil, c.nonceWrite, payload[i:i+chunkLength], nil))
+		common.BytesIncLittleEndian(c.nonceWrite)
+	}
+}

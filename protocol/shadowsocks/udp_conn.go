@@ -41,61 +41,63 @@ func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 		return 0, err
 	}
 
+	buf := pool.GetBytesBuffer()
+	payload := pool.GetBytesBuffer()
+	defer pool.PutBytesBuffer(buf)
+	defer pool.PutBytesBuffer(payload)
+
 	// Encode address bytes
-	addressBytes, addressLen, err := EncodeAddress(targetAddr)
+	addressBytes, _, err := EncodeAddress(targetAddr)
+	defer pool.PutBuffer(addressBytes)
 	if err != nil {
 		return 0, err
 	}
-	defer pool.Put(addressBytes)
 
 	// Combine address and data
-	chunk := pool.Get(addressLen + len(b))
-	defer pool.Put(chunk)
-	copy(chunk, addressBytes)
-	copy(chunk[len(addressBytes):], b)
+	payload.Write(addressBytes)
+	payload.Write(b)
 
 	// Encrypt and send
 	salt := c.sg.Get()
-	toWrite, err := EncryptUDPFromPool(&Key{
-		CipherConf: c.cipherConf,
-		MasterKey:  c.masterKey,
-	}, chunk, salt, ciphers.ShadowsocksReusedInfo)
-	pool.Put(salt)
+	defer pool.PutBuffer(salt)
+	buf.Write(salt)
+	cipher, err := CreateCipher(c.masterKey, salt, c.cipherConf)
 	if err != nil {
 		return 0, err
 	}
-	defer pool.Put(toWrite)
-	if c.bloom != nil {
-		c.bloom.ExistOrAdd(toWrite[:c.cipherConf.SaltLen])
-	}
-	return c.Conn.Write(toWrite)
+	buf.Write(cipher.Seal(nil, ciphers.ZeroNonce[:c.cipherConf.NonceLen], payload.Bytes(), nil))
+
+	return c.Conn.Write(buf.Bytes())
 }
 
 func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
-	enc := pool.Get(len(b) + c.cipherConf.SaltLen)
-	defer pool.Put(enc)
-	n, err = c.Conn.Read(enc)
+	buf := pool.GetBuffer(len(b) + c.cipherConf.SaltLen)
+	defer pool.PutBuffer(buf)
+	n, err = c.Conn.Read(buf)
 	if err != nil {
 		return 0, nil, err
 	}
-
-	n, err = DecryptUDP(b, &Key{
-		CipherConf: c.cipherConf,
-		MasterKey:  c.masterKey,
-	}, enc[:n], ciphers.ShadowsocksReusedInfo)
-	if err != nil {
-		return 0, nil, err
+	if len(buf) < c.cipherConf.SaltLen {
+		return 0, nil, fmt.Errorf("short length to decrypt")
 	}
-
+	salt := buf[:c.cipherConf.SaltLen]
 	if c.bloom != nil {
-		if exist := c.bloom.ExistOrAdd(enc[:c.cipherConf.SaltLen]); exist {
-			err = protocol.ErrReplayAttack
-			return
+		if c.bloom.ExistOrAdd(salt) {
+			return 0, nil, protocol.ErrReplayAttack
 		}
+	}
+	payload := buf[c.cipherConf.SaltLen:n]
+	ciph, err := CreateCipher(c.masterKey, salt, c.cipherConf)
+	if err != nil {
+		return 0, nil, err
+	}
+	payload, err = ciph.Open(payload[:0], ciphers.ZeroNonce[:c.cipherConf.NonceLen], payload, nil)
+	if err != nil {
+		return 0, nil, err
 	}
 
 	// Parse address from decrypted data
-	addressInfo, addressLen, err := DecodeAddress(b)
+	addressInfo, addressLen, err := DecodeAddress(payload)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -109,7 +111,6 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 	}
 
 	// Remove address header from data
-	copy(b, b[addressLen:])
-	n -= addressLen
-	return n, addr, nil
+	n = copy(b, payload[addressLen:])
+	return
 }
