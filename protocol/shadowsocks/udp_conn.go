@@ -1,6 +1,7 @@
 package shadowsocks
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"net/netip"
@@ -96,8 +97,10 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 		return 0, nil, err
 	}
 
+	reader := bytes.NewReader(payload)
+
 	// Parse address from decrypted data
-	addressInfo, addressLen, err := DecodeAddress(payload)
+	addressInfo, err := DecodeAddress(reader)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -110,7 +113,6 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 		return 0, nil, fmt.Errorf("unsupported address type for UDP: %v", addressInfo.Type)
 	}
 
-	// Remove address header from data
-	n = copy(b, payload[addressLen:])
+	n, err = reader.Read(b)
 	return
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"time"
@@ -135,16 +136,37 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 		return 0, nil, err
 	}
 
-	offset := 0
-	typ := uint8(payload[offset])
-	offset += 1
-	timestamp := time.Unix(int64(binary.BigEndian.Uint64(payload[offset:offset+8])), 0)
-	offset += 8
-	// clientSessionID := buf[offset : offset+8]
-	offset += 8
-	paddingLength := binary.BigEndian.Uint16(payload[offset : offset+2])
-	offset += 2
-	offset += int(paddingLength)
+	// Use bytes.Reader to simplify parsing
+	reader := bytes.NewReader(payload)
+
+	// Read header type
+	var typ uint8
+	if err := binary.Read(reader, binary.BigEndian, &typ); err != nil {
+		return 0, nil, fmt.Errorf("failed to read header type: %w", err)
+	}
+
+	// Read timestamp
+	var timestampRaw uint64
+	if err := binary.Read(reader, binary.BigEndian, &timestampRaw); err != nil {
+		return 0, nil, fmt.Errorf("failed to read timestamp: %w", err)
+	}
+	timestamp := time.Unix(int64(timestampRaw), 0)
+
+	// Skip client session ID (8 bytes)
+	if _, err := reader.Seek(8, io.SeekCurrent); err != nil {
+		return 0, nil, fmt.Errorf("failed to skip session ID: %w", err)
+	}
+
+	// Read padding length
+	var paddingLength uint16
+	if err := binary.Read(reader, binary.BigEndian, &paddingLength); err != nil {
+		return 0, nil, fmt.Errorf("failed to read padding length: %w", err)
+	}
+
+	// Skip padding
+	if _, err := reader.Seek(int64(paddingLength), io.SeekCurrent); err != nil {
+		return 0, nil, fmt.Errorf("failed to skip padding: %w", err)
+	}
 
 	if typ != HeaderTypeServerStream {
 		return 0, nil, fmt.Errorf("received unexpected header type: %d", typ)
@@ -155,11 +177,10 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 	}
 
 	// Parse address from decrypted data
-	addressInfo, addressLen, err := shadowsocks.DecodeAddress(payload[offset:])
+	addressInfo, err := shadowsocks.DecodeAddress(reader)
 	if err != nil {
 		return 0, nil, err
 	}
-	offset += addressLen
 
 	// Create address object (only support IP addresses for UDP)
 	switch addressInfo.Type {
@@ -169,7 +190,7 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 		return 0, nil, fmt.Errorf("unsupported address type for UDP: %v", addressInfo.Type)
 	}
 
-	// Remove address header from data
-	n = copy(b, payload[offset:])
+	// Copy remaining data to output buffer
+	n, err = reader.Read(b)
 	return
 }

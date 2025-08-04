@@ -77,8 +77,6 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 }
 
 func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
-	// TODO: 这里不应该基于addr做决断
-
 	// Shadowsocks transfer UDP traffic via UDP tunnel.
 	conn, err := d.nextDialer.DialContext(ctx, "udp", d.proxyAddress)
 	if err != nil {
