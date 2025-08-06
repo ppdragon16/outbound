@@ -7,6 +7,7 @@ import (
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
+	"github.com/daeuniverse/outbound/protocol/shadowsocks"
 )
 
 func init() {
@@ -16,19 +17,13 @@ func init() {
 type Dialer struct {
 	proxyAddress string
 	nextDialer   netproxy.Dialer
-	metadata     protocol.Metadata
 	password     string
 }
 
 func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
-	metadata := protocol.Metadata{
-		IsClient: header.IsClient,
-	}
-	//log.Trace("trojanc.NewDialer: metadata: %v, password: %v", metadata, password)
 	return &Dialer{
 		proxyAddress: header.ProxyAddress,
 		nextDialer:   nextDialer,
-		metadata:     metadata,
 		password:     header.Password,
 	}, nil
 }
@@ -36,28 +31,32 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (c net.Conn, err error) {
 	switch network {
 	case "tcp", "udp":
-		mdata, err := protocol.ParseMetadata(addr)
+		// Parse address using shadowsocks implementation
+		addressInfo, err := shadowsocks.AddressFromString(addr)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to parse address: %w", err)
 		}
-		mdata.IsClient = d.metadata.IsClient
 
+		// Connect to proxy server
 		conn, err := d.nextDialer.DialContext(ctx, "tcp", d.proxyAddress)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to connect to proxy: %w", err)
 		}
 
-		tcpConn, err := NewConn(conn, Metadata{
-			Metadata: mdata,
-			Network:  "tcp",
-		}, d.password)
+		// Create Trojan connection
+		tcpConn, err := NewConn(conn, addressInfo, network, d.password)
 		if err != nil {
-			return nil, err
+			conn.Close()
+			return nil, fmt.Errorf("failed to create Trojan connection: %w", err)
 		}
+
 		if network == "tcp" {
 			return tcpConn, nil
 		} else {
-			return &PacketConn{Conn: tcpConn}, nil
+			return &netproxy.BindPacketConn{
+				PacketConn: &PacketConn{Conn: tcpConn},
+				Address:    netproxy.NewAddr("udp", addr),
+			}, nil
 		}
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
@@ -65,23 +64,24 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 }
 
 func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
-	mdata, err := protocol.ParseMetadata(addr)
+	// Parse address using shadowsocks implementation
+	addressInfo, err := shadowsocks.AddressFromString(addr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse address: %w", err)
 	}
-	mdata.IsClient = d.metadata.IsClient
 
+	// Connect to proxy server
 	conn, err := d.nextDialer.DialContext(ctx, "tcp", d.proxyAddress)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to connect to proxy: %w", err)
 	}
 
-	tcpConn, err := NewConn(conn, Metadata{
-		Metadata: mdata,
-		Network:  "tcp",
-	}, d.password)
+	// Create Trojan connection for UDP
+	tcpConn, err := NewConn(conn, addressInfo, "udp", d.password)
 	if err != nil {
-		return nil, err
+		conn.Close()
+		return nil, fmt.Errorf("failed to create Trojan UDP connection: %w", err)
 	}
+
 	return &PacketConn{Conn: tcpConn}, nil
 }
