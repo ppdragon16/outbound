@@ -31,75 +31,68 @@ type Shadowsocks struct {
 	Cipher   string `json:"cipher"`
 	Plugin   Sip003 `json:"plugin"`
 	UDP      bool   `json:"udp"`
-	Protocol string `json:"protocol"`
 }
 
-func NewShadowsocksFromLink(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (npd netproxy.Dialer, property *dialer.Property, err error) {
+func NewShadowsocksFromLink(link string) (dialer.Dialer, *dialer.Property, error) {
 	s, err := ParseSSURL(link)
 	if err != nil {
 		return nil, nil, err
 	}
-	return s.Dialer(option, nextDialer)
+	return s, &dialer.Property{
+		Name:     s.Name,
+		Address:  net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
+		Protocol: "shadowsocks",
+		Link:     s.ExportToURL(),
+	}, nil
 }
 
-func (s *Shadowsocks) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, *dialer.Property, error) {
+func (s *Shadowsocks) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, error) {
 	var err error
 	d := nextDialer
 	switch s.Plugin.Name {
 	case "simple-obfs":
-		switch s.Plugin.Opts.Obfs {
-		case "http", "tls":
-		default:
-			return nil, nil, fmt.Errorf("unsupported obfs %v of plugin %v", s.Plugin.Opts.Obfs, s.Plugin.Name)
+		obfsType, err := simpleobfs.NewObfsType(s.Plugin.Opts.Obfs)
+		if err != nil {
+			return nil, err
 		}
 		host := s.Plugin.Opts.Host
 		if host == "" {
 			host = "cloudflare.com"
 		}
-		path := s.Plugin.Opts.Path
-		uSimpleObfs := url.URL{
-			Scheme: "simple-obfs",
-			Host:   net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
-			RawQuery: url.Values{
-				"obfs": []string{s.Plugin.Opts.Obfs},
-				"host": []string{host},
-				"uri":  []string{path},
-			}.Encode(),
+		d = &simpleobfs.SimpleObfs{
+			Dialer:   d,
+			Addr:     net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
+			ObfsType: obfsType,
+			Host:     host,
+			Path:     s.Plugin.Opts.Path,
 		}
-		d, _, err = simpleobfs.NewSimpleObfs(option, d, uSimpleObfs.String())
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	case "v2ray-plugin":
 		// https://github.com/teddysun/v2ray-plugin
 		switch s.Plugin.Opts.Obfs {
 		case "":
 			if s.Plugin.Opts.Tls == "tls" {
-				u := url.URL{
-					Scheme: option.TlsImplementation,
-					Host:   net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
-					RawQuery: url.Values{
-						"sni":            []string{s.Plugin.Opts.Host},
-						"allowInsecure":  []string{common.BoolToString(option.AllowInsecure)},
-						"utlsImitate":    []string{option.UtlsImitate},
-						"passthroughUdp": []string{"1"},
-					}.Encode(),
+				tlsConfig := tls.TLSConfig{
+					Host:           net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
+					Sni:            s.Plugin.Opts.Host,
+					AllowInsecure:  option.AllowInsecure,
+					PassthroughUdp: true,
 				}
-				if d, _, err = tls.NewTls(option, d, u.String()); err != nil {
-					return nil, nil, err
+				if d, err = tlsConfig.Dialer(option, d); err != nil {
+					return nil, err
 				}
 			}
-			u := url.URL{
-				Scheme: "ws",
-				Host:   net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
-				RawQuery: url.Values{
-					"host":           []string{s.Plugin.Opts.Host},
-					"path":           []string{"/"},
-					"passthroughUdp": []string{"1"},
-				}.Encode(),
+			wsConfig := ws.WsConfig{
+				Scheme:         "ws",
+				Host:           net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
+				Path:           "/",
+				Hostname:       s.Plugin.Opts.Host,
+				PassthroughUdp: true,
 			}
-			if d, _, err = ws.NewWs(option, d, u.String()); err != nil {
-				return nil, nil, err
+			if d, err = wsConfig.Dialer(option, d); err != nil {
+				return nil, err
 			}
 			d = &mux.Mux{
 				NextDialer:     d,
@@ -107,7 +100,7 @@ func (s *Shadowsocks) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dia
 				PassthroughUdp: true,
 			}
 		default:
-			return nil, nil, fmt.Errorf("unsupported mode %v of plugin %v", s.Plugin.Opts.Obfs, s.Plugin.Name)
+			return nil, fmt.Errorf("unsupported mode %v of plugin %v", s.Plugin.Opts.Obfs, s.Plugin.Name)
 		}
 	default:
 	}
@@ -121,23 +114,14 @@ func (s *Shadowsocks) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dia
 	case "aes-128-cfb", "aes-192-cfb", "aes-256-cfb", "aes-128-ctr", "aes-192-ctr", "aes-256-ctr", "aes-128-ofb", "aes-192-ofb", "aes-256-ofb", "des-cfb", "bf-cfb", "cast5-cfb", "rc4-md5", "rc4-md5-6", "chacha20", "chacha20-ietf", "salsa20", "camellia-128-cfb", "camellia-192-cfb", "camellia-256-cfb", "idea-cfb", "rc2-cfb", "seed-cfb", "rc4", "none", "plain":
 		nextDialerName = "shadowsocks_stream"
 	default:
-		return nil, nil, fmt.Errorf("unsupported shadowsocks encryption method: %v", s.Cipher)
+		return nil, fmt.Errorf("unsupported shadowsocks encryption method: %v", s.Cipher)
 	}
-	d, err = protocol.NewDialer(nextDialerName, d, protocol.Header{
+	return protocol.NewDialer(nextDialerName, d, protocol.Header{
 		ProxyAddress: net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
 		Cipher:       s.Cipher,
 		Password:     s.Password,
 		IsClient:     true,
 	})
-	if err != nil {
-		return nil, nil, err
-	}
-	return d, &dialer.Property{
-		Name:     s.Name,
-		Address:  net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
-		Protocol: s.Protocol,
-		Link:     s.ExportToURL(),
-	}, nil
 }
 
 func ParseSSURL(u string) (data *Shadowsocks, err error) {
@@ -173,7 +157,6 @@ func ParseSSURL(u string) (data *Shadowsocks, err error) {
 			Name:     u.Fragment,
 			Plugin:   sip003,
 			UDP:      sip003.Name == "",
-			Protocol: "shadowsocks",
 		}, true
 	}
 	var (

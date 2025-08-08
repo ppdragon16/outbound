@@ -28,12 +28,17 @@ type HTTP struct {
 	AllowInsecure bool   `json:"allowInsecure"`
 }
 
-func NewHTTP(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
+func NewHTTP(link string) (dialer.Dialer, *dialer.Property, error) {
 	s, err := ParseHTTPURL(link)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", dialer.InvalidParameterErr, err)
 	}
-	return s.Dialer(option, nextDialer)
+	return s, &dialer.Property{
+		Name:     s.Name,
+		Address:  net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
+		Protocol: s.Protocol,
+		Link:     s.ExportToURL(),
+	}, nil
 }
 
 func ParseHTTPURL(link string) (data *HTTP, err error) {
@@ -76,18 +81,9 @@ func ParseHTTPURL(link string) (data *HTTP, err error) {
 	}, nil
 }
 
-func (s *HTTP) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, *dialer.Property, error) {
+func (s *HTTP) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, error) {
 	u := s.URL()
-	d, err := http.NewHTTPProxy(&u, nextDialer)
-	if err != nil {
-		return nil, nil, err
-	}
-	return d, &dialer.Property{
-		Name:     s.Name,
-		Address:  net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
-		Protocol: s.Protocol,
-		Link:     u.String(),
-	}, nil
+	return http.NewHTTPProxy(&u, option, nextDialer)
 }
 
 func (s *HTTP) URL() url.URL {

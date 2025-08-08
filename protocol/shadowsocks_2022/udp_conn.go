@@ -146,7 +146,7 @@ func EncodeMessage(typ uint8, timestamp uint64, address *shadowsocks.AddressInfo
 }
 
 func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
-	buf := pool.GetBuffer(len(b) + 16)
+	buf := pool.GetBuffer(len(b) + 16 + c.cipherConf.TagLen)
 	defer pool.PutBuffer(buf)
 	n, err = c.Conn.Read(buf)
 	if err != nil {

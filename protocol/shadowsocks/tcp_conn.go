@@ -77,7 +77,7 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 				return 0, err
 			}
 		}
-		return n, err
+		return n, nil
 	}
 
 	if !c.onceRead {
@@ -105,7 +105,6 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 
 	// Chunk
 	payload, err := c.readChunk()
-	defer pool.PutBuffer(payload)
 	if err != nil {
 		return 0, err
 	}

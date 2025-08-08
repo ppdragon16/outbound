@@ -28,29 +28,29 @@ type Socks struct {
 	Protocol string `json:"protocol"`
 }
 
-func NewSocks(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
+func NewSocks(link string) (dialer.Dialer, *dialer.Property, error) {
 	s, err := ParseSocksURL(link)
 	if err != nil {
-		return nil, nil, dialer.InvalidParameterErr
+		return nil, nil, err
 	}
-	return s.Dialer(option, nextDialer)
+	return s, &dialer.Property{
+		Name:     s.Name,
+		Address:  net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
+		Protocol: s.Protocol,
+		Link:     link,
+	}, nil
 }
 
-func (s *Socks) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, *dialer.Property, error) {
+func (s *Socks) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, error) {
 	link := s.ExportToURL()
 	d := nextDialer
 	switch s.Protocol {
 	case "", "socks", "socks5":
 		d, err := socks5.NewSocks5Dialer(link, d) // Socks5 Proxy supports full-cone.
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		return d, &dialer.Property{
-			Name:     s.Name,
-			Address:  net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
-			Protocol: s.Protocol,
-			Link:     link,
-		}, nil
+		return d, nil
 	//case "socks4", "socks4a":
 	//	d, err := socks4.NewSocks4Dialer(link, &proxy.Direct{})
 	//	if err != nil {
@@ -58,7 +58,7 @@ func (s *Socks) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 	//	}
 	//	return dialer.NewDialer(d, false, s.Name, s.Protocol, link), nil
 	default:
-		return nil, nil, fmt.Errorf("unexpected protocol: %v", s.Protocol)
+		return nil, fmt.Errorf("unexpected protocol: %v", s.Protocol)
 	}
 }
 

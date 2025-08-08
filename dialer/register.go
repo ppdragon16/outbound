@@ -11,10 +11,9 @@ import (
 
 	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/common/url"
-	"github.com/daeuniverse/outbound/netproxy"
 )
 
-type FromLinkCreator func(gOption *ExtraOption, nextDialer netproxy.Dialer, link string) (dialer netproxy.Dialer, property *Property, err error)
+type FromLinkCreator func(link string) (dialer Dialer, property *Property, err error)
 
 var fromLinkCreators = make(map[string]FromLinkCreator)
 
@@ -22,18 +21,12 @@ func FromLinkRegister(name string, creator FromLinkCreator) {
 	fromLinkCreators[name] = creator
 }
 
-func NewNetproxyDialerFromLink(d netproxy.Dialer, gOption *ExtraOption, link string) (netproxy.Dialer, *Property, error) {
+func NewFromLink(link string) (dialers []Dialer, property *Property, err error) {
 	/// Get overwritten name.
 	overwrittenName, linklike := common.GetTagFromLinkLikePlaintext(link)
 	links := strings.Split(linklike, "->")
-	p := &Property{
-		Name:     "",
-		Address:  "",
-		Protocol: "",
-		Link:     linklike,
-	}
-	for i := len(links) - 1; i >= 0; i-- {
-		link := strings.TrimSpace(links[i])
+	for _, link := range links {
+		link = strings.TrimSpace(link)
 		u, err := url.Parse(link)
 		if err != nil {
 			return nil, nil, err
@@ -42,29 +35,20 @@ func NewNetproxyDialerFromLink(d netproxy.Dialer, gOption *ExtraOption, link str
 		if !ok {
 			return nil, nil, fmt.Errorf("unexpected link type: %v", u.Scheme)
 		}
-		var _property *Property
-		d, _property, err = creator(gOption, d, link)
+		s, currentProperty, err := creator(link)
 		if err != nil {
 			return nil, nil, fmt.Errorf("create %v: %w", link, err)
 		}
-		if p.Name == "" {
-			p.Name = _property.Name
-		} else {
-			p.Name = _property.Name + "->" + p.Name
+		dialers = append(dialers, s)
+		if property != nil {
+			property.Name = fmt.Sprintf("%s->%s", property.Name, currentProperty.Name)
+			property.Protocol = fmt.Sprintf("%s->%s", property.Protocol, currentProperty.Protocol)
+			property.Address = fmt.Sprintf("%s->%s", property.Address, currentProperty.Address)
 		}
-		if p.Protocol == "" {
-			p.Protocol = _property.Protocol
-		} else {
-			p.Protocol = _property.Protocol + "->" + p.Protocol
-		}
-		if p.Address == "" {
-			p.Address = _property.Address
-		} else {
-			p.Address = _property.Address + "->" + p.Address
-		}
+		property = currentProperty
 	}
 	if overwrittenName != "" {
-		p.Name = overwrittenName
+		property.Name = overwrittenName
 	}
-	return d, p, nil
+	return
 }

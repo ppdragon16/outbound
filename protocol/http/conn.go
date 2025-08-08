@@ -23,7 +23,7 @@ import (
 
 type Conn struct {
 	nextDialer netproxy.Dialer
-	conn       netproxy.Conn
+	conn       net.Conn
 
 	proxy        *HttpProxy
 	magicNetwork string
@@ -33,7 +33,7 @@ type Conn struct {
 	cancelShakeFinished func()
 	muShake             sync.Mutex
 	muFinishShakeFuncs  sync.Mutex
-	finishShakeFuncs    []func(conn netproxy.Conn)
+	finishShakeFuncs    []func(conn net.Conn)
 
 	isH2 bool
 }
@@ -51,7 +51,7 @@ func (c *Conn) SetDeadline(t time.Time) error {
 		}
 		return c.conn.SetDeadline(t)
 	default:
-		c.finishShakeFuncs = append(c.finishShakeFuncs, func(conn netproxy.Conn) {
+		c.finishShakeFuncs = append(c.finishShakeFuncs, func(conn net.Conn) {
 			if c.isH2 {
 				return
 			}
@@ -74,7 +74,7 @@ func (c *Conn) SetReadDeadline(t time.Time) error {
 		}
 		return c.conn.SetReadDeadline(t)
 	default:
-		c.finishShakeFuncs = append(c.finishShakeFuncs, func(conn netproxy.Conn) {
+		c.finishShakeFuncs = append(c.finishShakeFuncs, func(conn net.Conn) {
 			if c.isH2 {
 				return
 			}
@@ -97,7 +97,7 @@ func (c *Conn) SetWriteDeadline(t time.Time) error {
 		}
 		return c.conn.SetWriteDeadline(t)
 	default:
-		c.finishShakeFuncs = append(c.finishShakeFuncs, func(conn netproxy.Conn) {
+		c.finishShakeFuncs = append(c.finishShakeFuncs, func(conn net.Conn) {
 			if c.isH2 {
 				return
 			}
@@ -198,7 +198,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			req.Header.Del("Proxy-Connection")
 		}
 
-		connectHttp1 := func(rawConn netproxy.Conn) (n int, err error) {
+		connectHttp1 := func(rawConn net.Conn) (n int, err error) {
 			err = req.WriteProxy(rawConn)
 			if err != nil {
 				return 0, err
@@ -226,7 +226,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		}
 
 		// Thanks to v2fly/v2ray-core.
-		connectHttp2 := func(rawConn netproxy.Conn, h2clientConn *http2.ClientConn, req *http.Request) (conn *http2Conn, n int, err error) {
+		connectHttp2 := func(rawConn net.Conn, h2clientConn *http2.ClientConn, req *http.Request) (conn *http2Conn, n int, err error) {
 			pr, pw := io.Pipe()
 			req.Body = pr
 
@@ -251,9 +251,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			if resp.StatusCode != http.StatusOK {
 				return nil, 0, fmt.Errorf("proxy responded with non 200 code: %v", resp.Status)
 			}
-			return newHTTP2Conn(&netproxy.FakeNetConn{
-				Conn: rawConn,
-			}, pw, resp.Body), len(b), nil
+			return newHTTP2Conn(rawConn, pw, resp.Body), len(b), nil
 		}
 
 		if !c.proxy.https {
@@ -305,6 +303,14 @@ func (c *Conn) Close() error {
 	return nil
 }
 
+func (c *Conn) LocalAddr() net.Addr {
+	return c.conn.LocalAddr()
+}
+
+func (c *Conn) RemoteAddr() net.Addr {
+	return c.conn.RemoteAddr()
+}
+
 func newHTTP2Conn(c net.Conn, pipedReqBody *io.PipeWriter, respBody io.ReadCloser) *http2Conn {
 	return &http2Conn{Conn: c, in: pipedReqBody, out: respBody}
 }
@@ -330,7 +336,7 @@ func (h *http2Conn) Close() error {
 
 type h2Conn struct {
 	lastAccess time.Time
-	rawConn    netproxy.Conn
+	rawConn    net.Conn
 	h2Conn     *http2.ClientConn
 }
 
@@ -374,7 +380,7 @@ func (p *h2ConnsPool) registerAddrToMagicNetworkMapping(addr string, magicNetwor
 	p.addr2Somark.Store(addr, magicNetwork)
 }
 
-func (p *h2ConnsPool) GetUnderlayConn(c *http2.ClientConn) (netproxy.Conn, error) {
+func (p *h2ConnsPool) GetUnderlayConn(c *http2.ClientConn) (net.Conn, error) {
 	p.mu.Lock()
 	ident, ok := p.h2Conn2Ident[c]
 	p.mu.Unlock()
@@ -384,7 +390,7 @@ func (p *h2ConnsPool) GetUnderlayConn(c *http2.ClientConn) (netproxy.Conn, error
 	return ident.ele.Value.(*h2Conn).rawConn, nil
 }
 
-func (p *h2ConnsPool) GetConn(nextDialer netproxy.Dialer, addr string, magicNetwork string) (netproxy.Conn, *http2.ClientConn, error) {
+func (p *h2ConnsPool) GetConn(nextDialer netproxy.Dialer, addr string, magicNetwork string) (net.Conn, *http2.ClientConn, error) {
 	p.mu.Lock()
 	if p.h2ConnsPool[addr] == nil {
 		p.h2ConnsPool[addr] = newLockedList()
@@ -428,9 +434,7 @@ func (p *h2ConnsPool) GetConn(nextDialer netproxy.Dialer, addr string, magicNetw
 		t := http2.Transport{
 			ConnPool: p,
 		}
-		h2clientConn, err := t.NewClientConn(&netproxy.FakeNetConn{
-			Conn: rawConn,
-		})
+		h2clientConn, err := t.NewClientConn(rawConn)
 		if err != nil {
 			return nil, nil, err
 		}

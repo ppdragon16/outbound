@@ -3,6 +3,8 @@ package dialer
 import (
 	"fmt"
 	"time"
+
+	"github.com/daeuniverse/outbound/netproxy"
 )
 
 var (
@@ -19,7 +21,7 @@ type ExtraOption struct {
 	UtlsImitate         string
 	BandwidthMaxTx      string
 	BandwidthMaxRx      string
-	UDPHopInterval    time.Duration
+	UDPHopInterval      time.Duration
 }
 
 type Property struct {
@@ -27,4 +29,8 @@ type Property struct {
 	Address  string
 	Protocol string
 	Link     string
+}
+
+type Dialer interface {
+	Dialer(option *ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, error)
 }

@@ -4,10 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"net/url"
-	"strings"
 
-	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
 )
 
@@ -18,81 +15,52 @@ const (
 	TLS
 )
 
-// SimpleObfs is a base http-obfs struct
-type SimpleObfs struct {
-	dialer   netproxy.Dialer
-	obfstype ObfsType
-	addr     string
-	path     string
-	host     string
+func NewObfsType(obfsType string) (ObfsType, error) {
+	switch obfsType {
+	case "http":
+		return HTTP, nil
+	case "tls":
+		return TLS, nil
+	default:
+		return 0, fmt.Errorf("unsupported obfs type %v", obfsType)
+	}
 }
 
-// NewSimpleobfs returns a simpleobfs proxy.
-func NewSimpleObfs(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
-	u, err := url.Parse(link)
-	if err != nil {
-		return nil, nil, fmt.Errorf("simpleobfs: %w", err)
-	}
-
-	t := &SimpleObfs{
-		dialer: nextDialer,
-		addr:   u.Host,
-	}
-	query := u.Query()
-	obfstype := query.Get("type")
-	if obfstype == "" {
-		obfstype = query.Get("obfs")
-	}
-	switch strings.ToLower(obfstype) {
-	case "http":
-		t.obfstype = HTTP
-	case "tls":
-		t.obfstype = TLS
-	default:
-		return nil, nil, fmt.Errorf("unsupported obfs type %v", obfstype)
-	}
-	t.host = query.Get("host")
-	t.path = query.Get("path")
-	if t.path == "" {
-		t.path = query.Get("uri")
-	}
-	return t, &dialer.Property{
-		Name:     u.Fragment,
-		Address:  t.addr,
-		Protocol: "simpleobfs(" + obfstype + ")",
-		Link:     link,
-	}, nil
+// SimpleObfs is a base http-obfs struct
+type SimpleObfs struct {
+	Dialer   netproxy.Dialer
+	ObfsType ObfsType
+	Addr     string
+	Path     string
+	Host     string
 }
 
 func (s *SimpleObfs) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
 	switch network {
 	case "tcp":
-		rc, err := s.dialer.DialContext(ctx, network, s.addr)
+		rc, err := s.Dialer.DialContext(ctx, network, s.Addr)
 		if err != nil {
-			return nil, fmt.Errorf("[simpleobfs]: dial to %s: %w", s.addr, err)
+			return nil, fmt.Errorf("[simpleobfs]: dial to %s: %w", s.Addr, err)
 		}
 
-		host, port, err := net.SplitHostPort(s.addr)
+		_, port, err := net.SplitHostPort(s.Addr)
 		if err != nil {
 			return nil, err
 		}
-		if s.host != "" {
-			host = s.host
-		}
-		switch s.obfstype {
+		switch s.ObfsType {
 		case HTTP:
-			c = NewHTTPObfs(rc, host, port, s.path)
+			c = NewHTTPObfs(rc, s.Host, port, s.Path)
 		case TLS:
-			c = NewTLSObfs(rc, host)
+			c = NewTLSObfs(rc, s.Host)
 		}
 		return c, err
 	case "udp":
-		return s.dialer.DialContext(ctx, network, s.addr)
+		return s.Dialer.DialContext(ctx, network, s.Addr)
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
 }
 
 func (s *SimpleObfs) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
-	return s.dialer.ListenPacket(ctx, addr)
+	return s.Dialer.ListenPacket(ctx, addr)
 }

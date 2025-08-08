@@ -5,8 +5,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net"
-	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/daeuniverse/outbound/dialer"
@@ -18,8 +16,6 @@ import (
 type Tls struct {
 	dialer              netproxy.Dialer
 	addr                string
-	serverName          string
-	skipVerify          bool
 	tlsImplentation     string
 	utlsImitate         string
 	passthroughUdp      bool
@@ -32,75 +28,56 @@ type Tls struct {
 	tlsConfig *tls.Config
 }
 
+type TLSConfig struct {
+	Host           string
+	Sni            string
+	Alpn           string
+	PassthroughUdp bool
+
+	AllowInsecure bool
+}
+
 // NewTls returns a Tls infra.
-func NewTls(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
-	u, err := url.Parse(link)
-	if err != nil {
-		return nil, nil, fmt.Errorf("NewTls: %w", err)
-	}
-
-	query := u.Query()
-
-	tlsImplentation := u.Scheme
-	utlsImitate := query.Get("utlsImitate")
-	if (tlsImplentation == "tls" || tlsImplentation == "") && option.TlsImplementation != "" {
-		tlsImplentation = option.TlsImplementation
-		utlsImitate = option.UtlsImitate
-	}
+func (s *TLSConfig) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, error) {
 	t := &Tls{
 		dialer:          nextDialer,
-		addr:            u.Host,
-		tlsImplentation: tlsImplentation,
-		utlsImitate:     utlsImitate,
-		serverName:      query.Get("sni"),
+		addr:            s.Host,
+		tlsImplentation: option.TlsImplementation,
+		utlsImitate:     option.UtlsImitate,
+		passthroughUdp:  s.PassthroughUdp,
 	}
-	if t.serverName == "" {
-		t.serverName = u.Hostname()
+	if s.Sni == "" {
+		host, _, err := net.SplitHostPort(s.Host)
+		if err != nil {
+			return nil, err
+		}
+		s.Sni = host
 	}
-	t.passthroughUdp, _ = strconv.ParseBool(u.Query().Get("passthroughUdp"))
-
-	// skipVerify
-	allowInsecure, _ := strconv.ParseBool(u.Query().Get("allowInsecure"))
-	if !allowInsecure {
-		allowInsecure, _ = strconv.ParseBool(u.Query().Get("allow_insecure"))
-	}
-	if !allowInsecure {
-		allowInsecure, _ = strconv.ParseBool(u.Query().Get("allowinsecure"))
-	}
-	if !allowInsecure {
-		allowInsecure, _ = strconv.ParseBool(u.Query().Get("skipVerify"))
-	}
-	t.skipVerify = allowInsecure || option.AllowInsecure
 	t.tlsConfig = &tls.Config{
-		ServerName:         t.serverName,
-		InsecureSkipVerify: t.skipVerify,
+		ServerName:         s.Sni,
+		InsecureSkipVerify: s.AllowInsecure || option.AllowInsecure,
 	}
-	if len(query.Get("alpn")) > 0 {
-		t.tlsConfig.NextProtos = strings.Split(query.Get("alpn"), ",")
+	if len(s.Alpn) > 0 {
+		t.tlsConfig.NextProtos = strings.Split(s.Alpn, ",")
 	}
 
 	if option.TlsFragment {
 		t.fragmentation = true
 		minLen, maxLen, err := parseRange(option.TlsFragmentLength)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		t.fragmentMinLength = minLen
 		t.fragmentMaxLength = maxLen
 		minInterval, maxInterval, err := parseRange(option.TlsFragmentInterval)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		t.fragmentMinInterval = minInterval
 		t.fragmentMaxInterval = maxInterval
 	}
 
-	return t, &dialer.Property{
-		Name:     u.Fragment,
-		Address:  t.addr,
-		Protocol: tlsImplentation,
-		Link:     link,
-	}, nil
+	return t, nil
 }
 
 func (s *Tls) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {

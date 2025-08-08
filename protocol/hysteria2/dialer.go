@@ -116,7 +116,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.
 		}
 		return &netproxy.BindPacketConn{
 			PacketConn: c,
-			Address:    netproxy.NewProxyAddr("udp", address),
+			Address:    netproxy.NewAddr("udp", address),
 		}, nil
 	default:
 		return nil, oops.Errorf("unsupported network: %s", network)

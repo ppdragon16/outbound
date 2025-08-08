@@ -90,7 +90,7 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 				return 0, err
 			}
 		}
-		return n, err
+		return n, nil
 	}
 
 	var payloadLength uint16
@@ -165,7 +165,6 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 	}
 
 	payload := pool.GetBuffer(int(payloadLength) + c.cipherConf.TagLen)
-	defer pool.PutBuffer(payload)
 	if _, err = io.ReadFull(c.Conn, payload); err != nil {
 		return 0, err
 	}

@@ -190,7 +190,7 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 				"transport":         []string{"1"},
 			}.Encode(),
 		}
-		d, err = http.NewHTTPProxy(&u, direct.SymmetricDirect)
+		d, err = http.NewHTTPProxy(&u, option, direct.Direct)
 		if err != nil {
 			return nil, nil, err
 		}

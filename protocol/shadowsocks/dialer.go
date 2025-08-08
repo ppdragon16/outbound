@@ -60,7 +60,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 		}
 		return &netproxy.BindPacketConn{
 			PacketConn: conn,
-			Address:    netproxy.NewProxyAddr("udp", addr),
+			Address:    netproxy.NewAddr("udp", addr),
 		}, nil
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)

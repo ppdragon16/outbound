@@ -35,15 +35,20 @@ type Hysteria2 struct {
 	MaxRx     uint64
 }
 
-func NewHysteria2(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
+func NewHysteria2(link string) (dialer.Dialer, *dialer.Property, error) {
 	s, err := ParseHysteria2URL(link)
 	if err != nil {
 		return nil, nil, err
 	}
-	return s.Dialer(option, nextDialer)
+	return s, &dialer.Property{
+		Name:     s.Name,
+		Address:  s.Server,
+		Protocol: "hysteria2",
+		Link:     s.ExportToURL(),
+	}, nil
 }
 
-func (s *Hysteria2) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, *dialer.Property, error) {
+func (s *Hysteria2) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, error) {
 	d := nextDialer
 	header := protocol.Header{
 		ProxyAddress: s.Server,
@@ -68,11 +73,11 @@ func (s *Hysteria2) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Diale
 	} else if option.BandwidthMaxRx != "" && option.BandwidthMaxTx != "" {
 		maxRx, err := bandwidth.Parse(option.BandwidthMaxRx)
 		if err != nil {
-			return nil, nil, fmt.Errorf("invalid bandwidth value for MaxRx: %w", err)
+			return nil, fmt.Errorf("invalid bandwidth value for MaxRx: %w", err)
 		}
 		maxTx, err := bandwidth.Parse(option.BandwidthMaxTx)
 		if err != nil {
-			return nil, nil, fmt.Errorf("invalid bandwidth value for MaxTx: %w", err)
+			return nil, fmt.Errorf("invalid bandwidth value for MaxTx: %w", err)
 		}
 		if maxRx > 0 && maxTx > 0 {
 			feature1.BandwidthConfig = client.BandwidthConfig{
@@ -99,16 +104,7 @@ func (s *Hysteria2) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Diale
 			return fmt.Errorf("no matching certificate found, %s not in %v", nHash, certHashes)
 		}
 	}
-	var err error
-	if d, err = protocol.NewDialer("hysteria2", d, header); err != nil {
-		return nil, nil, err
-	}
-	return d, &dialer.Property{
-		Name:     s.Name,
-		Address:  s.Server,
-		Protocol: "hysteria2",
-		Link:     s.ExportToURL(),
-	}, nil
+	return protocol.NewDialer("hysteria2", d, header)
 }
 
 func normalizeCertHash(hash string) string {

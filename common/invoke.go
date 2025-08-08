@@ -18,7 +18,7 @@ func Invoke[R any](ctx context.Context, fn func() (R, error), cb func()) (res R,
 	case <-resChan:
 	}
 
-	if err != nil {
+	if err != nil && cb != nil {
 		cb()
 	}
 

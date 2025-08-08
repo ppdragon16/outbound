@@ -51,74 +51,97 @@ type Ws struct {
 	fragmentMaxInterval int64
 }
 
+type WsConfig struct {
+	Scheme         string
+	Host           string
+	Path           string
+	Hostname       string // Hostname in Http Header
+	Alpn           string
+	Sni            string
+	AllowInsecure  bool
+	PassthroughUdp bool
+}
+
 // NewWs returns a Ws infra.
-func NewWs(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
+func NewWs(link string) (dialer.Dialer, *dialer.Property, error) {
 	u, err := url.Parse(link)
 	if err != nil {
 		return nil, nil, fmt.Errorf("NewWs: %w", err)
 	}
 
-	t := &Ws{
-		dialer: nextDialer,
-	}
-
 	query := u.Query()
-	host := query.Get("host")
-	if host == "" {
-		host = u.Hostname()
-	}
-	t.header = http.Header{}
-	t.header.Set("Host", host)
 
-	t.passthroughUdp, _ = strconv.ParseBool(u.Query().Get("passthroughUdp"))
-
-	wsUrl := url.URL{
-		Scheme: u.Scheme,
-		Host:   u.Host,
+	t := &WsConfig{
+		Scheme:   u.Scheme,
+		Host:     u.Host,
+		Hostname: query.Get("host"),
+		Path:     u.Path,
+		Alpn:     query.Get("alpn"),
+		Sni:      query.Get("sni"),
 	}
-	t.wsAddr = wsUrl.String() + u.Path
+
+	if t.Hostname == "" {
+		t.Hostname = u.Hostname()
+	}
+	t.PassthroughUdp, _ = strconv.ParseBool(u.Query().Get("passthroughUdp"))
+
 	if u.Scheme == "wss" {
-		allowInsecure, _ := strconv.ParseBool(u.Query().Get("allowInsecure"))
-		if !allowInsecure {
-			allowInsecure, _ = strconv.ParseBool(u.Query().Get("allow_insecure"))
+		t.AllowInsecure, _ = strconv.ParseBool(u.Query().Get("allowInsecure"))
+		if !t.AllowInsecure {
+			t.AllowInsecure, _ = strconv.ParseBool(u.Query().Get("allow_insecure"))
 		}
-		if !allowInsecure {
-			allowInsecure, _ = strconv.ParseBool(u.Query().Get("allowinsecure"))
+		if !t.AllowInsecure {
+			t.AllowInsecure, _ = strconv.ParseBool(u.Query().Get("allowinsecure"))
 		}
-		if !allowInsecure {
-			allowInsecure, _ = strconv.ParseBool(u.Query().Get("skipVerify"))
-		}
-		// TODO: utls
-		t.tlsClientConfig = &tls.Config{
-			ServerName:         query.Get("sni"),
-			InsecureSkipVerify: allowInsecure || option.AllowInsecure,
-		}
-		if len(query.Get("alpn")) > 0 {
-			t.tlsClientConfig.NextProtos = strings.Split(query.Get("alpn"), ",")
-		}
-
-		if option.TlsFragment {
-			t.tlsFragmentation = true
-			minLen, maxLen, err := parseRange(option.TlsFragmentLength)
-			if err != nil {
-				return nil, nil, err
-			}
-			t.fragmentMinLength = minLen
-			t.fragmentMaxLength = maxLen
-			minInterval, maxInterval, err := parseRange(option.TlsFragmentInterval)
-			if err != nil {
-				return nil, nil, err
-			}
-			t.fragmentMinInterval = minInterval
-			t.fragmentMaxInterval = maxInterval
+		if !t.AllowInsecure {
+			t.AllowInsecure, _ = strconv.ParseBool(u.Query().Get("skipVerify"))
 		}
 	}
+
 	return t, &dialer.Property{
 		Name:     u.Fragment,
-		Address:  wsUrl.Host,
+		Address:  t.Host,
 		Protocol: u.Scheme,
 		Link:     link,
 	}, nil
+}
+
+func (s *WsConfig) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, error) {
+	wsUrl := url.URL{
+		Scheme: s.Scheme,
+		Host:   s.Host,
+		Path:   s.Path,
+	}
+	ws := &Ws{
+		dialer:         nextDialer,
+		wsAddr:         wsUrl.String(),
+		passthroughUdp: s.PassthroughUdp,
+		header:         http.Header{},
+		tlsClientConfig: &tls.Config{
+			ServerName:         s.Sni,
+			InsecureSkipVerify: s.AllowInsecure || option.AllowInsecure,
+		},
+	}
+	ws.header.Set("Host", s.Hostname)
+	if len(s.Alpn) > 0 {
+		ws.tlsClientConfig.NextProtos = strings.Split(s.Alpn, ",")
+	}
+	if option.TlsFragment {
+		ws.tlsFragmentation = true
+		minLen, maxLen, err := parseRange(option.TlsFragmentLength)
+		if err != nil {
+			return nil, err
+		}
+		ws.fragmentMinLength = minLen
+		ws.fragmentMaxLength = maxLen
+		minInterval, maxInterval, err := parseRange(option.TlsFragmentInterval)
+		if err != nil {
+			return nil, err
+		}
+		ws.fragmentMinInterval = minInterval
+		ws.fragmentMaxInterval = maxInterval
+	}
+	return ws, nil
 }
 
 func (s *Ws) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {

@@ -43,7 +43,7 @@ func (s *Socks5) DialContext(ctx context.Context, network, address string) (net.
 		}
 		return &netproxy.BindPacketConn{
 			PacketConn: c,
-			Address:    netproxy.NewProxyAddr("udp", address),
+			Address:    netproxy.NewAddr("udp", address),
 		}, nil
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
@@ -86,7 +86,7 @@ func (s *Socks5) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 		return nil, fmt.Errorf("[socks5] dialudp to %s error: %w", uAddress, err)
 	}
 
-	return NewPktConn(conn, ctrlConn, netproxy.NewProxyAddr("udp", uAddress)), nil
+	return NewPktConn(conn, ctrlConn, netproxy.NewAddr("udp", uAddress)), nil
 }
 
 // connect takes an existing connection to a socks5 proxy server,

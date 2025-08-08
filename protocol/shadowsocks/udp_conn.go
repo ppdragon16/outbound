@@ -73,7 +73,7 @@ func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 }
 
 func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
-	buf := pool.GetBuffer(len(b) + c.cipherConf.SaltLen)
+	buf := pool.GetBuffer(len(b) + c.cipherConf.SaltLen + c.cipherConf.TagLen)
 	defer pool.PutBuffer(buf)
 	n, err = c.Conn.Read(buf)
 	if err != nil {
