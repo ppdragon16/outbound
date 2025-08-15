@@ -12,13 +12,12 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/infra/socks"
 )
 
 type session struct {
-	conn     netproxy.Conn
+	conn     net.Conn
 	connLock sync.Mutex
 
 	streams    map[uint32]*stream
@@ -35,7 +34,7 @@ type session struct {
 	closeStreamChan chan uint32
 }
 
-func newSession(conn netproxy.Conn, seq uint64) *session {
+func newSession(conn net.Conn, seq uint64) *session {
 	s := &session{
 		conn:            conn,
 		streams:         map[uint32]*stream{},
@@ -122,9 +121,9 @@ func (s *session) run() error {
 				return err
 			}
 		case cmdPSH:
-			buf := pool.Get(length)
+			buf := pool.GetBuffer(length)
 			if _, err := io.ReadFull(s.conn, buf); err != nil {
-				pool.Put(buf)
+				pool.PutBuffer(buf)
 				return err
 			}
 			s.streamLock.RLock()
@@ -132,19 +131,19 @@ func (s *session) run() error {
 			s.streamLock.RUnlock()
 			if ok {
 				if _, err := stream.pw.Write(buf); err != nil {
-					pool.Put(buf)
+					pool.PutBuffer(buf)
 					return err
 				}
 			}
-			pool.Put(buf)
+			pool.PutBuffer(buf)
 		case cmdAlert:
-			buf := pool.Get(length)
+			buf := pool.GetBuffer(length)
 			if _, err := io.ReadFull(s.conn, buf); err != nil {
-				pool.Put(buf)
+				pool.PutBuffer(buf)
 				return err
 			}
 			slog.Error("[Alert]", slog.String("msg", string(buf)))
-			pool.Put(buf)
+			pool.PutBuffer(buf)
 		case cmdFIN:
 			s.streamLock.RLock()
 			stream, ok := s.streams[sid]
@@ -154,19 +153,19 @@ func (s *session) run() error {
 			}
 		case cmdUpdatePaddingScheme:
 			if length > 0 {
-				buf := pool.Get(length)
+				buf := pool.GetBuffer(length)
 				if _, err := io.ReadFull(s.conn, buf); err != nil {
-					pool.Put(buf)
+					pool.PutBuffer(buf)
 					return err
 				}
 				updatePaddingScheme(buf)
-				pool.Put(buf)
+				pool.PutBuffer(buf)
 			}
 		case cmdSYNACK:
 			if length > 0 {
-				buf := pool.Get(length)
+				buf := pool.GetBuffer(length)
 				if _, err := io.ReadFull(s.conn, buf); err != nil {
-					pool.Put(buf)
+					pool.PutBuffer(buf)
 					return err
 				}
 				s.streamLock.RLock()
@@ -175,13 +174,13 @@ func (s *session) run() error {
 				if ok {
 					stream.Close()
 				}
-				pool.Put(buf)
+				pool.PutBuffer(buf)
 			}
 		case cmdServerSettings:
 			if length > 0 {
-				buffer := pool.Get(length)
+				buffer := pool.GetBuffer(length)
 				if _, err := io.ReadFull(s.conn, buffer); err != nil {
-					pool.Put(buffer)
+					pool.PutBuffer(buffer)
 					return err
 				}
 				// check server's version
@@ -189,7 +188,7 @@ func (s *session) run() error {
 				if v, err := strconv.Atoi(m["v"]); err == nil {
 					s.peerVersion = byte(v)
 				}
-				pool.Put(buffer)
+				pool.PutBuffer(buffer)
 			}
 
 		case cmdHeartRequest:

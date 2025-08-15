@@ -51,8 +51,7 @@ func NewTrojan(link string) (dialer.Dialer, *dialer.Property, error) {
 	}, nil
 }
 
-func (s *Trojan) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, error) {
-	d := nextDialer
+func (s *Trojan) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) (netproxy.Dialer, error) {
 	var err error
 	if s.Type != "grpc" { // grpc contains tls
 		tlsConfig := tls.TLSConfig{
@@ -60,7 +59,7 @@ func (s *Trojan) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) 
 			Sni:           s.Sni,
 			AllowInsecure: s.AllowInsecure || option.AllowInsecure,
 		}
-		if d, err = tlsConfig.Dialer(option, d); err != nil {
+		if parentDialer, err = tlsConfig.Dialer(option, parentDialer); err != nil {
 			return nil, err
 		}
 	}
@@ -79,7 +78,7 @@ func (s *Trojan) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) 
 			Sni:           s.Sni,
 			AllowInsecure: s.AllowInsecure || option.AllowInsecure,
 		}
-		if d, err = ws.Dialer(option, d); err != nil {
+		if parentDialer, err = ws.Dialer(option, parentDialer); err != nil {
 			return nil, err
 		}
 	case "grpc":
@@ -87,8 +86,10 @@ func (s *Trojan) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) 
 		if serviceName == "" {
 			serviceName = "GunService"
 		}
-		d = &grpc.Dialer{
-			NextDialer:    d,
+		parentDialer = &grpc.Dialer{
+			StatelessDialer: protocol.StatelessDialer{
+				ParentDialer: parentDialer,
+			},
 			ServiceName:   serviceName,
 			ServerName:    s.Sni,
 			AllowInsecure: s.AllowInsecure || option.AllowInsecure,
@@ -103,25 +104,23 @@ func (s *Trojan) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) 
 			}.Encode(),
 		}
 
-		if d, err = httpupgrade.NewDialer(u.String(), d); err != nil {
+		if parentDialer, err = httpupgrade.NewDialer(u.String(), parentDialer); err != nil {
 			return nil, err
 		}
 	}
 	if strings.HasPrefix(s.Encryption, "ss;") {
 		fields := strings.SplitN(s.Encryption, ";", 3)
-		if d, err = protocol.NewDialer("shadowsocks", d, protocol.Header{
+		if parentDialer, err = protocol.NewDialer("shadowsocks", parentDialer, protocol.Header{
 			ProxyAddress: net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
 			Cipher:       fields[1],
 			Password:     fields[2],
-			IsClient:     false,
 		}); err != nil {
 			return nil, err
 		}
 	}
-	return protocol.NewDialer("trojanc", d, protocol.Header{
+	return protocol.NewDialer("trojanc", parentDialer, protocol.Header{
 		ProxyAddress: net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
 		Password:     s.Password,
-		IsClient:     true,
 	})
 }
 

@@ -28,8 +28,8 @@ func GenerateSubKey(masterKey []byte, salt []byte) (subKey []byte, err error) {
 
 func CreateCipher(masterKey []byte, salt []byte, cipherConf *ciphers.CipherConf) (cipher cipher.AEAD, err error) {
 	subKey, err := GenerateSubKey(masterKey, salt)
-	defer pool.PutBuffer(subKey)
 	if err != nil {
+		pool.PutBuffer(subKey)
 		return nil, err
 	}
 	return cipherConf.NewCipher(subKey)

@@ -1,6 +1,7 @@
-package shadowsocks
+package socks5
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -32,10 +33,16 @@ type AddressInfo struct {
 	Port     uint16
 }
 
-// EncodeAddressToPool encodes address information to buffer from pool
-// The returned buffer MUST be put back to pool after use
-func EncodeAddress(addr *AddressInfo) ([]byte, int, error) {
-	buf := pool.GetBytesBuffer()
+func WriteAddr(addr string, buf *bytes.Buffer) error {
+	addressInfo, err := AddressFromString(addr)
+	if err != nil {
+		return err
+	}
+	return WriteAddrInfo(addressInfo, buf)
+}
+
+// WriteAddr writes address information to buffer
+func WriteAddrInfo(addr *AddressInfo, buf *bytes.Buffer) error {
 	buf.WriteByte(byte(addr.Type))
 	switch addr.Type {
 	case AddressTypeIPv4, AddressTypeIPv6:
@@ -44,19 +51,34 @@ func EncodeAddress(addr *AddressInfo) ([]byte, int, error) {
 	case AddressTypeDomain:
 		lenDN := len(addr.Hostname)
 		if lenDN > 255 {
-			return nil, 0, fmt.Errorf("domain name too long: %d bytes", lenDN)
+			return fmt.Errorf("domain name too long: %d bytes", lenDN)
 		}
 		buf.WriteByte(uint8(lenDN))
 		buf.WriteString(addr.Hostname)
 		binary.Write(buf, binary.BigEndian, addr.Port)
 	default:
-		return nil, 0, fmt.Errorf("unsupported address type: %v", addr.Type)
+		return fmt.Errorf("unsupported address type: %v", addr.Type)
 	}
-	return buf.Bytes(), buf.Len(), nil
+	return nil
 }
 
-// DecodeAddress decodes address from buffer
-func DecodeAddress(data io.Reader) (*AddressInfo, error) {
+func ReadAddr(data io.Reader) (net.Addr, error) {
+	addressInfo, err := ReadAddrInfo(data)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create address object (only support IP addresses for UDP)
+	switch addressInfo.Type {
+	case AddressTypeIPv4, AddressTypeIPv6:
+		return net.UDPAddrFromAddrPort(netip.AddrPortFrom(addressInfo.IP, addressInfo.Port)), nil
+	default:
+		return nil, fmt.Errorf("unsupported address type for UDP: %v", addressInfo.Type)
+	}
+}
+
+// ReadAddr reads address from buffer
+func ReadAddrInfo(data io.Reader) (*AddressInfo, error) {
 	var typ uint8
 	if err := binary.Read(data, binary.BigEndian, &typ); err != nil {
 		return nil, fmt.Errorf("%w: too short", ErrInvalidAddress)

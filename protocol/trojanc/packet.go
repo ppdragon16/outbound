@@ -6,10 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/netip"
 
 	"github.com/daeuniverse/outbound/pool"
-	"github.com/daeuniverse/outbound/protocol/shadowsocks"
+	"github.com/daeuniverse/outbound/protocol/socks5"
 )
 
 type PacketConn struct {
@@ -24,17 +23,9 @@ type PacketConn struct {
 // +------+----------+----------+--------+---------+----------+
 func (c *PacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 	// Decode address using shadowsocks implementation
-	addressInfo, err := shadowsocks.DecodeAddress(c.Conn)
+	addr, err = socks5.ReadAddr(c.Conn)
 	if err != nil {
-		return 0, nil, fmt.Errorf("failed to decode address: %w", err)
-	}
-
-	// Create address object (only support IP addresses for UDP)
-	switch addressInfo.Type {
-	case shadowsocks.AddressTypeIPv4, shadowsocks.AddressTypeIPv6:
-		addr = net.UDPAddrFromAddrPort(netip.AddrPortFrom(addressInfo.IP, addressInfo.Port))
-	default:
-		return 0, nil, fmt.Errorf("unsupported address type for UDP: %v", addressInfo.Type)
+		return 0, nil, fmt.Errorf("failed to read address: %w", err)
 	}
 
 	// Read payload length (2 bytes)
@@ -61,24 +52,16 @@ func (c *PacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 
 // WriteTo writes a UDP packet according to Trojan UDP format
 func (c *PacketConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
-	// Parse the destination address
-	addressInfo, err := shadowsocks.AddressFromString(addr.String())
-	if err != nil {
-		return 0, fmt.Errorf("failed to parse destination address: %w", err)
-	}
 
 	// Build UDP packet using bytes.Buffer
 	buf := pool.GetBytesBuffer()
 	defer pool.PutBytesBuffer(buf)
 
 	// Encode address
-	addressBytes, _, err := shadowsocks.EncodeAddress(addressInfo)
+	err = socks5.WriteAddr(addr.String(), buf)
 	if err != nil {
 		return 0, fmt.Errorf("failed to encode address: %w", err)
 	}
-
-	// Write address
-	buf.Write(addressBytes)
 
 	// Write payload length
 	binary.Write(buf, binary.BigEndian, uint16(len(b)))

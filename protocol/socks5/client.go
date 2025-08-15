@@ -26,7 +26,7 @@ func NewSocks5Dialer(s string, d netproxy.Dialer) (netproxy.Dialer, error) {
 func (s *Socks5) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	switch network {
 	case "tcp":
-		c, err := s.dialer.DialContext(ctx, "tcp", s.addr)
+		c, err := s.ParentDialer.DialContext(ctx, "tcp", s.addr)
 		if err != nil {
 			return nil, fmt.Errorf("[socks5]: dial to %s error: %w", s.addr, err)
 		}
@@ -51,7 +51,7 @@ func (s *Socks5) DialContext(ctx context.Context, network, address string) (net.
 }
 
 func (s *Socks5) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
-	ctrlConn, err := s.dialer.DialContext(ctx, "tcp", s.addr)
+	ctrlConn, err := s.ParentDialer.DialContext(ctx, "tcp", s.addr)
 	if err != nil {
 		return nil, fmt.Errorf("[socks5]: dial to %s error: %w", s.addr, err)
 	}
@@ -81,7 +81,7 @@ func (s *Socks5) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 		uAddress = net.JoinHostPort(h, p)
 	}
 
-	conn, err := s.dialer.ListenPacket(ctx, uAddress)
+	conn, err := s.ParentDialer.ListenPacket(ctx, uAddress)
 	if err != nil {
 		return nil, fmt.Errorf("[socks5] dialudp to %s error: %w", uAddress, err)
 	}

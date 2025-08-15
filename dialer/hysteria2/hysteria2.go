@@ -48,8 +48,7 @@ func NewHysteria2(link string) (dialer.Dialer, *dialer.Property, error) {
 	}, nil
 }
 
-func (s *Hysteria2) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, error) {
-	d := nextDialer
+func (s *Hysteria2) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) (netproxy.Dialer, error) {
 	header := protocol.Header{
 		ProxyAddress: s.Server,
 		TlsConfig: &tls.Config{
@@ -59,7 +58,6 @@ func (s *Hysteria2) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Diale
 		SNI:      s.Sni,
 		User:     s.User,
 		Password: s.Password,
-		IsClient: true,
 	}
 
 	feature1 := &hysteria2.Feature1{
@@ -104,7 +102,7 @@ func (s *Hysteria2) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Diale
 			return fmt.Errorf("no matching certificate found, %s not in %v", nHash, certHashes)
 		}
 	}
-	return protocol.NewDialer("hysteria2", d, header)
+	return protocol.NewDialer("hysteria2", parentDialer, header)
 }
 
 func normalizeCertHash(hash string) string {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/protocol"
 	transportTls "github.com/daeuniverse/outbound/transport/tls"
 	"github.com/gorilla/websocket"
 )
@@ -39,7 +40,7 @@ func parseRange(str string) (min, max int64, err error) {
 
 // Ws is a base Ws struct
 type Ws struct {
-	dialer              netproxy.Dialer
+	protocol.StatelessDialer
 	wsAddr              string
 	header              http.Header
 	tlsClientConfig     *tls.Config
@@ -113,7 +114,9 @@ func (s *WsConfig) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer
 		Path:   s.Path,
 	}
 	ws := &Ws{
-		dialer:         nextDialer,
+		StatelessDialer: protocol.StatelessDialer{
+			ParentDialer: nextDialer,
+		},
 		wsAddr:         wsUrl.String(),
 		passthroughUdp: s.PassthroughUdp,
 		header:         http.Header{},
@@ -149,7 +152,7 @@ func (s *Ws) DialContext(ctx context.Context, network, addr string) (c net.Conn,
 	case "tcp":
 		wsDialer := &websocket.Dialer{
 			NetDial: func(_, addr string) (net.Conn, error) {
-				c, err := s.dialer.DialContext(ctx, network, addr)
+				c, err := s.ParentDialer.DialContext(ctx, network, addr)
 				if err != nil {
 					return nil, err
 				}
@@ -169,7 +172,7 @@ func (s *Ws) DialContext(ctx context.Context, network, addr string) (c net.Conn,
 		return newConn(rc), err
 	case "udp":
 		if s.passthroughUdp {
-			return s.dialer.DialContext(ctx, network, addr)
+			return s.ParentDialer.DialContext(ctx, network, addr)
 		}
 		return nil, fmt.Errorf("%w: ws+udp", netproxy.UnsupportedTunnelTypeError)
 	default:
@@ -179,7 +182,7 @@ func (s *Ws) DialContext(ctx context.Context, network, addr string) (c net.Conn,
 
 func (s *Ws) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
 	if s.passthroughUdp {
-		return s.dialer.ListenPacket(ctx, addr)
+		return s.ParentDialer.ListenPacket(ctx, addr)
 	}
 	return nil, fmt.Errorf("%w: ws+udp", netproxy.UnsupportedTunnelTypeError)
 }

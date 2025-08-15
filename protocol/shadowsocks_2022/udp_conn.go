@@ -9,14 +9,13 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/netip"
 	"time"
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
-	"github.com/daeuniverse/outbound/protocol/shadowsocks"
+	"github.com/daeuniverse/outbound/protocol/socks5"
 	disk_bloom "github.com/mzz2017/disk-bloom"
 	"github.com/samber/oops"
 	"lukechampine.com/blake3"
@@ -74,12 +73,6 @@ func (c *UdpConn) writeIdentityHeader(buf *bytes.Buffer, separateHeader []byte) 
 }
 
 func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
-	// Parse target address
-	targetAddr, err := shadowsocks.AddressFromString(addr.String())
-	if err != nil {
-		return 0, err
-	}
-
 	buf := pool.GetBytesBuffer()
 	defer pool.PutBytesBuffer(buf)
 
@@ -102,12 +95,12 @@ func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 
 	buf.Write(separateHeaderEncrypted)
 
-	err = c.writeIdentityHeader(buf, separateHeader.Bytes())
+	err := c.writeIdentityHeader(buf, separateHeader.Bytes())
 	if err != nil {
 		return 0, oops.Wrapf(err, "fail to write identity header")
 	}
 
-	message, err := EncodeMessage(HeaderTypeClientStream, uint64(time.Now().Unix()), targetAddr, b)
+	message, err := EncodeMessage(HeaderTypeClientStream, uint64(time.Now().Unix()), addr.String(), b)
 	defer pool.PutBytesBuffer(message)
 	if err != nil {
 		return 0, oops.Wrapf(err, "fail to encode message")
@@ -124,13 +117,7 @@ func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	return len(b), err
 }
 
-func EncodeMessage(typ uint8, timestamp uint64, address *shadowsocks.AddressInfo, b []byte) (*bytes.Buffer, error) {
-	addressBytes, _, err := shadowsocks.EncodeAddress(address)
-	defer pool.PutBuffer(addressBytes)
-	if err != nil {
-		return nil, err
-	}
-
+func EncodeMessage(typ uint8, timestamp uint64, address string, b []byte) (*bytes.Buffer, error) {
 	message := pool.GetBytesBuffer()
 	// Header
 	message.WriteByte(typ)
@@ -138,7 +125,9 @@ func EncodeMessage(typ uint8, timestamp uint64, address *shadowsocks.AddressInfo
 	// No padding
 	binary.Write(message, binary.BigEndian, uint16(0))
 	// Socks Address
-	message.Write(addressBytes)
+	if err := socks5.WriteAddr(address, message); err != nil {
+		return nil, err
+	}
 	// Payload
 	message.Write(b)
 
@@ -209,17 +198,9 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 	}
 
 	// Parse address from decrypted data
-	addressInfo, err := shadowsocks.DecodeAddress(reader)
+	addr, err = socks5.ReadAddr(reader)
 	if err != nil {
 		return 0, nil, err
-	}
-
-	// Create address object (only support IP addresses for UDP)
-	switch addressInfo.Type {
-	case shadowsocks.AddressTypeIPv4, shadowsocks.AddressTypeIPv6:
-		addr = net.UDPAddrFromAddrPort(netip.AddrPortFrom(addressInfo.IP, addressInfo.Port))
-	default:
-		return 0, nil, fmt.Errorf("unsupported address type for UDP: %v", addressInfo.Type)
 	}
 
 	// Copy remaining data to output buffer

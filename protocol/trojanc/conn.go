@@ -13,7 +13,7 @@ import (
 	"sync"
 
 	"github.com/daeuniverse/outbound/pool"
-	"github.com/daeuniverse/outbound/protocol/shadowsocks"
+	"github.com/daeuniverse/outbound/protocol/socks5"
 )
 
 var (
@@ -29,7 +29,7 @@ const (
 
 type Conn struct {
 	net.Conn
-	addr    *shadowsocks.AddressInfo
+	addr    *socks5.AddressInfo
 	command byte
 	pass    [56]byte
 
@@ -59,7 +59,7 @@ func NetworkToByte(network string) byte {
 	}
 }
 
-func NewConn(conn net.Conn, addr *shadowsocks.AddressInfo, network string, password string) (c *Conn, err error) {
+func NewConn(conn net.Conn, addr *socks5.AddressInfo, network string, password string) (c *Conn, err error) {
 	hash := sha256.New224()
 	hash.Write([]byte(password))
 	c = &Conn{
@@ -83,11 +83,10 @@ func (c *Conn) buildTrojanRequest(buf *bytes.Buffer) error {
 	buf.WriteByte(c.command)
 
 	// Encode address using shadowsocks format
-	addressBytes, _, err := shadowsocks.EncodeAddress(c.addr)
+	err := socks5.WriteAddrInfo(c.addr, buf)
 	if err != nil {
-		return fmt.Errorf("failed to encode address: %w", err)
+		return fmt.Errorf("failed to write address: %w", err)
 	}
-	buf.Write(addressBytes)
 
 	return nil
 }
@@ -178,48 +177,11 @@ func (c *Conn) readReqHeader() error {
 
 	c.command = commandBuf[0]
 
-	// Read address using shadowsocks decoder
-	// We need to read enough data to decode the address
-	headerBuf := pool.GetBuffer(1024) // Large enough for any address
-	defer pool.PutBuffer(headerBuf)
-
-	// Peek the first byte to determine address type
-	if _, err := io.ReadFull(c.Conn, headerBuf[:1]); err != nil {
-		return fmt.Errorf("failed to read address type: %w", err)
-	}
-
-	addressType := shadowsocks.AddressType(headerBuf[0])
-	var totalLen int
-
-	switch addressType {
-	case shadowsocks.AddressTypeIPv4:
-		totalLen = 1 + 4 + 2 // type + ip + port
-	case shadowsocks.AddressTypeIPv6:
-		totalLen = 1 + 16 + 2 // type + ip + port
-	case shadowsocks.AddressTypeDomain:
-		// Read domain length first
-		if _, err := io.ReadFull(c.Conn, headerBuf[1:2]); err != nil {
-			return fmt.Errorf("failed to read domain length: %w", err)
-		}
-		domainLen := int(headerBuf[1])
-		totalLen = 1 + 1 + domainLen + 2 // type + len + domain + port
-	default:
-		return fmt.Errorf("unsupported address type: %d", addressType)
-	}
-
-	// Read the rest of the address data
-	if _, err := io.ReadFull(c.Conn, headerBuf[1:totalLen]); err != nil {
-		return fmt.Errorf("failed to read address data: %w", err)
-	}
-
-	// Decode address using bytes.Reader
-	reader := bytes.NewReader(headerBuf[:totalLen])
-	addr, err := shadowsocks.DecodeAddress(reader)
+	var err error
+	c.addr, err = socks5.ReadAddrInfo(c.Conn)
 	if err != nil {
 		return fmt.Errorf("failed to decode address: %w", err)
 	}
-
-	c.addr = addr
 
 	// Read CRLF after address
 	if _, err := io.ReadFull(c.Conn, crlfBuf); err != nil {

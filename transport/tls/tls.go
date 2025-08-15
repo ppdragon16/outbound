@@ -9,12 +9,13 @@ import (
 
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/protocol"
 	utls "github.com/refraction-networking/utls"
 )
 
 // Tls is a base Tls struct
 type Tls struct {
-	dialer              netproxy.Dialer
+	protocol.StatelessDialer
 	addr                string
 	tlsImplentation     string
 	utlsImitate         string
@@ -40,7 +41,9 @@ type TLSConfig struct {
 // NewTls returns a Tls infra.
 func (s *TLSConfig) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, error) {
 	t := &Tls{
-		dialer:          nextDialer,
+		StatelessDialer: protocol.StatelessDialer{
+			ParentDialer: nextDialer,
+		},
 		addr:            s.Host,
 		tlsImplentation: option.TlsImplementation,
 		utlsImitate:     option.UtlsImitate,
@@ -83,7 +86,7 @@ func (s *TLSConfig) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Diale
 func (s *Tls) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
 	switch network {
 	case "tcp":
-		rc, err := s.dialer.DialContext(ctx, network, s.addr)
+		rc, err := s.ParentDialer.DialContext(ctx, network, s.addr)
 		if err != nil {
 			return nil, fmt.Errorf("[Tls]: dial to %s: %w", s.addr, err)
 		}
@@ -119,7 +122,7 @@ func (s *Tls) DialContext(ctx context.Context, network, addr string) (c net.Conn
 		return tlsConn, err
 	case "udp":
 		if s.passthroughUdp {
-			return s.dialer.DialContext(ctx, network, addr)
+			return s.ParentDialer.DialContext(ctx, network, addr)
 		}
 		return nil, fmt.Errorf("%w: tls+udp", netproxy.UnsupportedTunnelTypeError)
 	default:
@@ -129,7 +132,7 @@ func (s *Tls) DialContext(ctx context.Context, network, addr string) (c net.Conn
 
 func (s *Tls) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
 	if s.passthroughUdp {
-		return s.dialer.ListenPacket(ctx, addr)
+		return s.ParentDialer.ListenPacket(ctx, addr)
 	}
 	return nil, fmt.Errorf("%w: tls+udp", netproxy.UnsupportedTunnelTypeError)
 }

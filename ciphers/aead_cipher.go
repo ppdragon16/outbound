@@ -37,31 +37,3 @@ func NewGcm(key []byte) (cipher.AEAD, error) {
 	}
 	return cipher.NewGCM(block)
 }
-
-// func (conf *CipherConf) Verify(buf []byte, masterKey []byte, salt []byte, cipherText []byte, subKey *[]byte) ([]byte, bool) {
-// 	var sk []byte
-// 	if subKey != nil && len(*subKey) == conf.KeyLen {
-// 		sk = *subKey
-// 	} else {
-// 		sk = pool.Get(conf.KeyLen)
-// 		defer pool.Put(sk)
-// 		kdf := hkdf.New(
-// 			sha1.New,
-// 			masterKey,
-// 			salt,
-// 			ShadowsocksReusedInfo,
-// 		)
-// 		io.ReadFull(kdf, sk)
-// 		if subKey != nil && cap(*subKey) >= conf.KeyLen {
-// 			*subKey = (*subKey)[:conf.KeyLen]
-// 			copy(*subKey, sk)
-// 		}
-// 	}
-
-// 	ciph, _ := conf.NewCipher(sk)
-
-// 	if _, err := ciph.Open(buf[:0], ZeroNonce[:conf.NonceLen], cipherText, nil); err != nil {
-// 		return nil, false
-// 	}
-// 	return buf[:len(cipherText)-ciph.Overhead()], true
-// }

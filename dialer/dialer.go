@@ -32,5 +32,5 @@ type Property struct {
 }
 
 type Dialer interface {
-	Dialer(option *ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, error)
+	Dialer(option *ExtraOption, parentDialer netproxy.Dialer) (netproxy.Dialer, error)
 }

@@ -53,8 +53,8 @@ func (h rawHeader) Length() uint16 {
 func writeFrame(session *session, frame frame) (int, error) {
 	dataLen := len(frame.data)
 
-	buffer := pool.Get(dataLen + headerOverHeadSize)
-	defer pool.Put(buffer)
+	buffer := pool.GetBuffer(dataLen + headerOverHeadSize)
+	defer pool.PutBuffer(buffer)
 
 	buffer[0] = frame.cmd
 	binary.BigEndian.PutUint32(buffer[1:], frame.sid)

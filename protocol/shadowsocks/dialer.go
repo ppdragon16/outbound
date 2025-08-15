@@ -9,6 +9,7 @@ import (
 	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
+	"github.com/daeuniverse/outbound/protocol/socks5"
 )
 
 func init() {
@@ -16,8 +17,8 @@ func init() {
 }
 
 type Dialer struct {
+	protocol.StatelessDialer
 	proxyAddress string
-	nextDialer   netproxy.Dialer
 	conf         *ciphers.CipherConf
 	key          []byte
 	sg           SaltGenerator
@@ -32,8 +33,10 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	}
 	//log.Trace("shadowsocks.NewDialer: metadata: %v, password: %v", metadata, password)
 	return &Dialer{
+		StatelessDialer: protocol.StatelessDialer{
+			ParentDialer: nextDialer,
+		},
 		proxyAddress: header.ProxyAddress,
-		nextDialer:   nextDialer,
 		conf:         conf,
 		key:          key,
 		sg:           sg,
@@ -43,12 +46,12 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	switch network {
 	case "tcp":
-		addrInfo, err := AddressFromString(addr)
+		addrInfo, err := socks5.AddressFromString(addr)
 		if err != nil {
 			return nil, err
 		}
 		// Shadowsocks transfer TCP traffic via TCP tunnel.
-		conn, err := d.nextDialer.DialContext(ctx, network, d.proxyAddress)
+		conn, err := d.ParentDialer.DialContext(ctx, network, d.proxyAddress)
 		if err != nil {
 			return nil, err
 		}
@@ -69,7 +72,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 
 func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
 	// Shadowsocks transfer UDP traffic via UDP tunnel.
-	conn, err := d.nextDialer.DialContext(ctx, "udp", d.proxyAddress)
+	conn, err := d.ParentDialer.DialContext(ctx, "udp", d.proxyAddress)
 	if err != nil {
 		return nil, err
 	}

@@ -6,11 +6,12 @@ import (
 	"net"
 
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/protocol"
 )
 
 // Mux is a base Mux struct
 type Mux struct {
-	NextDialer     netproxy.Dialer
+	protocol.StatelessDialer
 	Addr           string
 	PassthroughUdp bool
 }
@@ -18,7 +19,7 @@ type Mux struct {
 func (s *Mux) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
 	switch network {
 	case "tcp":
-		c, err := s.NextDialer.DialContext(ctx, network, addr)
+		c, err := s.ParentDialer.DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, fmt.Errorf("[Mux]: dial to %s: %w", s.Addr, err)
 		}
@@ -30,7 +31,7 @@ func (s *Mux) DialContext(ctx context.Context, network, addr string) (c net.Conn
 		}), err
 	case "udp":
 		if s.PassthroughUdp {
-			return s.NextDialer.DialContext(ctx, network, addr)
+			return s.ParentDialer.DialContext(ctx, network, addr)
 		}
 		// TODO: mux+udp
 		return nil, fmt.Errorf("%w: mux+udp", netproxy.UnsupportedTunnelTypeError)
@@ -41,7 +42,7 @@ func (s *Mux) DialContext(ctx context.Context, network, addr string) (c net.Conn
 
 func (s *Mux) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
 	if s.PassthroughUdp {
-		return s.NextDialer.ListenPacket(ctx, addr)
+		return s.ParentDialer.ListenPacket(ctx, addr)
 	}
 	return nil, fmt.Errorf("%w: mux+udp", netproxy.UnsupportedTunnelTypeError)
 }

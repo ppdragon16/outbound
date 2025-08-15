@@ -17,6 +17,7 @@ import (
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks"
+	"github.com/daeuniverse/outbound/protocol/socks5"
 	disk_bloom "github.com/mzz2017/disk-bloom"
 	"github.com/samber/oops"
 	"lukechampine.com/blake3"
@@ -34,7 +35,7 @@ const (
 // TCPConn represents a Shadowsocks TCP connection
 type TCPConn struct {
 	net.Conn
-	addr       *shadowsocks.AddressInfo
+	addr       *socks5.AddressInfo
 	cipherConf *ciphers.CipherConf2022
 	pskList    [][]byte
 	uPSK       []byte
@@ -60,7 +61,7 @@ type Key struct {
 	MasterKey  []byte
 }
 
-func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf2022, pskList [][]byte, uPSK []byte, sg shadowsocks.SaltGenerator, addr *shadowsocks.AddressInfo, bloom *disk_bloom.FilterGroup) (crw *TCPConn, err error) {
+func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf2022, pskList [][]byte, uPSK []byte, sg shadowsocks.SaltGenerator, addr *socks5.AddressInfo, bloom *disk_bloom.FilterGroup) (crw *TCPConn, err error) {
 	return &TCPConn{
 		Conn:       conn,
 		addr:       addr,
@@ -181,18 +182,14 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 	return n, nil
 }
 
-func EncodeRequestHeader(typ uint8, timestamp uint64, address *shadowsocks.AddressInfo, b *[]byte) (*bytes.Buffer, *bytes.Buffer, error) {
-	addressBytes, _, err := shadowsocks.EncodeAddress(address)
-	defer pool.PutBuffer(addressBytes)
-	if err != nil {
-		return nil, nil, err
-	}
-
+func EncodeRequestHeader(typ uint8, timestamp uint64, addressInfo *socks5.AddressInfo, b *[]byte) (*bytes.Buffer, *bytes.Buffer, error) {
 	fixedHeader := pool.GetBytesBuffer()
 	varHeader := pool.GetBytesBuffer()
 
 	// Variable-length header: address (variable) + paddingLength (2) + padding (variable, 0) + payload (variable)
-	varHeader.Write(addressBytes)
+	if err := socks5.WriteAddrInfo(addressInfo, varHeader); err != nil {
+		return nil, nil, err
+	}
 	// No padding
 	binary.Write(varHeader, binary.BigEndian, uint16(0))
 	initialPayloadMaxLength := TCPChunkMaxLen - varHeader.Len()
@@ -215,13 +212,13 @@ func EncodeRequestHeader(typ uint8, timestamp uint64, address *shadowsocks.Addre
 }
 
 func (c *TCPConn) writeIdentityHeader(buf *bytes.Buffer, salt []byte) error {
+	identityHeader := pool.GetBuffer(aes.BlockSize)
+	defer pool.PutBuffer(identityHeader)
 	for i := 0; i < len(c.pskList)-1; i++ {
 		identity_subkey := GenerateSubKey(c.pskList[i], salt, Shadowsocks2022IdentityHeaderInfo)
 		plaintext := blake3.Sum512(c.pskList[i+1])
-		identityHeader := pool.GetBuffer(aes.BlockSize)
 		b, err := c.cipherConf.NewBlockCipher(identity_subkey)
 		if err != nil {
-			debug.PrintStack()
 			return err
 		}
 		b.Encrypt(identityHeader, plaintext[:aes.BlockSize])

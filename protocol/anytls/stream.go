@@ -9,14 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/infra/socks"
-)
-
-var (
-	_ netproxy.Conn       = (*stream)(nil)
-	_ netproxy.PacketConn = (*packetStream)(nil)
 )
 
 type stream struct {
@@ -110,38 +104,28 @@ type packetStream struct {
 	udpWriteAddr atomic.Bool
 }
 
-func (ps *packetStream) Read(p []byte) (n int, err error) {
-	n, _, err = ps.ReadFrom(p)
-	return n, err
-}
-
-func (ps *packetStream) ReadFrom(p []byte) (int, netip.AddrPort, error) {
+func (ps *packetStream) ReadFrom(p []byte) (int, net.Addr, error) {
 	if ps.closed.Load() {
-		return 0, netip.AddrPort{}, net.ErrClosed
+		return 0, nil, net.ErrClosed
 	}
 	ps.readMutex.Lock()
 	defer ps.readMutex.Unlock()
 
 	var length uint16
 	if err := binary.Read(ps.pr, binary.BigEndian, &length); err != nil {
-		return 0, netip.AddrPort{}, err
+		return 0, nil, err
 	}
 	if len(p) < int(length) {
-		return 0, netip.AddrPort{}, io.ErrShortBuffer
+		return 0, nil, io.ErrShortBuffer
 	}
 	n, err := io.ReadFull(ps.pr, p[:length])
 	if err != nil {
-		return 0, netip.AddrPort{}, err
+		return 0, nil, err
 	}
-	addr, _ := netip.ParseAddrPort(ps.addr)
-	return n, addr, nil
+	return n, net.UDPAddrFromAddrPort(netip.MustParseAddrPort(ps.addr)), nil
 }
 
-func (ps *packetStream) Write(p []byte) (n int, err error) {
-	return ps.WriteTo(p, ps.addr)
-}
-
-func (ps *packetStream) WriteTo(p []byte, addr string) (n int, err error) {
+func (ps *packetStream) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	if ps.closed.Load() {
 		return 0, net.ErrClosed
 	}
@@ -149,12 +133,12 @@ func (ps *packetStream) WriteTo(p []byte, addr string) (n int, err error) {
 	defer ps.writeMutex.Unlock()
 
 	if ps.udpWriteAddr.CompareAndSwap(false, true) {
-		tgtAddr, err := socks.ParseAddr(addr)
+		tgtAddr, err := socks.ParseAddr(addr.String())
 		if err != nil {
 			return 0, err
 		}
-		data := pool.Get(1 + len(tgtAddr) + 2 + len(p))
-		defer pool.Put(data)
+		data := pool.GetBuffer(1 + len(tgtAddr) + 2 + len(p))
+		defer pool.PutBuffer(data)
 		// connected mode
 		data[0] = 1
 		copy(data[1:], tgtAddr)
@@ -169,8 +153,8 @@ func (ps *packetStream) WriteTo(p []byte, addr string) (n int, err error) {
 		return len(p), nil
 	}
 
-	data := pool.Get(2 + len(p))
-	defer pool.Put(data)
+	data := pool.GetBuffer(2 + len(p))
+	defer pool.PutBuffer(data)
 	binary.BigEndian.PutUint16(data, uint16(len(p)))
 	copy(data[2:], p)
 

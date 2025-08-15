@@ -11,6 +11,7 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks"
+	"github.com/daeuniverse/outbound/protocol/socks5"
 )
 
 func init() {
@@ -18,8 +19,8 @@ func init() {
 }
 
 type Dialer struct {
+	protocol.StatelessDialer
 	proxyAddress       string
-	nextDialer         netproxy.Dialer
 	conf               *ciphers.CipherConf2022
 	pskList            [][]byte
 	uPSK               []byte
@@ -28,7 +29,7 @@ type Dialer struct {
 	blockCipherDecrypt cipher.Block
 }
 
-func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
+func NewDialer(parentDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
 	conf := ciphers.Aead2022CiphersConf[header.Cipher]
 	keyStrList := strings.Split(header.Password, ":")
 	pskList := make([][]byte, len(keyStrList))
@@ -53,8 +54,10 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		return nil, err
 	}
 	return &Dialer{
+		StatelessDialer: protocol.StatelessDialer{
+			ParentDialer: parentDialer,
+		},
 		proxyAddress:       header.ProxyAddress,
-		nextDialer:         nextDialer,
 		conf:               conf,
 		pskList:            pskList,
 		uPSK:               uPSK,
@@ -67,12 +70,12 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	switch network {
 	case "tcp":
-		addrInfo, err := shadowsocks.AddressFromString(addr)
+		addrInfo, err := socks5.AddressFromString(addr)
 		if err != nil {
 			return nil, err
 		}
 		// Shadowsocks transfer TCP traffic via TCP tunnel.
-		conn, err := d.nextDialer.DialContext(ctx, network, d.proxyAddress)
+		conn, err := d.ParentDialer.DialContext(ctx, network, d.proxyAddress)
 		if err != nil {
 			return nil, err
 		}
@@ -93,7 +96,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 
 func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
 	// Shadowsocks transfer UDP traffic via UDP tunnel.
-	conn, err := d.nextDialer.DialContext(ctx, "udp", d.proxyAddress)
+	conn, err := d.ParentDialer.DialContext(ctx, "udp", d.proxyAddress)
 	if err != nil {
 		return nil, err
 	}

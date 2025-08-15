@@ -125,6 +125,14 @@ func (d *directDialer) dialTCP(ctx context.Context, addr string, fallback bool) 
 	}
 }
 
+func (d *directDialer) Alive() bool {
+	return true
+}
+
+func (d *directDialer) Connect() error {
+	return nil
+}
+
 func (d *directDialer) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
 	switch network {
 	case "tcp":

@@ -6,6 +6,7 @@ import (
 	"net"
 
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/protocol"
 )
 
 type ObfsType int
@@ -28,7 +29,7 @@ func NewObfsType(obfsType string) (ObfsType, error) {
 
 // SimpleObfs is a base http-obfs struct
 type SimpleObfs struct {
-	Dialer   netproxy.Dialer
+	protocol.StatelessDialer
 	ObfsType ObfsType
 	Addr     string
 	Path     string
@@ -38,7 +39,7 @@ type SimpleObfs struct {
 func (s *SimpleObfs) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
 	switch network {
 	case "tcp":
-		rc, err := s.Dialer.DialContext(ctx, network, s.Addr)
+		rc, err := s.ParentDialer.DialContext(ctx, network, s.Addr)
 		if err != nil {
 			return nil, fmt.Errorf("[simpleobfs]: dial to %s: %w", s.Addr, err)
 		}
@@ -55,12 +56,12 @@ func (s *SimpleObfs) DialContext(ctx context.Context, network, addr string) (c n
 		}
 		return c, err
 	case "udp":
-		return s.Dialer.DialContext(ctx, network, s.Addr)
+		return s.ParentDialer.DialContext(ctx, network, s.Addr)
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
 }
 
 func (s *SimpleObfs) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
-	return s.Dialer.ListenPacket(ctx, addr)
+	return s.ParentDialer.ListenPacket(ctx, addr)
 }

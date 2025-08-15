@@ -26,6 +26,5 @@ func GenerateSubKey(psk []byte, salt []byte, context string) (subKey []byte) {
 
 func CreateCipher(masterKey []byte, salt []byte, cipherConf *ciphers.CipherConf2022) (cipher cipher.AEAD, err error) {
 	subKey := GenerateSubKey(masterKey, salt, Shadowsocks2022ReusedInfo)
-	defer pool.PutBuffer(subKey)
 	return cipherConf.NewCipher(subKey)
 }

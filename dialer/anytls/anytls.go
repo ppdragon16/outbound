@@ -22,14 +22,19 @@ type Anytls struct {
 	Insecure bool
 }
 
-func NewAnytls(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
+func NewAnytls(link string) (dialer.Dialer, *dialer.Property, error) {
 	switch {
 	case strings.HasPrefix(link, "anytls://"):
 		s, err := parseAnytlsURL(link)
 		if err != nil {
 			return nil, nil, err
 		}
-		return s.Dialer(option, nextDialer)
+		return s, &dialer.Property{
+			Name:     "anytls",
+			Protocol: "anytls",
+			Address:  s.Host,
+			Link:     s.link,
+		}, nil
 	default:
 		return nil, nil, dialer.InvalidParameterErr
 	}
@@ -51,7 +56,7 @@ func parseAnytlsURL(link string) (*Anytls, error) {
 	return antls, nil
 }
 
-func (s *Anytls) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, *dialer.Property, error) {
+func (s *Anytls) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) (netproxy.Dialer, error) {
 	tlsConfig := &tls.Config{
 		ServerName:         s.Sni,
 		InsecureSkipVerify: s.Insecure,
@@ -60,19 +65,9 @@ func (s *Anytls) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) 
 		// disable the SNI
 		tlsConfig.ServerName = "127.0.0.1"
 	}
-	d, err := protocol.NewDialer("anytls", nextDialer, protocol.Header{
+	return protocol.NewDialer("anytls", parentDialer, protocol.Header{
 		ProxyAddress: s.Host,
 		Password:     s.Auth,
-		IsClient:     true,
 		TlsConfig:    tlsConfig,
 	})
-	if err != nil {
-		return nil, nil, err
-	}
-	return d, &dialer.Property{
-		Name:     "anytls",
-		Protocol: "anytls",
-		Address:  s.Host,
-		Link:     s.link,
-	}, nil
 }

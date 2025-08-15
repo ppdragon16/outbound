@@ -53,6 +53,7 @@ require (
 	github.com/prometheus/procfs v0.15.1 // indirect
 	github.com/quic-go/qpack v0.5.1 // indirect
 	github.com/samber/lo v1.50.0 // indirect
+	github.com/xtaci/smux v1.5.34 // indirect
 	go.opentelemetry.io/otel v1.29.0 // indirect
 	go.opentelemetry.io/otel/trace v1.29.0 // indirect
 	go.uber.org/mock v0.5.0 // indirect

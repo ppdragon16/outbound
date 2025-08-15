@@ -7,7 +7,7 @@ import (
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
-	"github.com/daeuniverse/outbound/protocol/shadowsocks"
+	"github.com/daeuniverse/outbound/protocol/socks5"
 )
 
 func init() {
@@ -15,15 +15,17 @@ func init() {
 }
 
 type Dialer struct {
+	protocol.StatelessDialer
 	proxyAddress string
-	nextDialer   netproxy.Dialer
 	password     string
 }
 
-func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
+func NewDialer(parentDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
 	return &Dialer{
+		StatelessDialer: protocol.StatelessDialer{
+			ParentDialer: parentDialer,
+		},
 		proxyAddress: header.ProxyAddress,
-		nextDialer:   nextDialer,
 		password:     header.Password,
 	}, nil
 }
@@ -32,13 +34,13 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 	switch network {
 	case "tcp", "udp":
 		// Parse address using shadowsocks implementation
-		addressInfo, err := shadowsocks.AddressFromString(addr)
+		addressInfo, err := socks5.AddressFromString(addr)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse address: %w", err)
 		}
 
 		// Connect to proxy server
-		conn, err := d.nextDialer.DialContext(ctx, "tcp", d.proxyAddress)
+		conn, err := d.ParentDialer.DialContext(ctx, "tcp", d.proxyAddress)
 		if err != nil {
 			return nil, fmt.Errorf("failed to connect to proxy: %w", err)
 		}
@@ -65,13 +67,13 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 
 func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
 	// Parse address using shadowsocks implementation
-	addressInfo, err := shadowsocks.AddressFromString(addr)
+	addressInfo, err := socks5.AddressFromString(addr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse address: %w", err)
 	}
 
 	// Connect to proxy server
-	conn, err := d.nextDialer.DialContext(ctx, "tcp", d.proxyAddress)
+	conn, err := d.ParentDialer.DialContext(ctx, "tcp", d.proxyAddress)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to proxy: %w", err)
 	}

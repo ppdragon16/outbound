@@ -14,6 +14,7 @@ import (
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/transport/mux"
 	"github.com/daeuniverse/outbound/transport/simpleobfs"
+	"github.com/daeuniverse/outbound/transport/smux"
 	"github.com/daeuniverse/outbound/transport/tls"
 	"github.com/daeuniverse/outbound/transport/ws"
 )
@@ -24,13 +25,14 @@ func init() {
 }
 
 type Shadowsocks struct {
-	Name     string `json:"name"`
-	Server   string `json:"server"`
-	Port     int    `json:"port"`
-	Password string `json:"password"`
-	Cipher   string `json:"cipher"`
-	Plugin   Sip003 `json:"plugin"`
-	UDP      bool   `json:"udp"`
+	Name      string `json:"name"`
+	Server    string `json:"server"`
+	Port      int    `json:"port"`
+	Password  string `json:"password"`
+	Cipher    string `json:"cipher"`
+	Plugin    Sip003 `json:"plugin"`
+	UDP       bool   `json:"udp"`
+	Multiplex bool   `json:"multiplex"`
 }
 
 func NewShadowsocksFromLink(link string) (dialer.Dialer, *dialer.Property, error) {
@@ -46,9 +48,8 @@ func NewShadowsocksFromLink(link string) (dialer.Dialer, *dialer.Property, error
 	}, nil
 }
 
-func (s *Shadowsocks) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, error) {
+func (s *Shadowsocks) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) (netproxy.Dialer, error) {
 	var err error
-	d := nextDialer
 	switch s.Plugin.Name {
 	case "simple-obfs":
 		obfsType, err := simpleobfs.NewObfsType(s.Plugin.Opts.Obfs)
@@ -59,8 +60,10 @@ func (s *Shadowsocks) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dia
 		if host == "" {
 			host = "cloudflare.com"
 		}
-		d = &simpleobfs.SimpleObfs{
-			Dialer:   d,
+		parentDialer = &simpleobfs.SimpleObfs{
+			StatelessDialer: protocol.StatelessDialer{
+				ParentDialer: parentDialer,
+			},
 			Addr:     net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
 			ObfsType: obfsType,
 			Host:     host,
@@ -80,7 +83,7 @@ func (s *Shadowsocks) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dia
 					AllowInsecure:  option.AllowInsecure,
 					PassthroughUdp: true,
 				}
-				if d, err = tlsConfig.Dialer(option, d); err != nil {
+				if parentDialer, err = tlsConfig.Dialer(option, parentDialer); err != nil {
 					return nil, err
 				}
 			}
@@ -91,11 +94,13 @@ func (s *Shadowsocks) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dia
 				Hostname:       s.Plugin.Opts.Host,
 				PassthroughUdp: true,
 			}
-			if d, err = wsConfig.Dialer(option, d); err != nil {
+			if parentDialer, err = wsConfig.Dialer(option, parentDialer); err != nil {
 				return nil, err
 			}
-			d = &mux.Mux{
-				NextDialer:     d,
+			parentDialer = &mux.Mux{
+				StatelessDialer: protocol.StatelessDialer{
+					ParentDialer: parentDialer,
+				},
 				Addr:           net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
 				PassthroughUdp: true,
 			}
@@ -105,23 +110,33 @@ func (s *Shadowsocks) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dia
 	default:
 	}
 
-	var nextDialerName string
+	var typeName string
 	switch s.Cipher {
 	case "aes-256-gcm", "aes-128-gcm", "chacha20-poly1305", "chacha20-ietf-poly1305":
-		nextDialerName = "shadowsocks"
+		typeName = "shadowsocks"
 	case "2022-blake3-aes-256-gcm", "2022-blake3-aes-128-gcm":
-		nextDialerName = "shadowsocks_2022"
+		typeName = "shadowsocks_2022"
 	case "aes-128-cfb", "aes-192-cfb", "aes-256-cfb", "aes-128-ctr", "aes-192-ctr", "aes-256-ctr", "aes-128-ofb", "aes-192-ofb", "aes-256-ofb", "des-cfb", "bf-cfb", "cast5-cfb", "rc4-md5", "rc4-md5-6", "chacha20", "chacha20-ietf", "salsa20", "camellia-128-cfb", "camellia-192-cfb", "camellia-256-cfb", "idea-cfb", "rc2-cfb", "seed-cfb", "rc4", "none", "plain":
-		nextDialerName = "shadowsocks_stream"
+		typeName = "shadowsocks_stream"
 	default:
 		return nil, fmt.Errorf("unsupported shadowsocks encryption method: %v", s.Cipher)
 	}
-	return protocol.NewDialer(nextDialerName, d, protocol.Header{
+	dialer, err := protocol.NewDialer(typeName, parentDialer, protocol.Header{
 		ProxyAddress: net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
 		Cipher:       s.Cipher,
 		Password:     s.Password,
-		IsClient:     true,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if s.Multiplex {
+		return &smux.Smux{
+			Dialer:         dialer,
+			PassthroughUdp: true,
+		}, nil
+	} else {
+		return dialer, nil
+	}
 }
 
 func ParseSSURL(u string) (data *Shadowsocks, err error) {
@@ -149,7 +164,7 @@ func ParseSSURL(u string) (data *Shadowsocks, err error) {
 		if err != nil {
 			return nil, false
 		}
-		return &Shadowsocks{
+		ss := Shadowsocks{
 			Cipher:   strings.ToLower(cipher),
 			Password: password,
 			Server:   u.Hostname(),
@@ -157,7 +172,9 @@ func ParseSSURL(u string) (data *Shadowsocks, err error) {
 			Name:     u.Fragment,
 			Plugin:   sip003,
 			UDP:      sip003.Name == "",
-		}, true
+		}
+		ss.Multiplex, _ = strconv.ParseBool(u.Query().Get("multiplex"))
+		return &ss, true
 	}
 	var (
 		v  *Shadowsocks

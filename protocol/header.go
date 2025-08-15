@@ -10,7 +10,6 @@ type Header struct {
 	Cipher       string
 	User         string
 	Password     string
-	IsClient     bool
 	Flags        Flags
 }
 

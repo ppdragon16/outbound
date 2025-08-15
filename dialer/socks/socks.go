@@ -41,12 +41,11 @@ func NewSocks(link string) (dialer.Dialer, *dialer.Property, error) {
 	}, nil
 }
 
-func (s *Socks) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, error) {
+func (s *Socks) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) (netproxy.Dialer, error) {
 	link := s.ExportToURL()
-	d := nextDialer
 	switch s.Protocol {
 	case "", "socks", "socks5":
-		d, err := socks5.NewSocks5Dialer(link, d) // Socks5 Proxy supports full-cone.
+		d, err := socks5.NewSocks5Dialer(link, parentDialer) // Socks5 Proxy supports full-cone.
 		if err != nil {
 			return nil, err
 		}

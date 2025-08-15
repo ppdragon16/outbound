@@ -14,6 +14,7 @@ import (
 	"github.com/daeuniverse/outbound/pkg/cert"
 	proto "github.com/daeuniverse/outbound/pkg/gun_proto"
 	"github.com/daeuniverse/outbound/pool"
+	"github.com/daeuniverse/outbound/protocol"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/codes"
@@ -315,7 +316,7 @@ func (c *ClientConn) RemoteAddr() net.Addr {
 }
 
 type Dialer struct {
-	NextDialer    netproxy.Dialer
+	protocol.StatelessDialer
 	ServiceName   string
 	ServerName    string
 	AllowInsecure bool
@@ -324,7 +325,7 @@ type Dialer struct {
 func (d *Dialer) DialContext(ctx context.Context, network string, address string) (net.Conn, error) {
 	switch network {
 	case "tcp":
-		meta, cancel, err := getGrpcClientConn(ctx, d.NextDialer, d.ServerName, address, d.AllowInsecure)
+		meta, cancel, err := getGrpcClientConn(ctx, d.ParentDialer, d.ServerName, address, d.AllowInsecure)
 		if err != nil {
 			cancel()
 			return nil, err

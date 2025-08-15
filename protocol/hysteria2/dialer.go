@@ -1,7 +1,6 @@
 package hysteria2
 
 import (
-	"context"
 	"crypto/tls"
 	"net"
 	"strings"
@@ -12,7 +11,6 @@ import (
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/client"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/udphop"
-	"github.com/samber/oops"
 )
 
 func init() {
@@ -21,8 +19,7 @@ func init() {
 
 // Why Metadata?
 type Dialer struct {
-	client   *client.Client
-	metadata protocol.Metadata
+	*client.Client
 }
 
 type Feature1 struct {
@@ -71,10 +68,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	}
 
 	return &Dialer{
-		client: client,
-		metadata: protocol.Metadata{
-			IsClient: header.IsClient,
-		},
+		Client: client,
 	}, nil
 }
 
@@ -92,40 +86,4 @@ func parseServerAddrString(addrStr string) (host, port string) {
 // We consider a port string to be a port hopping port if it contains "-" or ",".
 func isPortHoppingPort(port string) bool {
 	return strings.Contains(port, "-") || strings.Contains(port, ",")
-}
-
-func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	if err := d.client.PrepareConn(ctx); err != nil {
-		return nil, err
-	}
-	switch network {
-	case "tcp":
-		stream, err := d.client.OpenStream(ctx)
-		if err != nil {
-			return nil, err
-		}
-		return common.Invoke(ctx, func() (net.Conn, error) {
-			return d.client.DialConn(stream, address)
-		}, func() {
-			stream.Close()
-		})
-	case "udp":
-		c, err := d.client.ListenPacket()
-		if err != nil {
-			return nil, err
-		}
-		return &netproxy.BindPacketConn{
-			PacketConn: c,
-			Address:    netproxy.NewAddr("udp", address),
-		}, nil
-	default:
-		return nil, oops.Errorf("unsupported network: %s", network)
-	}
-}
-
-func (d *Dialer) ListenPacket(ctx context.Context, _ string) (net.PacketConn, error) {
-	if err := d.client.PrepareConn(ctx); err != nil {
-		return nil, err
-	}
-	return d.client.ListenPacket()
 }

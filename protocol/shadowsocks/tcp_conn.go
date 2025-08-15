@@ -12,6 +12,7 @@ import (
 	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
+	"github.com/daeuniverse/outbound/protocol/socks5"
 	disk_bloom "github.com/mzz2017/disk-bloom"
 	"github.com/samber/oops"
 )
@@ -23,7 +24,7 @@ const (
 // TCPConn represents a Shadowsocks TCP connection
 type TCPConn struct {
 	net.Conn
-	addr       *AddressInfo
+	addr       *socks5.AddressInfo
 	cipherConf *ciphers.CipherConf
 	masterKey  []byte
 	sg         SaltGenerator
@@ -48,7 +49,7 @@ type Key struct {
 	MasterKey  []byte
 }
 
-func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf, masterKey []byte, sg SaltGenerator, addr *AddressInfo, bloom *disk_bloom.FilterGroup) (crw *TCPConn, err error) {
+func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf, masterKey []byte, sg SaltGenerator, addr *socks5.AddressInfo, bloom *disk_bloom.FilterGroup) (crw *TCPConn, err error) {
 	return &TCPConn{
 		Conn:       conn,
 		addr:       addr,
@@ -159,12 +160,7 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 
 		// Create address metadata for the first write
 		// For client connections, encode the target address
-		addressBytes, _, err := EncodeAddress(c.addr)
-		defer pool.PutBuffer(addressBytes)
-		if err != nil {
-			return 0, err
-		}
-		payload.Write(addressBytes)
+		socks5.WriteAddrInfo(c.addr, payload)
 
 		c.onceWrite = true
 	}

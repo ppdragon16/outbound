@@ -32,6 +32,14 @@ func (d *blockDialer) ListenPacket(ctx context.Context, addr string) (c net.Pack
 	return nil, net.ErrClosed
 }
 
+func (d *blockDialer) Connect() error {
+	return nil
+}
+
+func (d *blockDialer) Alive() bool {
+	return true
+}
+
 func NewBlockDialer(option *ExtraOption, dialCallback func()) (netproxy.Dialer, *Property) {
 	return &blockDialer{DialCallback: dialCallback}, &Property{
 		Name:     "block",

@@ -12,10 +12,11 @@ import (
 	"strings"
 
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/protocol"
 )
 
 type Dialer struct {
-	nextDialer netproxy.Dialer
+	protocol.StatelessDialer
 	tlsConfig  *tls.Config
 	addr       string
 	host       string
@@ -37,9 +38,11 @@ func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 	}
 
 	t := &Dialer{
-		nextDialer: d,
-		addr:       u.Host,
-		path:       path,
+		StatelessDialer: protocol.StatelessDialer{
+			ParentDialer: d,
+		},
+		addr: u.Host,
+		path: path,
 	}
 
 	if query.Get("allowInsecure") == "true" || query.Get("allowInsecure") == "1" ||
@@ -70,7 +73,7 @@ func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
 	switch network {
 	case "tcp":
-		conn, err := t.nextDialer.DialContext(ctx, network, addr)
+		conn, err := t.ParentDialer.DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, err
 		}

@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"fmt"
 	"net"
-	"net/netip"
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
+	"github.com/daeuniverse/outbound/protocol/socks5"
 	disk_bloom "github.com/mzz2017/disk-bloom"
 )
 
@@ -36,26 +36,16 @@ func (c *UdpConn) Close() error {
 }
 
 func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
-	// Parse target address
-	targetAddr, err := AddressFromString(addr.String())
-	if err != nil {
-		return 0, err
-	}
-
 	buf := pool.GetBytesBuffer()
 	payload := pool.GetBytesBuffer()
 	defer pool.PutBytesBuffer(buf)
 	defer pool.PutBytesBuffer(payload)
 
-	// Encode address bytes
-	addressBytes, _, err := EncodeAddress(targetAddr)
-	defer pool.PutBuffer(addressBytes)
+	// Combine address and data
+	err := socks5.WriteAddr(addr.String(), payload)
 	if err != nil {
 		return 0, err
 	}
-
-	// Combine address and data
-	payload.Write(addressBytes)
 	payload.Write(b)
 
 	// Encrypt and send
@@ -101,17 +91,9 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 	reader := bytes.NewReader(payload)
 
 	// Parse address from decrypted data
-	addressInfo, err := DecodeAddress(reader)
+	addr, err = socks5.ReadAddr(reader)
 	if err != nil {
 		return 0, nil, err
-	}
-
-	// Create address object (only support IP addresses for UDP)
-	switch addressInfo.Type {
-	case AddressTypeIPv4, AddressTypeIPv6:
-		addr = net.UDPAddrFromAddrPort(netip.AddrPortFrom(addressInfo.IP, addressInfo.Port))
-	default:
-		return 0, nil, fmt.Errorf("unsupported address type for UDP: %v", addressInfo.Type)
 	}
 
 	n, err = reader.Read(b)

@@ -81,9 +81,9 @@ func ParseHTTPURL(link string) (data *HTTP, err error) {
 	}, nil
 }
 
-func (s *HTTP) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, error) {
+func (s *HTTP) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) (netproxy.Dialer, error) {
 	u := s.URL()
-	return http.NewHTTPProxy(&u, option, nextDialer)
+	return http.NewHTTPProxy(&u, option, parentDialer)
 }
 
 func (s *HTTP) URL() url.URL {

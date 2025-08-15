@@ -16,6 +16,7 @@ import (
 	"net/url"
 
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/protocol"
 )
 
 // Version is socks5 version number.
@@ -23,7 +24,7 @@ const Version = 5
 
 // Socks5 is a base socks5 struct.
 type Socks5 struct {
-	dialer   netproxy.Dialer
+	protocol.StatelessDialer
 	addr     string
 	user     string
 	password string
@@ -42,7 +43,9 @@ func NewSocks5(s string, d netproxy.Dialer) (*Socks5, error) {
 	pass, _ := u.User.Password()
 
 	h := &Socks5{
-		dialer:   d,
+		StatelessDialer: protocol.StatelessDialer{
+			ParentDialer: d,
+		},
 		addr:     addr,
 		user:     user,
 		password: pass,

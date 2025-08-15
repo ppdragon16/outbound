@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
-	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -21,9 +20,8 @@ func init() {
 }
 
 type Dialer struct {
+	protocol.StatelessDialer
 	proxyAddress string
-	nextDialer   netproxy.Dialer
-	metadata     protocol.Metadata
 	key          []byte
 	tlsConfig    *tls.Config
 
@@ -33,68 +31,54 @@ type Dialer struct {
 	idleSessions    map[uint64]*session
 }
 
-func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
-	metadata := protocol.Metadata{
-		IsClient: header.IsClient,
-	}
+func NewDialer(ParentDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
 	sum := sha256.Sum256([]byte(header.Password))
 	return &Dialer{
+		StatelessDialer: protocol.StatelessDialer{
+			ParentDialer: ParentDialer,
+		},
 		proxyAddress: header.ProxyAddress,
-		nextDialer:   nextDialer,
-		metadata:     metadata,
 		key:          sum[:],
 		tlsConfig:    header.TlsConfig,
 		idleSessions: make(map[uint64]*session),
 	}, nil
 }
 
-func (d *Dialer) DialTcp(ctx context.Context, addr string) (c netproxy.Conn, err error) {
-	return d.DialContext(ctx, "tcp", addr)
-}
-
-func (d *Dialer) DialUdp(ctx context.Context, addr string) (c netproxy.PacketConn, err error) {
-	pktConn, err := d.DialContext(ctx, "udp", addr)
-	if err != nil {
-		return nil, err
-	}
-	return pktConn.(netproxy.PacketConn), nil
-}
-
-func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (c netproxy.Conn, err error) {
-	magicNetwork, err := netproxy.ParseMagicNetwork(network)
-	if err != nil {
-		return nil, err
-	}
-	switch magicNetwork.Network {
-	case "tcp", "udp":
-		mdata, err := protocol.ParseMetadata(addr)
+func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (net.Conn, error) {
+	switch network {
+	case "tcp":
+		s, err := d.getSession(ctx)
 		if err != nil {
 			return nil, err
-		}
-		mdata.IsClient = d.metadata.IsClient
-		if magicNetwork.Network == "udp" {
-			mdata.Hostname = "sp.v2.udp-over-tcp.arpa"
-		}
-		tcpNetwork := netproxy.MagicNetwork{
-			Network: "tcp",
-			Mark:    magicNetwork.Mark,
-		}.Encode()
-
-		s, err := d.getSession(ctx, tcpNetwork)
-		if err != nil {
-			return nil, err
-		}
-		if magicNetwork.Network == "udp" {
-			streamAddr := net.JoinHostPort(mdata.Hostname, strconv.Itoa(int(mdata.Port)))
-			return s.newPacketStream(streamAddr, addr)
 		}
 		return s.newStream(addr)
+	case "udp":
+		conn, err := d.ListenPacket(ctx, addr)
+		if err != nil {
+			return nil, err
+		}
+		return &netproxy.BindPacketConn{
+			PacketConn: conn,
+			Address:    netproxy.NewAddr(network, addr),
+		}, nil
 	default:
-		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, magicNetwork.Network)
+		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
 }
 
-func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, error) {
+func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
+	s, err := d.getSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	return s.newPacketStream(net.JoinHostPort("sp.v2.udp-over-tcp.arpa", port), addr)
+}
+
+func (d *Dialer) getSession(ctx context.Context) (*session, error) {
 	d.idleSessionLock.Lock()
 	for seq := range d.idleSessions {
 		s := d.idleSessions[seq]
@@ -107,16 +91,15 @@ func (d *Dialer) getSession(ctx context.Context, tcpNetwork string) (*session, e
 	}
 	d.idleSessionLock.Unlock()
 
-	rawConn, err := d.nextDialer.DialContext(ctx, tcpNetwork, d.proxyAddress)
+	conn, err := d.ParentDialer.DialContext(ctx, "tcp", d.proxyAddress)
 	if err != nil {
 		return nil, err
 	}
-	conn := rawConn.(net.Conn)
 
 	tlsConn := tls.Client(conn, d.tlsConfig)
 
-	buf := pool.Get(len(d.key) + 2)
-	defer pool.Put(buf)
+	buf := pool.GetBuffer(len(d.key) + 2)
+	defer pool.PutBuffer(buf)
 	copy(buf, d.key)
 	binary.BigEndian.PutUint16(buf[len(d.key):], uint16(0))
 	if _, err := tlsConn.Write(buf); err != nil {
