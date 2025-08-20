@@ -173,6 +173,10 @@ func (m *udpSessionManager) Close() {
 	m.cancel()
 }
 
+func (m *udpSessionManager) IsClosed() bool {
+	return m.ctx.Err() != nil
+}
+
 func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 	conn, ok := m.connMap.Load(msg.SessionID)
 	if !ok {
@@ -190,10 +194,6 @@ func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 
 // NewUDP creates a new UDP session.
 func (m *udpSessionManager) NewUDP() (net.PacketConn, error) {
-	if m.ctx.Err() != nil {
-		return nil, oops.In("New udpSM").New("UDP session manager closed")
-	}
-
 	id := m.nextID
 	m.nextID++
 

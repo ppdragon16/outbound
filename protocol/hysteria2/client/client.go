@@ -123,10 +123,21 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 }
 
 func (c *Client) Alive() bool {
-	if c.config.NextDialer.Alive() {
-		return c.conn != nil && c.conn.Context().Err() == nil
+	if !c.config.NextDialer.Alive() {
+		return false
 	}
-	return false
+	if c.conn == nil {
+		return false
+	}
+	if c.conn.Context().Err() != nil {
+		return false
+	}
+	if c.udpSM != nil {
+		if c.udpSM.IsClosed() {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *Client) Connect() (err error) {
