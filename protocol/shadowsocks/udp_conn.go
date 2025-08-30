@@ -31,10 +31,6 @@ func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf, masterKey []byte, sg Sa
 	}, nil
 }
 
-func (c *UdpConn) Close() error {
-	return c.Conn.Close()
-}
-
 func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	buf := pool.GetBytesBuffer()
 	payload := pool.GetBytesBuffer()

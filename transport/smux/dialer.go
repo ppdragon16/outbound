@@ -67,10 +67,16 @@ func (s *Smux) Connect() (err error) {
 }
 
 func (s *Smux) Alive() bool {
-	if s.Dialer.Alive() {
-		return s.session != nil && !s.session.IsClosed()
+	if !s.Dialer.Alive() {
+		return false
 	}
-	return false
+	if s.session == nil {
+		return false
+	}
+	if s.session.IsClosed() {
+		return false
+	}
+	return true
 }
 
 func (s *Smux) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {

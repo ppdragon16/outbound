@@ -52,14 +52,13 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 			return nil, fmt.Errorf("failed to create Trojan connection: %w", err)
 		}
 
-		if network == "tcp" {
-			return tcpConn, nil
-		} else {
+		if network == "udp" {
 			return &netproxy.BindPacketConn{
 				PacketConn: &PacketConn{Conn: tcpConn},
 				Address:    netproxy.NewAddr("udp", addr),
 			}, nil
 		}
+		return tcpConn, nil
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}

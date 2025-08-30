@@ -51,10 +51,6 @@ func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipherEncrypt 
 	return &u, nil
 }
 
-func (c *UdpConn) Close() error {
-	return c.Conn.Close()
-}
-
 func (c *UdpConn) writeIdentityHeader(buf *bytes.Buffer, separateHeader []byte) error {
 	for i := 0; i < len(c.pskList)-1; i++ {
 		identityHeader := pool.GetBuffer(aes.BlockSize)
