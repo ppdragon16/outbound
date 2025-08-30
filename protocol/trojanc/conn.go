@@ -12,6 +12,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/socks5"
 )
@@ -59,17 +60,20 @@ func NetworkToByte(network string) byte {
 	}
 }
 
-func NewConn(conn net.Conn, addr *socks5.AddressInfo, network string, password string) (c *Conn, err error) {
+func NewConn(conn net.Conn, addr *socks5.AddressInfo, network string, password string) net.Conn {
 	hash := sha256.New224()
 	hash.Write([]byte(password))
-	c = &Conn{
+	c := &Conn{
 		Conn:    conn,
 		addr:    addr,
 		command: NetworkToByte(network),
 		pass:    [56]byte{},
 	}
 	hex.Encode(c.pass[:], hash.Sum(nil))
-	return c, nil
+	if _, ok := conn.(netproxy.CloseWriter); ok {
+		return &netproxy.CloseWriteConn{Conn: c, CloseWriter: conn.(netproxy.CloseWriter)}
+	}
+	return c
 }
 
 // buildTrojanRequest builds the Trojan request according to spec:

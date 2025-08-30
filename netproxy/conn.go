@@ -6,6 +6,15 @@ import (
 
 var UnsupportedTunnelTypeError = net.UnknownNetworkError("unsupported tunnel type")
 
+type CloseWriter interface {
+	CloseWrite() error
+}
+
+type CloseWriteConn struct {
+	net.Conn
+	CloseWriter
+}
+
 type BindPacketConn struct {
 	net.PacketConn
 	Address net.Addr

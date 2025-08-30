@@ -12,7 +12,7 @@ import (
 )
 
 type PacketConn struct {
-	*Conn
+	net.Conn
 }
 
 // ReadFrom reads a UDP packet according to Trojan UDP format:

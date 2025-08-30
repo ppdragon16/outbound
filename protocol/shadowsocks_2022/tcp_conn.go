@@ -14,6 +14,7 @@ import (
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/common"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks"
@@ -61,8 +62,8 @@ type Key struct {
 	MasterKey  []byte
 }
 
-func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf2022, pskList [][]byte, uPSK []byte, sg shadowsocks.SaltGenerator, addr *socks5.AddressInfo, bloom *disk_bloom.FilterGroup) (crw *TCPConn, err error) {
-	return &TCPConn{
+func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf2022, pskList [][]byte, uPSK []byte, sg shadowsocks.SaltGenerator, addr *socks5.AddressInfo, bloom *disk_bloom.FilterGroup) net.Conn {
+	tcpConn := &TCPConn{
 		Conn:       conn,
 		addr:       addr,
 		cipherConf: conf,
@@ -72,7 +73,11 @@ func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf2022, pskList [][]byte, u
 		nonceRead:  make([]byte, conf.NonceLen),
 		nonceWrite: make([]byte, conf.NonceLen),
 		bloom:      bloom,
-	}, nil
+	}
+	if _, ok := conn.(netproxy.CloseWriter); ok {
+		return &netproxy.CloseWriteConn{Conn: tcpConn, CloseWriter: conn.(netproxy.CloseWriter)}
+	}
+	return tcpConn
 }
 
 func (c *TCPConn) Read(b []byte) (n int, err error) {

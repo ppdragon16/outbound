@@ -46,11 +46,7 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 		}
 
 		// Create Trojan connection
-		tcpConn, err := NewConn(conn, addressInfo, network, d.password)
-		if err != nil {
-			conn.Close()
-			return nil, fmt.Errorf("failed to create Trojan connection: %w", err)
-		}
+		tcpConn := NewConn(conn, addressInfo, network, d.password)
 
 		if network == "udp" {
 			return &netproxy.BindPacketConn{
@@ -78,11 +74,5 @@ func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 	}
 
 	// Create Trojan connection for UDP
-	tcpConn, err := NewConn(conn, addressInfo, "udp", d.password)
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to create Trojan UDP connection: %w", err)
-	}
-
-	return &PacketConn{Conn: tcpConn}, nil
+	return &PacketConn{Conn: NewConn(conn, addressInfo, "udp", d.password)}, nil
 }

@@ -79,7 +79,7 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 		if err != nil {
 			return nil, err
 		}
-		return NewTCPConn(conn, d.conf, d.pskList, d.uPSK, d.sg, addrInfo, nil)
+		return NewTCPConn(conn, d.conf, d.pskList, d.uPSK, d.sg, addrInfo, nil), nil
 	case "udp":
 		conn, err := d.ListenPacket(ctx, d.proxyAddress)
 		if err != nil {
