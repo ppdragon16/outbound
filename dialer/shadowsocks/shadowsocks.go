@@ -139,9 +139,11 @@ func (s *Shadowsocks) Dialer(option *dialer.ExtraOption, parentDialer netproxy.D
 	}
 }
 
-func ParseSSURL(u string) (data *Shadowsocks, err error) {
+func ParseSSURL(ssurl string) (data *Shadowsocks, err error) {
 	// parse attempts to parse ss:// links
 	parse := func(content string) (v *Shadowsocks, ok bool) {
+		// semicolon is not allowed in query, otherwise u.Query() will return empty map.
+		content = strings.Replace(content, ";", "%3B", -1)
 		// try to parse in the format of ss://BASE64(method:password)@server:port/?plugin=xxxx#name
 		u, err := url.Parse(content)
 		if err != nil {
@@ -180,7 +182,7 @@ func ParseSSURL(u string) (data *Shadowsocks, err error) {
 		v  *Shadowsocks
 		ok bool
 	)
-	content := u
+	content := ssurl
 	// try to parse the ss:// link, if it fails, base64 decode first
 	if v, ok = parse(content); !ok {
 		// 进行base64解码，并unmarshal到VmessInfo上
@@ -251,7 +253,7 @@ func ParseSip003(plugin string) Sip003 {
 	var sip003 Sip003
 	fields := strings.SplitN(plugin, ";", 2)
 	switch fields[0] {
-	case "obfs-local", "simpleobfs":
+	case "obfs-local", "simpleobfs", "obfs":
 		sip003.Name = "simple-obfs"
 	default:
 		sip003.Name = fields[0]
