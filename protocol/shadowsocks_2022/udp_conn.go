@@ -137,7 +137,7 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	if len(buf) < 16 {
+	if n < 16 {
 		return 0, nil, fmt.Errorf("short length to decrypt")
 	}
 

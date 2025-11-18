@@ -65,7 +65,7 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 	if err != nil {
 		return 0, nil, err
 	}
-	if len(buf) < c.cipherConf.SaltLen {
+	if n < c.cipherConf.SaltLen {
 		return 0, nil, fmt.Errorf("short length to decrypt")
 	}
 	salt := buf[:c.cipherConf.SaltLen]
