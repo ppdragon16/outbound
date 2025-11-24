@@ -16,6 +16,7 @@ func init() {
 
 type Anytls struct {
 	link     string
+	Name     string
 	Auth     string
 	Host     string
 	Sni      string
@@ -30,7 +31,7 @@ func NewAnytls(link string) (dialer.Dialer, *dialer.Property, error) {
 			return nil, nil, err
 		}
 		return s, &dialer.Property{
-			Name:     "anytls",
+			Name:     s.Name,
 			Protocol: "anytls",
 			Address:  s.Host,
 			Link:     s.link,
@@ -41,15 +42,28 @@ func NewAnytls(link string) (dialer.Dialer, *dialer.Property, error) {
 }
 
 func parseAnytlsURL(link string) (*Anytls, error) {
-	u, err := url.ParseRequestURI(link)
+	u, err := url.Parse(link)
 	if err != nil {
 		return nil, err
 	}
+	sni := u.Query().Get("peer")
+	if len(sni) == 0 {
+		sni = u.Query().Get("sni")
+	}
+	if len(sni) == 0 {
+		// disable the SNI
+		sni = "127.0.0.1"
+	}
+	name := u.Fragment
+	if len(name) == 0 {
+		name = "anytls"
+	}
 	antls := &Anytls{
 		link:     link,
+		Name:     name,
 		Auth:     u.User.Username(),
 		Host:     u.Host,
-		Sni:      u.Query().Get("sni"),
+		Sni:      sni,
 		Insecure: u.Query().Get("insecure") == "1",
 	}
 
@@ -57,17 +71,15 @@ func parseAnytlsURL(link string) (*Anytls, error) {
 }
 
 func (s *Anytls) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) (netproxy.Dialer, error) {
-	tlsConfig := &tls.Config{
-		ServerName:         s.Sni,
-		InsecureSkipVerify: s.Insecure,
-	}
-	if tlsConfig.ServerName == "" {
-		// disable the SNI
-		tlsConfig.ServerName = "127.0.0.1"
-	}
-	return protocol.NewDialer("anytls", parentDialer, protocol.Header{
-		ProxyAddress: s.Host,
-		Password:     s.Auth,
-		TlsConfig:    tlsConfig,
-	})
+	return protocol.NewDialer(
+		"anytls",
+		parentDialer,
+		protocol.Header{
+			ProxyAddress: s.Host,
+			Password:     s.Auth,
+			TlsConfig: &tls.Config{
+				ServerName:         s.Sni,
+				InsecureSkipVerify: s.Insecure,
+			},
+		})
 }
