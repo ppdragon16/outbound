@@ -46,22 +46,17 @@ func NewPktConn(c net.PacketConn, ctrlConn net.Conn, server net.Addr) *PktConn {
 }
 
 // ReadFrom overrides the original function from transport.PacketConn.
-func (pc *PktConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	n, _, from, err := pc.readFrom(b)
-	return n, from, err
-}
-
-func (pc *PktConn) readFrom(b []byte) (n int, lAddr net.Addr, rAddr net.Addr, err error) {
+func (pc *PktConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 	buf := pool.GetBuffer(len(b))
 	defer pool.PutBuffer(buf)
 
-	n, rAddr, err = pc.PacketConn.ReadFrom(buf)
+	n, _, err = pc.PacketConn.ReadFrom(buf)
 	if err != nil {
 		return
 	}
 
 	if n < 3 {
-		return n, rAddr, nil, errors.New("not enough size to get addr")
+		return n, nil, errors.New("not enough size to get addr")
 	}
 
 	// https://www.rfc-editor.org/rfc/rfc1928#section-7
@@ -72,12 +67,12 @@ func (pc *PktConn) readFrom(b []byte) (n int, lAddr net.Addr, rAddr net.Addr, er
 	// +----+------+------+----------+----------+----------+
 	tgtAddr := socks.SplitAddr(buf[3:n])
 	if tgtAddr == nil {
-		return n, rAddr, nil, errors.New("can not get target addr")
+		return n, nil, errors.New("can not get target addr")
 	}
 
-	lAddr, err = common.ResolveUDPAddr(tgtAddr.String())
+	addr, err = common.ResolveUDPAddr(tgtAddr.String())
 	if err != nil {
-		return n, rAddr, nil, errors.New("wrong target addr")
+		return n, nil, errors.New("wrong target addr")
 	}
 
 	n = copy(b, buf[3+len(tgtAddr):n])
