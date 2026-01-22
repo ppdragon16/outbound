@@ -178,7 +178,12 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 
 	n = copy(b, payload)
 	if len(payload) > n {
-		c.bufReader = bytes.NewReader(payload[n:])
+		c.bufReader = &ReusableReader{
+			data:   payload,
+			offset: n,
+		}
+	} else {
+		pool.PutBuffer(payload)
 	}
 	return n, nil
 }
@@ -290,3 +295,22 @@ func (c *TCPConn) seal(buf *bytes.Buffer, payload []byte) {
 		common.BytesIncLittleEndian(c.nonceWrite)
 	}
 }
+
+type ReusableReader struct {
+	data   []byte
+	offset int
+}
+
+func (r *ReusableReader) Read(p []byte) (int, error) {
+	if r.offset >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.offset:])
+	r.offset += n
+	if r.offset >= len(r.data) {
+		pool.PutBuffer(r.data)
+		return n, io.EOF
+	}
+	return n, nil
+}
+
