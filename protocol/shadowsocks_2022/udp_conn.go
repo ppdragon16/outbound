@@ -72,18 +72,15 @@ func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	buf := pool.GetBytesBuffer()
 	defer pool.PutBytesBuffer(buf)
 
-	separateHeader := pool.GetBytesBuffer()
-	defer pool.PutBytesBuffer(separateHeader)
-
 	c.packetID++
 
-	separateHeader.Write(c.sessionID[:])
-	binary.Write(separateHeader, binary.BigEndian, c.packetID)
+	var separateHeader [16]byte
+	copy(separateHeader[:8], c.sessionID[:])
+	binary.BigEndian.PutUint64(separateHeader[8:16], c.packetID)
 
 	separateHeaderEncrypted := pool.GetBuffer(16)
 	defer pool.PutBuffer(separateHeaderEncrypted)
-	c.blockCipherEncrypt.Encrypt(separateHeaderEncrypted, separateHeader.Bytes())
-
+	c.blockCipherEncrypt.Encrypt(separateHeaderEncrypted, separateHeader[:])
 	// TODO: DEBUG
 	if len(separateHeaderEncrypted) != 16 {
 		return 0, fmt.Errorf("separate header length is not 16")
@@ -91,7 +88,7 @@ func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 
 	buf.Write(separateHeaderEncrypted)
 
-	err := c.writeIdentityHeader(buf, separateHeader.Bytes())
+	err := c.writeIdentityHeader(buf, separateHeader[:])
 	if err != nil {
 		return 0, oops.Wrapf(err, "fail to write identity header")
 	}
@@ -103,11 +100,11 @@ func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	}
 
 	// Encrypt and send
-	cipher, err := CreateCipher(c.uPSK, separateHeader.Bytes()[:8], c.cipherConf)
+	cipher, err := CreateCipher(c.uPSK, separateHeader[:8], c.cipherConf)
 	if err != nil {
 		return 0, err
 	}
-	buf.Write(cipher.Seal(nil, separateHeader.Bytes()[4:16], message.Bytes(), nil))
+	buf.Write(cipher.Seal(nil, separateHeader[4:16], message.Bytes(), nil))
 
 	_, err = c.Conn.Write(buf.Bytes())
 	return len(b), err
@@ -122,6 +119,7 @@ func EncodeMessage(typ uint8, timestamp uint64, address string, b []byte) (*byte
 	binary.Write(message, binary.BigEndian, uint16(0))
 	// Socks Address
 	if err := socks5.WriteAddr(address, message); err != nil {
+		pool.PutBytesBuffer(message)
 		return nil, err
 	}
 	// Payload
@@ -168,6 +166,9 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 		return 0, nil, fmt.Errorf("failed to read timestamp: %w", err)
 	}
 	timestamp := time.Unix(int64(timestampRaw), 0)
+	if timestamp.Before(time.Now().Add(-ciphers.TimestampTolerance)) {
+		return 0, nil, protocol.ErrReplayAttack
+	}
 
 	// Skip client session ID (8 bytes)
 	if _, err := reader.Seek(8, io.SeekCurrent); err != nil {
@@ -181,16 +182,14 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 	}
 
 	// Skip padding
-	if _, err := reader.Seek(int64(paddingLength), io.SeekCurrent); err != nil {
-		return 0, nil, fmt.Errorf("failed to skip padding: %w", err)
+	if paddingLength > 0 {
+		if _, err := reader.Seek(int64(paddingLength), io.SeekCurrent); err != nil {
+			return 0, nil, fmt.Errorf("failed to skip padding: %w", err)
+		}
 	}
 
 	if typ != HeaderTypeServerStream {
 		return 0, nil, fmt.Errorf("received unexpected header type: %d", typ)
-	}
-
-	if timestamp.Before(time.Now().Add(-ciphers.TimestampTolerance)) {
-		return 0, nil, protocol.ErrReplayAttack
 	}
 
 	// Parse address from decrypted data
