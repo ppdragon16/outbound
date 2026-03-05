@@ -2,8 +2,10 @@ package shadowsocks
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"net"
+	"net/netip"
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/pool"
@@ -94,4 +96,121 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 
 	n, err = reader.Read(b)
 	return
+}
+
+func (c *UdpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
+	addr := ap.Addr()
+	isV4 := addr.Is4()
+
+	// atyp(1) + ipv4/ipv6(4/16) + port(2)
+	addrLen := 19
+	if isV4 {
+		addrLen = 7
+	}
+
+	// [Salt] [Encrypted(Address + Data + Tag)]
+	totalPayloadLen := addrLen + len(b)
+	totalBufLen := c.cipherConf.SaltLen + totalPayloadLen + c.cipherConf.TagLen
+
+	buf := pool.GetBuffer(totalBufLen)
+	defer pool.PutBuffer(buf)
+
+	// Salt
+	salt := c.sg.Get()
+	defer pool.PutBuffer(salt)
+	copy(buf[:c.cipherConf.SaltLen], salt)
+
+	// Plaintext
+	plaintext := pool.GetBuffer(totalPayloadLen)
+	defer pool.PutBuffer(plaintext)
+
+	if isV4 {
+		plaintext[0] = byte(socks5.AddressTypeIPv4)
+		copy(plaintext[1:5], addr.AsSlice())
+		binary.BigEndian.PutUint16(plaintext[5:7], ap.Port())
+	} else {
+		plaintext[0] = byte(socks5.AddressTypeIPv6)
+		copy(plaintext[1:17], addr.AsSlice())
+		binary.BigEndian.PutUint16(plaintext[17:19], ap.Port())
+	}
+	copy(plaintext[addrLen:], b)
+
+	// Cipher
+	ciph, err := CreateCipher(c.masterKey, salt, c.cipherConf)
+	if err != nil {
+		return 0, err
+	}
+	ciph.Seal(buf[c.cipherConf.SaltLen:c.cipherConf.SaltLen], ciphers.ZeroNonce[:c.cipherConf.NonceLen], plaintext, nil)
+
+	_, err = c.Conn.Write(buf)
+	return len(b), err
+}
+
+func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
+	buf := pool.GetBuffer(len(b) + c.cipherConf.SaltLen + c.cipherConf.TagLen)
+	defer pool.PutBuffer(buf)
+
+	n, err := c.Conn.Read(buf)
+	if err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+
+	// Verify length
+	if n < c.cipherConf.SaltLen+c.cipherConf.TagLen {
+		return 0, netip.AddrPort{}, fmt.Errorf("packet too short")
+	}
+
+	salt := buf[:c.cipherConf.SaltLen]
+	if c.bloom != nil && c.bloom.ExistOrAdd(salt) {
+		return 0, netip.AddrPort{}, protocol.ErrReplayAttack
+	}
+
+	ciph, err := CreateCipher(c.masterKey, salt, c.cipherConf)
+	if err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+
+	decrypted, err := ciph.Open(buf[c.cipherConf.SaltLen:c.cipherConf.SaltLen],
+		ciphers.ZeroNonce[:c.cipherConf.NonceLen],
+		buf[c.cipherConf.SaltLen:n], nil)
+	if err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+
+	if len(decrypted) < 1 {
+		return 0, netip.AddrPort{}, fmt.Errorf("empty decrypted payload")
+	}
+
+	atyp := socks5.AddressType(decrypted[0])
+	var addr netip.Addr
+	var portOffset int
+
+	switch atyp {
+	case socks5.AddressTypeIPv4:
+		if len(decrypted) < 7 {
+			return 0, netip.AddrPort{}, fmt.Errorf("short ipv4")
+		}
+		addr = netip.AddrFrom4([4]byte(decrypted[1:5]))
+		portOffset = 5
+	case socks5.AddressTypeIPv6:
+		if len(decrypted) < 19 {
+			return 0, netip.AddrPort{}, fmt.Errorf("short ipv6")
+		}
+		addr = netip.AddrFrom16([16]byte(decrypted[1:17]))
+		portOffset = 17
+	default:
+		return 0, netip.AddrPort{}, fmt.Errorf("unsupported atyp in ss: %v", atyp)
+	}
+
+	port := binary.BigEndian.Uint16(decrypted[portOffset : portOffset+2])
+	ap := netip.AddrPortFrom(addr, port)
+
+	// Payload
+	dataOffset := portOffset + 2
+	if len(decrypted) < dataOffset {
+		return 0, ap, fmt.Errorf("no data after address")
+	}
+
+	copyLen := copy(b, decrypted[dataOffset:])
+	return copyLen, ap, nil
 }

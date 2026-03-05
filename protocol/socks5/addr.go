@@ -153,3 +153,50 @@ func AddressFromString(addr string) (*AddressInfo, error) {
 	}
 	return info, nil
 }
+
+func WriteAddrPort(ap netip.AddrPort, w io.Writer) error {
+	addr := ap.Addr()
+	port := ap.Port()
+
+	if addr.Is4() {
+		// ATYP(1) + IP(4) + PORT(2)
+		var buf [7]byte
+		buf[0] = byte(AddressTypeIPv4)
+		copy(buf[1:5], addr.AsSlice())
+		binary.BigEndian.PutUint16(buf[5:7], port)
+		_, err := w.Write(buf[:])
+		return err
+	} else {
+		// ATYP(1) + IP(16) + PORT(2)
+		var buf [19]byte
+		buf[0] = byte(AddressTypeIPv6)
+		copy(buf[1:17], addr.AsSlice())
+		binary.BigEndian.PutUint16(buf[17:19], port)
+		_, err := w.Write(buf[:])
+		return err
+	}
+}
+
+func ReadAddrPort(r io.Reader) (netip.AddrPort, error) {
+	var atyp [1]byte
+	if _, err := r.Read(atyp[:]); err != nil {
+		return netip.AddrPort{}, err
+	}
+
+	switch AddressType(atyp[0]) {
+	case AddressTypeIPv4:
+		var buf [6]byte // IP(4) + PORT(2)
+		if _, err := io.ReadFull(r, buf[:]); err != nil {
+			return netip.AddrPort{}, err
+		}
+		return netip.AddrPortFrom(netip.AddrFrom4([4]byte(buf[:4])), binary.BigEndian.Uint16(buf[4:6])), nil
+	case AddressTypeIPv6:
+		var buf [18]byte // IP(16) + PORT(2)
+		if _, err := io.ReadFull(r, buf[:]); err != nil {
+			return netip.AddrPort{}, err
+		}
+		return netip.AddrPortFrom(netip.AddrFrom16([16]byte(buf[:16])), binary.BigEndian.Uint16(buf[16:18])), nil
+	default:
+		return netip.AddrPort{}, fmt.Errorf("unsupported atyp: %v", atyp[0])
+	}
+}

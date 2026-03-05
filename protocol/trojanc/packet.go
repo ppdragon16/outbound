@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/socks5"
@@ -75,6 +76,71 @@ func (c *PacketConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
 	// Send the complete packet
 	if _, err := c.Conn.Write(buf.Bytes()); err != nil {
 		return 0, fmt.Errorf("failed to write UDP packet: %w", err)
+	}
+
+	return len(b), nil
+}
+
+func (c *PacketConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
+	ap, err := socks5.ReadAddrPort(c.Conn)
+	if err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+
+	var lenBuf [2]byte
+	if _, err := io.ReadFull(c.Conn, lenBuf[:]); err != nil {
+		return 0, ap, err
+	}
+	payloadLen := binary.BigEndian.Uint16(lenBuf[:])
+
+	// CRLF + Payload
+	tempBuf := pool.GetBuffer(int(payloadLen) + 2)
+	defer pool.PutBuffer(tempBuf)
+
+	if _, err := io.ReadFull(c.Conn, tempBuf); err != nil {
+		return 0, ap, err
+	}
+
+	if !bytes.Equal(CRLF, tempBuf[:2]) {
+		return 0, ap, fmt.Errorf("invalid CRLF")
+	}
+
+	n := copy(b, tempBuf[2:])
+	return n, ap, nil
+}
+
+func (c *PacketConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
+	addr := ap.Addr()
+	isV4 := addr.Is4()
+
+	// ATYP(1) + ADDR(4/16) + PORT(2) + PAYLOAD_LEN(2) + CRLF(2)
+	headerLen := 7 + 2 + 2
+	if !isV4 {
+		headerLen = 19 + 2 + 2
+	}
+
+	totalLen := headerLen + len(b)
+	buf := pool.GetBuffer(totalLen)
+	defer pool.PutBuffer(buf)
+
+	// ATYP
+	if isV4 {
+		buf[0] = byte(socks5.AddressTypeIPv4)
+		copy(buf[1:5], addr.AsSlice())
+		binary.BigEndian.PutUint16(buf[5:7], ap.Port())
+	} else {
+		buf[0] = byte(socks5.AddressTypeIPv6)
+		copy(buf[1:17], addr.AsSlice())
+		binary.BigEndian.PutUint16(buf[17:19], ap.Port())
+	}
+
+	// Payload Length, CRLF, Payload
+	binary.BigEndian.PutUint16(buf[headerLen-4:headerLen-2], uint16(len(b)))
+	copy(buf[headerLen-2:headerLen], CRLF)
+	copy(buf[headerLen:], b)
+
+	if _, err := c.Conn.Write(buf); err != nil {
+		return 0, err
 	}
 
 	return len(b), nil
