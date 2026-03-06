@@ -268,17 +268,20 @@ func (c *UdpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	cipher.Seal(buf[currPos:currPos], separateHeader[4:16], msgBuf, nil)
+	// encrypt message and append ciphertext to buffer
+	ciphertext := cipher.Seal(nil, separateHeader[4:16], msgBuf, nil)
+	buf = append(buf[:currPos], ciphertext...)
 
 	_, err = c.Conn.Write(buf)
 	return len(b), err
 }
 
 func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
-	buf := pool.GetBuffer(len(b) + 16 + c.cipherConf.TagLen)
-	defer pool.PutBuffer(buf)
+	if len(b) < 16+c.cipherConf.TagLen {
+		return 0, netip.AddrPort{}, errors.New("buffer too small")
+	}
 
-	n, err := c.Conn.Read(buf)
+	n, err := c.Conn.Read(b)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
@@ -287,9 +290,9 @@ func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 	}
 
 	// Get SessionID from Separate Header
-	c.blockCipherDecrypt.Decrypt(buf[:16], buf[:16])
-	sessionID := buf[:8]
-	nonce := buf[4:16]
+	c.blockCipherDecrypt.Decrypt(b[:16], b[:16])
+	sessionID := b[:8]
+	nonce := b[4:16]
 
 	// Payload (AEAD)
 	ciph, err := CreateCipher(c.uPSK, sessionID, c.cipherConf)
@@ -297,30 +300,29 @@ func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 		return 0, netip.AddrPort{}, err
 	}
 
-	decrypted, err := ciph.Open(buf[16:16], nonce, buf[16:n], nil)
+	decrypted, err := ciph.Open(b[16:16], nonce, b[16:n], nil)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
 
-	// Message
-	if len(decrypted) < 11 { // Type(1) + Time(8) + PaddingLen(2)
+	// Message header must contain at least type(1) + time(8) + paddingLen(2)
+	if len(decrypted) < 11 {
 		return 0, netip.AddrPort{}, errors.New("decrypted too short")
 	}
 
 	typ := decrypted[0]
-	timestampRaw := binary.BigEndian.Uint64(decrypted[1:9])
+	if typ != HeaderTypeServerStream {
+		return 0, netip.AddrPort{}, fmt.Errorf("unexpected header type: %d", typ)
+	}
 
+	timestampRaw := binary.BigEndian.Uint64(decrypted[1:9])
 	if time.Unix(int64(timestampRaw), 0).Before(time.Now().Add(-ciphers.TimestampTolerance)) {
 		return 0, netip.AddrPort{}, protocol.ErrReplayAttack
 	}
 
-	paddingLen := binary.BigEndian.Uint16(decrypted[9:11])
-	offset := 11 + int(paddingLen)
-
-	// Client Session ID
-	if typ == HeaderTypeServerStream {
-		offset += 8
-	}
+	// Skip client session ID (8 bytes) and read padding length
+	paddingLen := binary.BigEndian.Uint16(decrypted[17:19])
+	offset := 19 + int(paddingLen)
 
 	// ATYP + ADDR + PORT
 	if len(decrypted) < offset+1 {
@@ -347,7 +349,5 @@ func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 
 	// Payload
 	dataOffset := offset + addrFieldLen
-	nCopy := copy(b, decrypted[dataOffset:])
-
-	return nCopy, ap, nil
+	return copy(b, decrypted[dataOffset:]), ap, nil
 }

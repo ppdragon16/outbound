@@ -66,9 +66,6 @@ func (s *Socks5) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 		return nil, err
 	}
 
-	buf := pool.GetBuffer(socks.MaxAddrLen)
-	defer pool.PutBuffer(buf)
-
 	uAddress := uAddr.String()
 	h, p, err := net.SplitHostPort(uAddress)
 	if err != nil {

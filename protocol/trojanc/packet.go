@@ -93,20 +93,20 @@ func (c *PacketConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 	}
 	payloadLen := binary.BigEndian.Uint16(lenBuf[:])
 
-	// CRLF + Payload
-	tempBuf := pool.GetBuffer(int(payloadLen) + 2)
-	defer pool.PutBuffer(tempBuf)
+	if len(b) < int(payloadLen)+2 {
+		return 0, ap, fmt.Errorf("buffer too small")
+	}
 
-	if _, err := io.ReadFull(c.Conn, tempBuf); err != nil {
+	// Read CRLF + Payload
+	if _, err := io.ReadFull(c.Conn, b[:2+payloadLen]); err != nil {
 		return 0, ap, err
 	}
 
-	if !bytes.Equal(CRLF, tempBuf[:2]) {
+	if !bytes.Equal(CRLF, b[:2]) {
 		return 0, ap, fmt.Errorf("invalid CRLF")
 	}
 
-	n := copy(b, tempBuf[2:])
-	return n, ap, nil
+	return copy(b, b[2:2+payloadLen]), ap, nil
 }
 
 func (c *PacketConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {

@@ -48,10 +48,11 @@ func NewPktConn(c net.PacketConn, ctrlConn net.Conn, server net.Addr) *PktConn {
 }
 
 func (pc *PktConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
-	buf := pool.GetBuffer(len(b) + 10)
-	defer pool.PutBuffer(buf)
+	if len(b) < 22 {
+		return 0, netip.AddrPort{}, errors.New("buffer too small")
+	}
 
-	n, _, err := pc.PacketConn.ReadFrom(buf)
+	n, _, err := pc.PacketConn.ReadFrom(b)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
@@ -61,19 +62,19 @@ func (pc *PktConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 		return 0, netip.AddrPort{}, errors.New("packet too short")
 	}
 
-	atyp := buf[3]
+	atyp := b[3]
 	var addr netip.Addr
 	var portOffset int
 
 	switch atyp {
 	case 0x01: // IPv4
 		var ip [4]byte
-		copy(ip[:], buf[4:8])
+		copy(ip[:], b[4:8])
 		addr = netip.AddrFrom4(ip)
 		portOffset = 8
 	case 0x04: // IPv6
 		var ip [16]byte
-		copy(ip[:], buf[4:20])
+		copy(ip[:], b[4:20])
 		addr = netip.AddrFrom16(ip)
 		portOffset = 20
 	case 0x03: // Domain
@@ -82,14 +83,14 @@ func (pc *PktConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 		return 0, netip.AddrPort{}, errors.New("unknown address type")
 	}
 
-	port := binary.BigEndian.Uint16(buf[portOffset : portOffset+2])
+	port := binary.BigEndian.Uint16(b[portOffset : portOffset+2])
 	ap := netip.AddrPortFrom(addr, port)
 
 	dataOffset := portOffset + 2
 	if n < dataOffset {
 		return 0, netip.AddrPort{}, errors.New("invalid packet structure")
 	}
-	return copy(b, buf[dataOffset:n]), ap, nil
+	return copy(b, b[dataOffset:n]), ap, nil
 }
 
 // ReadFrom overrides the original function from transport.PacketConn.

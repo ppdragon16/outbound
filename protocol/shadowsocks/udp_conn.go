@@ -147,10 +147,11 @@ func (c *UdpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
 }
 
 func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
-	buf := pool.GetBuffer(len(b) + c.cipherConf.SaltLen + c.cipherConf.TagLen)
-	defer pool.PutBuffer(buf)
+	if len(b) < c.cipherConf.SaltLen+c.cipherConf.TagLen {
+		return 0, netip.AddrPort{}, fmt.Errorf("buffer too small")
+	}
 
-	n, err := c.Conn.Read(buf)
+	n, err := c.Conn.Read(b)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
@@ -160,7 +161,7 @@ func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 		return 0, netip.AddrPort{}, fmt.Errorf("packet too short")
 	}
 
-	salt := buf[:c.cipherConf.SaltLen]
+	salt := b[:c.cipherConf.SaltLen]
 	if c.bloom != nil && c.bloom.ExistOrAdd(salt) {
 		return 0, netip.AddrPort{}, protocol.ErrReplayAttack
 	}
@@ -170,9 +171,9 @@ func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 		return 0, netip.AddrPort{}, err
 	}
 
-	decrypted, err := ciph.Open(buf[c.cipherConf.SaltLen:c.cipherConf.SaltLen],
+	decrypted, err := ciph.Open(b[c.cipherConf.SaltLen:c.cipherConf.SaltLen],
 		ciphers.ZeroNonce[:c.cipherConf.NonceLen],
-		buf[c.cipherConf.SaltLen:n], nil)
+		b[c.cipherConf.SaltLen:n], nil)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
@@ -211,6 +212,5 @@ func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 		return 0, ap, fmt.Errorf("no data after address")
 	}
 
-	copyLen := copy(b, decrypted[dataOffset:])
-	return copyLen, ap, nil
+	return copy(b, decrypted[dataOffset:]), ap, nil
 }
