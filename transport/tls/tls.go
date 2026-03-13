@@ -107,16 +107,20 @@ func (s *Tls) DialContext(ctx context.Context, network, addr string) (c net.Conn
 		case "utls":
 			clientHelloID, err := nameToUtlsClientHelloID(s.utlsImitate)
 			if err != nil {
+				rc.Close()
 				return nil, err
 			}
 
 			tlsConn = utls.UClient(rc, uTLSConfigFromTLSConfig(s.tlsConfig), *clientHelloID)
 
 		default:
+			rc.Close()
 			return nil, fmt.Errorf("unknown tls implementation: %v", s.tlsImplentation)
 		}
 
 		if err := tlsConn.Handshake(); err != nil {
+			tlsConn.Close()
+			rc.Close()
 			return nil, err
 		}
 		return tlsConn, err
