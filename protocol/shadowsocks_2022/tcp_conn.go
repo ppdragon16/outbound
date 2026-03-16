@@ -31,6 +31,8 @@ const (
 	HeaderTypeServerStream = 1
 	MinPaddingLength       = 0
 	MaxPaddingLength       = 900
+
+	initWriteBufSize = 2048
 )
 
 // TCPConn represents a Shadowsocks TCP connection
@@ -46,8 +48,13 @@ type TCPConn struct {
 	cipherWrite cipher.AEAD
 	onceRead    bool
 	onceWrite   bool
-	nonceRead   []byte
-	nonceWrite  []byte
+
+	nonceRead        []byte
+	nonceWrite       []byte
+	payloadLengthBuf []byte
+
+	// writeBuf is used for Seal() to avoid heap allocation
+	writeBuf []byte
 
 	readMutex  sync.Mutex
 	writeMutex sync.Mutex
@@ -64,20 +71,44 @@ type Key struct {
 
 func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf2022, pskList [][]byte, uPSK []byte, sg shadowsocks.SaltGenerator, addr *socks5.AddressInfo, bloom *disk_bloom.FilterGroup) net.Conn {
 	tcpConn := &TCPConn{
-		Conn:       conn,
-		addr:       addr,
-		cipherConf: conf,
-		pskList:    pskList,
-		uPSK:       uPSK,
-		sg:         sg,
-		nonceRead:  make([]byte, conf.NonceLen),
-		nonceWrite: make([]byte, conf.NonceLen),
-		bloom:      bloom,
+		Conn:             conn,
+		addr:             addr,
+		cipherConf:       conf,
+		pskList:          pskList,
+		uPSK:             uPSK,
+		sg:               sg,
+		nonceRead:        make([]byte, conf.NonceLen),
+		nonceWrite:       make([]byte, conf.NonceLen),
+		payloadLengthBuf: pool.GetBuffer(2 + conf.TagLen),
+		bloom:            bloom,
 	}
 	if _, ok := conn.(netproxy.CloseWriter); ok {
 		return &netproxy.CloseWriteConn{Conn: tcpConn, CloseWriter: conn.(netproxy.CloseWriter)}
 	}
 	return tcpConn
+}
+
+func (c *TCPConn) Close() error {
+	pool.PutBuffer(c.payloadLengthBuf)
+	pool.PutBuffer(c.writeBuf)
+	return c.Conn.Close()
+}
+
+// prepareWriteBuf ensures c.writeBuf has enough capacity for the given plaintext length.
+// It dynamically grows: 2K -> 4K -> 8K -> ... to avoid heap allocation in Seal().
+func (c *TCPConn) prepareWriteBuf(plaintextLen int) []byte {
+	needCap := plaintextLen + c.cipherConf.TagLen
+	if cap(c.writeBuf) < needCap {
+		// Grow: 2K -> 4K -> 8K -> ...
+		newCap := initWriteBufSize
+		for newCap < needCap {
+			newCap *= 2
+		}
+		pool.PutBuffer(c.writeBuf)
+		c.writeBuf = pool.GetBuffer(newCap)
+	}
+	// Reset length, keep capacity
+	return c.writeBuf[:0]
 }
 
 func (c *TCPConn) Read(b []byte) (n int, err error) {
@@ -148,18 +179,15 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 
 		c.onceRead = true
 	} else {
-		payloadLengthBuf := pool.GetBuffer(2 + c.cipherConf.TagLen)
-		defer pool.PutBuffer(payloadLengthBuf)
-		if _, err := io.ReadFull(c.Conn, payloadLengthBuf); err != nil {
+		if _, err := io.ReadFull(c.Conn, c.payloadLengthBuf); err != nil {
 			return 0, err
 		}
-		payloadLengthBuf, err := c.cipherRead.Open(payloadLengthBuf[:0], c.nonceRead, payloadLengthBuf, nil)
+		payloadLenBuf, err := c.cipherRead.Open(c.payloadLengthBuf[:0], c.nonceRead, c.payloadLengthBuf, nil)
 		if err != nil {
 			return 0, protocol.ErrFailAuth
 		}
 		common.BytesIncLittleEndian(c.nonceRead)
-
-		payloadLength = binary.BigEndian.Uint16(payloadLengthBuf)
+		payloadLength = binary.BigEndian.Uint16(payloadLenBuf)
 	}
 
 	if c.cipherRead == nil {
@@ -266,9 +294,9 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 			debug.PrintStack()
 			return 0, oops.Wrapf(err, "fail to encode request header")
 		}
-		buf.Write(c.cipherWrite.Seal(nil, c.nonceWrite, fixedHeader.Bytes(), nil))
+		buf.Write(c.cipherWrite.Seal(c.prepareWriteBuf(fixedHeader.Len()), c.nonceWrite, fixedHeader.Bytes(), nil))
 		common.BytesIncLittleEndian(c.nonceWrite)
-		buf.Write(c.cipherWrite.Seal(nil, c.nonceWrite, varHeader.Bytes(), nil))
+		buf.Write(c.cipherWrite.Seal(c.prepareWriteBuf(varHeader.Len()), c.nonceWrite, varHeader.Bytes(), nil))
 		common.BytesIncLittleEndian(c.nonceWrite)
 
 		c.onceWrite = true
@@ -277,23 +305,19 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 		debug.PrintStack()
 		return 0, oops.Wrapf(err, "cipher is not initialized")
 	}
-	c.seal(buf, b)
-	_, err = c.Conn.Write(buf.Bytes())
-	return n, err
-}
-
-func (c *TCPConn) seal(buf *bytes.Buffer, payload []byte) {
-	chunkLengthBuf := pool.GetBuffer(2)
-	defer pool.PutBuffer(chunkLengthBuf)
-	for i := 0; i < len(payload); i += TCPChunkMaxLen {
+	// Seal.
+	var chunkLengthBuf [2]byte
+	for i := 0; i < len(b); i += TCPChunkMaxLen {
 		// write chunk
-		var chunkLength = common.Min(TCPChunkMaxLen, len(payload)-i)
-		binary.BigEndian.PutUint16(chunkLengthBuf, uint16(chunkLength))
-		buf.Write(c.cipherWrite.Seal(nil, c.nonceWrite, chunkLengthBuf, nil))
+		var chunkLength = common.Min(TCPChunkMaxLen, len(b)-i)
+		binary.BigEndian.PutUint16(chunkLengthBuf[:], uint16(chunkLength))
+		buf.Write(c.cipherWrite.Seal(c.prepareWriteBuf(2), c.nonceWrite, chunkLengthBuf[:], nil))
 		common.BytesIncLittleEndian(c.nonceWrite)
-		buf.Write(c.cipherWrite.Seal(nil, c.nonceWrite, payload[i:i+chunkLength], nil))
+		buf.Write(c.cipherWrite.Seal(c.prepareWriteBuf(chunkLength), c.nonceWrite, b[i:i+chunkLength], nil))
 		common.BytesIncLittleEndian(c.nonceWrite)
 	}
+	_, err = c.Conn.Write(buf.Bytes())
+	return n, err
 }
 
 type ReusableReader struct {
@@ -313,4 +337,3 @@ func (r *ReusableReader) Read(p []byte) (int, error) {
 	}
 	return n, nil
 }
-
