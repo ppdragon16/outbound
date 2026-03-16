@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
 	"time"
@@ -19,7 +18,6 @@ import (
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/socks5"
 	disk_bloom "github.com/mzz2017/disk-bloom"
-	"github.com/samber/oops"
 	"lukechampine.com/blake3"
 )
 
@@ -37,6 +35,10 @@ type UdpConn struct {
 	cipherBlocks []cipher.Block
 	uPSK         []byte
 	bloom        *disk_bloom.FilterGroup
+
+	writeCipher       cipher.AEAD
+	lastReadCipher    cipher.AEAD
+	lastReadSessionID [8]byte
 }
 
 func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipherEncrypt cipher.Block, blockCipherDecrypt cipher.Block, pskList [][]byte, uPSK []byte, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
@@ -59,155 +61,37 @@ func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipherEncrypt 
 	}
 	// TODO: salt generator?
 	fastrand.Read(u.sessionID[:])
+	wc, err := CreateCipher(u.uPSK, u.sessionID[:], u.cipherConf)
+	if err != nil {
+		return nil, err
+	}
+	u.writeCipher = wc
 	return &u, nil
 }
 
-func (c *UdpConn) writeIdentityHeader(buf *bytes.Buffer, separateHeader []byte) error {
-	for i := 0; i < len(c.pskList)-1; i++ {
-		identityHeader := pool.GetBuffer(aes.BlockSize)
-		defer pool.PutBuffer(identityHeader)
-
-		hash := blake3.Sum512(c.pskList[i+1])
-		subtle.XORBytes(identityHeader, hash[:aes.BlockSize], separateHeader)
-		c.cipherBlocks[i].Encrypt(identityHeader, identityHeader)
-		buf.Write(identityHeader)
+func ToAddrPort(addr net.Addr) (netip.AddrPort, error) {
+	switch v := addr.(type) {
+	case *net.UDPAddr:
+		return v.AddrPort(), nil
+	case *net.TCPAddr:
+		return v.AddrPort(), nil
+	default:
+		return netip.ParseAddrPort(addr.String())
 	}
-	return nil
 }
 
 func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
-	buf := pool.GetBytesBuffer()
-	defer pool.PutBytesBuffer(buf)
-
-	c.packetID++
-
-	var separateHeader [16]byte
-	copy(separateHeader[:8], c.sessionID[:])
-	binary.BigEndian.PutUint64(separateHeader[8:16], c.packetID)
-
-	separateHeaderEncrypted := pool.GetBuffer(16)
-	defer pool.PutBuffer(separateHeaderEncrypted)
-	c.blockCipherEncrypt.Encrypt(separateHeaderEncrypted, separateHeader[:])
-	// TODO: DEBUG
-	if len(separateHeaderEncrypted) != 16 {
-		return 0, fmt.Errorf("separate header length is not 16")
-	}
-
-	buf.Write(separateHeaderEncrypted)
-
-	err := c.writeIdentityHeader(buf, separateHeader[:])
-	if err != nil {
-		return 0, oops.Wrapf(err, "fail to write identity header")
-	}
-
-	message, err := EncodeMessage(HeaderTypeClientStream, uint64(time.Now().Unix()), addr.String(), b)
-	defer pool.PutBytesBuffer(message)
-	if err != nil {
-		return 0, oops.Wrapf(err, "fail to encode message")
-	}
-
-	// Encrypt and send
-	cipher, err := CreateCipher(c.uPSK, separateHeader[:8], c.cipherConf)
+	ap, err := ToAddrPort(addr)
 	if err != nil {
 		return 0, err
 	}
-	buf.Write(cipher.Seal(nil, separateHeader[4:16], message.Bytes(), nil))
-
-	_, err = c.Conn.Write(buf.Bytes())
-	return len(b), err
-}
-
-func EncodeMessage(typ uint8, timestamp uint64, address string, b []byte) (*bytes.Buffer, error) {
-	message := pool.GetBytesBuffer()
-	// Header
-	message.WriteByte(typ)
-	binary.Write(message, binary.BigEndian, timestamp)
-	// No padding
-	binary.Write(message, binary.BigEndian, uint16(0))
-	// Socks Address
-	if err := socks5.WriteAddr(address, message); err != nil {
-		pool.PutBytesBuffer(message)
-		return nil, err
-	}
-	// Payload
-	message.Write(b)
-
-	return message, nil
+	return c.WriteToAddrPort(b, ap)
 }
 
 func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
-	buf := pool.GetBuffer(len(b) + 16 + c.cipherConf.TagLen)
-	defer pool.PutBuffer(buf)
-	n, err = c.Conn.Read(buf)
-	if err != nil {
-		return 0, nil, err
-	}
-	if n < 16 {
-		return 0, nil, fmt.Errorf("short length to decrypt")
-	}
-
-	c.blockCipherDecrypt.Decrypt(buf[:16], buf[:16])
-
-	payload := buf[16:n]
-	ciph, err := CreateCipher(c.uPSK, buf[:8], c.cipherConf)
-	if err != nil {
-		return 0, nil, err
-	}
-	payload, err = ciph.Open(payload[:0], buf[4:16], payload, nil)
-	if err != nil {
-		return 0, nil, err
-	}
-
-	// Use bytes.Reader to simplify parsing
-	reader := bytes.NewReader(payload)
-
-	// Read header type
-	var typ uint8
-	if err := binary.Read(reader, binary.BigEndian, &typ); err != nil {
-		return 0, nil, fmt.Errorf("failed to read header type: %w", err)
-	}
-
-	// Read timestamp
-	var timestampRaw uint64
-	if err := binary.Read(reader, binary.BigEndian, &timestampRaw); err != nil {
-		return 0, nil, fmt.Errorf("failed to read timestamp: %w", err)
-	}
-	timestamp := time.Unix(int64(timestampRaw), 0)
-	if timestamp.Before(time.Now().Add(-ciphers.TimestampTolerance)) {
-		return 0, nil, protocol.ErrReplayAttack
-	}
-
-	// Skip client session ID (8 bytes)
-	if _, err := reader.Seek(8, io.SeekCurrent); err != nil {
-		return 0, nil, fmt.Errorf("failed to skip session ID: %w", err)
-	}
-
-	// Read padding length
-	var paddingLength uint16
-	if err := binary.Read(reader, binary.BigEndian, &paddingLength); err != nil {
-		return 0, nil, fmt.Errorf("failed to read padding length: %w", err)
-	}
-
-	// Skip padding
-	if paddingLength > 0 {
-		if _, err := reader.Seek(int64(paddingLength), io.SeekCurrent); err != nil {
-			return 0, nil, fmt.Errorf("failed to skip padding: %w", err)
-		}
-	}
-
-	if typ != HeaderTypeServerStream {
-		return 0, nil, fmt.Errorf("received unexpected header type: %d", typ)
-	}
-
-	// Parse address from decrypted data
-	addr, err = socks5.ReadAddr(reader)
-	if err != nil {
-		return 0, nil, err
-	}
-
-	// Copy remaining data to output buffer
-	n, err = reader.Read(b)
-	return
+	var ap netip.AddrPort
+	n, ap, err = c.ReadFromAddrPort(b)
+	return n, net.UDPAddrFromAddrPort(ap), err
 }
 
 func (c *UdpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
@@ -264,15 +148,11 @@ func (c *UdpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
 	}
 	copy(msgBuf[11+addrLen:], b)
 
-	cipher, err := CreateCipher(c.uPSK, separateHeader[:8], c.cipherConf)
-	if err != nil {
-		return 0, err
-	}
 	// encrypt message and append ciphertext to buffer
-	ciphertext := cipher.Seal(nil, separateHeader[4:16], msgBuf, nil)
+	ciphertext := c.writeCipher.Seal(nil, separateHeader[4:16], msgBuf, nil)
 	buf = append(buf[:currPos], ciphertext...)
 
-	_, err = c.Conn.Write(buf)
+	_, err := c.Conn.Write(buf)
 	return len(b), err
 }
 
@@ -295,9 +175,16 @@ func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 	nonce := b[4:16]
 
 	// Payload (AEAD)
-	ciph, err := CreateCipher(c.uPSK, sessionID, c.cipherConf)
-	if err != nil {
-		return 0, netip.AddrPort{}, err
+	var ciph cipher.AEAD
+	if bytes.Equal(sessionID, c.lastReadSessionID[:]) && c.lastReadCipher != nil {
+		ciph = c.lastReadCipher
+	} else {
+		ciph, err = CreateCipher(c.uPSK, sessionID, c.cipherConf)
+		if err != nil {
+			return 0, netip.AddrPort{}, err
+		}
+		c.lastReadSessionID = [8]byte(sessionID)
+		c.lastReadCipher = ciph
 	}
 
 	decrypted, err := ciph.Open(b[16:16], nonce, b[16:n], nil)
