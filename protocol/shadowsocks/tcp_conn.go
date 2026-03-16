@@ -20,6 +20,8 @@ import (
 
 const (
 	TCPChunkMaxLen = (1 << 14) - 1
+
+	initWriteBufSize = 2048
 )
 
 // TCPConn represents a Shadowsocks TCP connection
@@ -37,10 +39,15 @@ type TCPConn struct {
 	nonceRead   []byte
 	nonceWrite  []byte
 
+	payloadLengthBuf []byte
+
+	// writeBuf is used for Seal() to avoid heap allocation
+	writeBuf []byte
+
 	readMutex  sync.Mutex
 	writeMutex sync.Mutex
 
-	bufReader io.Reader
+	bufReader *ReusableReader
 
 	bloom *disk_bloom.FilterGroup
 }
@@ -52,14 +59,16 @@ type Key struct {
 
 func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf, masterKey []byte, sg SaltGenerator, addr *socks5.AddressInfo, bloom *disk_bloom.FilterGroup) net.Conn {
 	tcpConn := &TCPConn{
-		Conn:       conn,
-		addr:       addr,
-		cipherConf: conf,
-		masterKey:  masterKey,
-		sg:         sg,
-		nonceRead:  make([]byte, conf.NonceLen),
-		nonceWrite: make([]byte, conf.NonceLen),
-		bloom:      bloom,
+		Conn:             conn,
+		addr:             addr,
+		cipherConf:       conf,
+		masterKey:        masterKey,
+		sg:               sg,
+		nonceRead:        make([]byte, conf.NonceLen),
+		nonceWrite:       make([]byte, conf.NonceLen),
+		payloadLengthBuf: pool.GetBuffer(2 + conf.TagLen),
+		bufReader:        &ReusableReader{},
+		bloom:            bloom,
 	}
 	if _, ok := conn.(netproxy.CloseWriter); ok {
 		return &netproxy.CloseWriteConn{Conn: tcpConn, CloseWriter: conn.(netproxy.CloseWriter)}
@@ -67,18 +76,35 @@ func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf, masterKey []byte, sg Sa
 	return tcpConn
 }
 
+func (c *TCPConn) Close() error {
+	pool.PutBuffer(c.payloadLengthBuf)
+	pool.PutBuffer(c.writeBuf)
+	c.bufReader.reset()
+	return c.Conn.Close()
+}
+
+// prepareWriteBuf ensures c.writeBuf has enough capacity for the given plaintext length.
+// It dynamically grows: 2K -> 4K -> 8K -> ... to avoid heap allocation in Seal().
+func (c *TCPConn) prepareWriteBuf(plaintextLen int) []byte {
+	needCap := plaintextLen + c.cipherConf.TagLen
+	if cap(c.writeBuf) < needCap {
+		// Grow: 2K -> 4K -> 8K -> ...
+		newCap := initWriteBufSize
+		for newCap < needCap {
+			newCap *= 2
+		}
+		pool.PutBuffer(c.writeBuf)
+		c.writeBuf = pool.GetBuffer(newCap)
+	}
+	// Reset length, keep capacity
+	return c.writeBuf[:0]
+}
+
 func (c *TCPConn) Read(b []byte) (n int, err error) {
 	c.readMutex.Lock()
 	defer c.readMutex.Unlock()
 
-	if c.bufReader != nil {
-		n, err = c.bufReader.Read(b)
-		if err != nil {
-			c.bufReader = nil
-			if err != io.EOF {
-				return 0, err
-			}
-		}
+	if n = c.bufReader.read(b); n > 0 {
 		return n, nil
 	}
 
@@ -112,23 +138,23 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 	}
 	n = copy(b, payload)
 	if len(payload) > n {
-		c.bufReader = bytes.NewReader(payload[n:])
+		c.bufReader.fill(payload, n)
+	} else {
+		pool.PutBuffer(payload)
 	}
 	return n, nil
 }
 
 func (c *TCPConn) readChunk() ([]byte, error) {
-	payloadLength := pool.GetBuffer(2 + c.cipherConf.TagLen)
-	defer pool.PutBuffer(payloadLength)
-	if _, err := io.ReadFull(c.Conn, payloadLength); err != nil {
+	if _, err := io.ReadFull(c.Conn, c.payloadLengthBuf); err != nil {
 		return nil, err
 	}
-	_, err := c.cipherRead.Open(payloadLength[:0], c.nonceRead, payloadLength, nil)
+	_, err := c.cipherRead.Open(c.payloadLengthBuf[:0], c.nonceRead, c.payloadLengthBuf, nil)
 	if err != nil {
 		return nil, protocol.ErrFailAuth
 	}
 	common.BytesIncLittleEndian(c.nonceRead)
-	l := binary.BigEndian.Uint16(payloadLength)
+	l := binary.BigEndian.Uint16(c.payloadLengthBuf)
 	payload := pool.GetBuffer(int(l) + c.cipherConf.TagLen) // delay putting back
 	if _, err = io.ReadFull(c.Conn, payload); err != nil {
 		return nil, err
@@ -175,15 +201,43 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 }
 
 func (c *TCPConn) seal(buf *bytes.Buffer, payload []byte) {
-	chunkLengthBuf := pool.GetBuffer(2)
-	defer pool.PutBuffer(chunkLengthBuf)
+	var chunkLengthBuf [2]byte
 	for i := 0; i < len(payload); i += TCPChunkMaxLen {
 		// write chunk
 		var chunkLength = common.Min(TCPChunkMaxLen, len(payload)-i)
-		binary.BigEndian.PutUint16(chunkLengthBuf, uint16(chunkLength))
-		buf.Write(c.cipherWrite.Seal(nil, c.nonceWrite, chunkLengthBuf, nil))
+		binary.BigEndian.PutUint16(chunkLengthBuf[:], uint16(chunkLength))
+		buf.Write(c.cipherWrite.Seal(c.prepareWriteBuf(2), c.nonceWrite, chunkLengthBuf[:], nil))
 		common.BytesIncLittleEndian(c.nonceWrite)
-		buf.Write(c.cipherWrite.Seal(nil, c.nonceWrite, payload[i:i+chunkLength], nil))
+		buf.Write(c.cipherWrite.Seal(c.prepareWriteBuf(chunkLength), c.nonceWrite, payload[i:i+chunkLength], nil))
 		common.BytesIncLittleEndian(c.nonceWrite)
 	}
+}
+
+type ReusableReader struct {
+	data   []byte
+	offset int
+}
+
+func (r *ReusableReader) fill(data []byte, offset int) {
+	r.data = data
+	r.offset = offset
+}
+
+func (r *ReusableReader) read(p []byte) int {
+	dataLen := len(r.data)
+	if r.offset >= dataLen {
+		return 0
+	}
+	n := copy(p, r.data[r.offset:])
+	r.offset += n
+	if r.offset >= dataLen {
+		r.reset()
+	}
+	return n
+}
+
+func (r *ReusableReader) reset() {
+	pool.PutBuffer(r.data)
+	r.data = nil
+	r.offset = 0
 }

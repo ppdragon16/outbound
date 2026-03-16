@@ -59,7 +59,7 @@ type TCPConn struct {
 	readMutex  sync.Mutex
 	writeMutex sync.Mutex
 
-	bufReader io.Reader
+	bufReader *ReusableReader
 
 	bloom *disk_bloom.FilterGroup
 }
@@ -80,6 +80,7 @@ func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf2022, pskList [][]byte, u
 		nonceRead:        make([]byte, conf.NonceLen),
 		nonceWrite:       make([]byte, conf.NonceLen),
 		payloadLengthBuf: pool.GetBuffer(2 + conf.TagLen),
+		bufReader:        &ReusableReader{},
 		bloom:            bloom,
 	}
 	if _, ok := conn.(netproxy.CloseWriter); ok {
@@ -91,6 +92,7 @@ func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf2022, pskList [][]byte, u
 func (c *TCPConn) Close() error {
 	pool.PutBuffer(c.payloadLengthBuf)
 	pool.PutBuffer(c.writeBuf)
+	c.bufReader.reset()
 	return c.Conn.Close()
 }
 
@@ -115,14 +117,7 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 	c.readMutex.Lock()
 	defer c.readMutex.Unlock()
 
-	if c.bufReader != nil {
-		n, err = c.bufReader.Read(b)
-		if err != nil {
-			c.bufReader = nil
-			if err != io.EOF {
-				return 0, err
-			}
-		}
+	if n = c.bufReader.read(b); n > 0 {
 		return n, nil
 	}
 
@@ -206,10 +201,7 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 
 	n = copy(b, payload)
 	if len(payload) > n {
-		c.bufReader = &ReusableReader{
-			data:   payload,
-			offset: n,
-		}
+		c.bufReader.fill(payload, n)
 	} else {
 		pool.PutBuffer(payload)
 	}
@@ -325,15 +317,26 @@ type ReusableReader struct {
 	offset int
 }
 
-func (r *ReusableReader) Read(p []byte) (int, error) {
-	if r.offset >= len(r.data) {
-		return 0, io.EOF
+func (r *ReusableReader) fill(data []byte, offset int) {
+	r.data = data
+	r.offset = offset
+}
+
+func (r *ReusableReader) read(p []byte) int {
+	dataLen := len(r.data)
+	if r.offset >= dataLen {
+		return 0
 	}
 	n := copy(p, r.data[r.offset:])
 	r.offset += n
-	if r.offset >= len(r.data) {
-		pool.PutBuffer(r.data)
-		return n, io.EOF
+	if r.offset >= dataLen {
+		r.reset()
 	}
-	return n, nil
+	return n
+}
+
+func (r *ReusableReader) reset() {
+	pool.PutBuffer(r.data)
+	r.data = nil
+	r.offset = 0
 }
