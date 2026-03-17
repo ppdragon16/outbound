@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/netip"
 	"syscall"
-	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
 )
@@ -113,11 +112,6 @@ func (d *directDialer) dialUDP(ctx context.Context, addr string, fallback bool) 
 }
 
 func (d *directDialer) dialTCP(ctx context.Context, addr string, fallback bool) (net.Conn, error) {
-	start := time.Now()
-	defer func() {
-		elapsed := time.Since(start).Seconds()
-		DirectDialLatency.Observe(elapsed)
-	}()
 	if fallback {
 		return d.tcpFallbackDialer.DialContext(ctx, "tcp", addr)
 	} else {
