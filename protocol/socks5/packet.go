@@ -5,29 +5,23 @@ package socks5
 import (
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"net"
 	"net/netip"
 
-	"github.com/daeuniverse/outbound/common"
-
 	"github.com/daeuniverse/outbound/pool"
-	"github.com/daeuniverse/outbound/protocol/infra/socks"
 )
 
 // PktConn .
 type PktConn struct {
-	net.PacketConn
+	net.Conn
 	ctrlConn net.Conn // tcp control conn
-	server   net.Addr
 }
 
 // NewPktConn returns a PktConn, the writeAddr must be *net.UDPAddr or *net.UnixAddr.
-func NewPktConn(c net.PacketConn, ctrlConn net.Conn, server net.Addr) *PktConn {
+func NewPktConn(c net.Conn, ctrlConn net.Conn) *PktConn {
 	pc := &PktConn{
-		PacketConn: c,
-		ctrlConn:   ctrlConn,
-		server:     server,
+		Conn:     c,
+		ctrlConn: ctrlConn,
 	}
 
 	go func() {
@@ -38,7 +32,7 @@ func NewPktConn(c net.PacketConn, ctrlConn net.Conn, server net.Addr) *PktConn {
 			if err, ok := err.(net.Error); ok && err.Timeout() {
 				continue
 			}
-			pc.PacketConn.Close()
+			pc.Conn.Close()
 			// log.F("[socks5] dialudp udp associate end")
 			return
 		}
@@ -47,12 +41,37 @@ func NewPktConn(c net.PacketConn, ctrlConn net.Conn, server net.Addr) *PktConn {
 	return pc
 }
 
+func ToAddrPort(addr net.Addr) (netip.AddrPort, error) {
+	switch v := addr.(type) {
+	case *net.UDPAddr:
+		return v.AddrPort(), nil
+	case *net.TCPAddr:
+		return v.AddrPort(), nil
+	default:
+		return netip.ParseAddrPort(addr.String())
+	}
+}
+
+func (pc *PktConn) WriteTo(b []byte, addr net.Addr) (int, error) {
+	ap, err := ToAddrPort(addr)
+	if err != nil {
+		return 0, err
+	}
+	return pc.WriteToAddrPort(b, ap)
+}
+
+func (pc *PktConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
+	var ap netip.AddrPort
+	n, ap, err = pc.ReadFromAddrPort(b)
+	return n, net.UDPAddrFromAddrPort(ap), err
+}
+
 func (pc *PktConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 	if len(b) < 22 {
 		return 0, netip.AddrPort{}, errors.New("buffer too small")
 	}
 
-	n, _, err := pc.PacketConn.ReadFrom(b)
+	n, err := pc.Conn.Read(b)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
@@ -93,40 +112,6 @@ func (pc *PktConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 	return copy(b, b[dataOffset:n]), ap, nil
 }
 
-// ReadFrom overrides the original function from transport.PacketConn.
-func (pc *PktConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
-	buf := pool.GetBuffer(len(b))
-	defer pool.PutBuffer(buf)
-
-	n, _, err = pc.PacketConn.ReadFrom(buf)
-	if err != nil {
-		return
-	}
-
-	if n < 3 {
-		return n, nil, errors.New("not enough size to get addr")
-	}
-
-	// https://www.rfc-editor.org/rfc/rfc1928#section-7
-	// +----+------+------+----------+----------+----------+
-	// |RSV | FRAG | ATYP | DST.ADDR | DST.PORT |   DATA   |
-	// +----+------+------+----------+----------+----------+
-	// | 2  |  1   |  1   | Variable |    2     | Variable |
-	// +----+------+------+----------+----------+----------+
-	tgtAddr := socks.SplitAddr(buf[3:n])
-	if tgtAddr == nil {
-		return n, nil, errors.New("can not get target addr")
-	}
-
-	addr, err = common.ResolveUDPAddr(tgtAddr.String())
-	if err != nil {
-		return n, nil, errors.New("wrong target addr")
-	}
-
-	n = copy(b, buf[3+len(tgtAddr):n])
-	return
-}
-
 func (pc *PktConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
 	addr := ap.Addr()
 	isIPv6 := addr.Is6()
@@ -155,37 +140,14 @@ func (pc *PktConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
 	// Payload
 	copy(buf[3+tgtLen:], b)
 
-	n, err := pc.PacketConn.WriteTo(buf, pc.server)
+	n, err := pc.Conn.Write(buf)
 	if n > tgtLen+3 {
 		return n - tgtLen - 3, err
 	}
-	return 0, err
-}
-
-// WriteTo overrides the original function from transport.PacketConn.
-func (pc *PktConn) WriteTo(b []byte, addr net.Addr) (int, error) {
-	target, err := socks.ParseAddr(addr.String())
-	if err != nil {
-		return 0, fmt.Errorf("invalid addr: %w", err)
-	}
-
-	tgtLen := len(target)
-	buf := pool.GetBuffer(3 + tgtLen + len(b))
-	defer pool.PutBuffer(buf)
-
-	copy(buf, []byte{0, 0, 0})
-	copy(buf[3:], target)
-	copy(buf[3+tgtLen:], b)
-
-	n, err := pc.PacketConn.WriteTo(buf, pc.server)
-	if n > tgtLen+3 {
-		return n - tgtLen - 3, err
-	}
-
 	return 0, err
 }
 
 // Close .
 func (pc *PktConn) Close() error {
-	return errors.Join(pc.ctrlConn.Close(), pc.PacketConn.Close())
+	return errors.Join(pc.ctrlConn.Close(), pc.Conn.Close())
 }

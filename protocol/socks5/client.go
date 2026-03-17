@@ -78,12 +78,12 @@ func (s *Socks5) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 		uAddress = net.JoinHostPort(h, p)
 	}
 
-	conn, err := s.ParentDialer.ListenPacket(ctx, uAddress)
+	conn, err := s.ParentDialer.DialContext(ctx, "udp", uAddress)
 	if err != nil {
 		return nil, fmt.Errorf("[socks5] dialudp to %s error: %w", uAddress, err)
 	}
 
-	return NewPktConn(conn, ctrlConn, netproxy.NewAddr("udp", uAddress)), nil
+	return NewPktConn(conn, ctrlConn), nil
 }
 
 // connect takes an existing connection to a socks5 proxy server,
