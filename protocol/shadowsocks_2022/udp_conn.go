@@ -130,8 +130,7 @@ func (c *UdpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
 	}
 
 	// Message plaintext
-	msgBuf := pool.GetBuffer(messagePlainLen)
-	defer pool.PutBuffer(msgBuf)
+	msgBuf := buf[currPos : currPos+messagePlainLen]
 
 	msgBuf[0] = HeaderTypeClientStream
 	binary.BigEndian.PutUint64(msgBuf[1:9], uint64(time.Now().Unix()))
@@ -148,11 +147,10 @@ func (c *UdpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
 	}
 	copy(msgBuf[11+addrLen:], b)
 
-	// encrypt message and append ciphertext to buffer
-	ciphertext := c.writeCipher.Seal(nil, separateHeader[4:16], msgBuf, nil)
-	buf = append(buf[:currPos], ciphertext...)
+	// Seal in-place
+	c.writeCipher.Seal(msgBuf[:0], separateHeader[4:16], msgBuf, nil)
 
-	_, err := c.Conn.Write(buf)
+	_, err := c.Conn.Write(buf[:totalLen])
 	return len(b), err
 }
 

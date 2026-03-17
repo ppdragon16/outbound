@@ -261,9 +261,9 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 	defer pool.PutBytesBuffer(buf)
 	if !c.onceWrite {
 		// Generate salt
-		salt := c.sg.Get()
+		salt := pool.GetBuffer(c.cipherConf.SaltLen)
 		defer pool.PutBuffer(salt)
-		buf.Write(salt)
+		buf.Write(c.sg.Get(salt))
 
 		err := c.writeIdentityHeader(buf, salt)
 		if err != nil {

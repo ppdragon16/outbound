@@ -2,11 +2,10 @@ package shadowsocks
 
 import (
 	"github.com/daeuniverse/outbound/pkg/fastrand"
-	"github.com/daeuniverse/outbound/pool"
 )
 
 type SaltGenerator interface {
-	Get() []byte
+	Get(buf []byte) []byte
 	Close() error
 }
 type RandomSaltGenerator struct {
@@ -19,10 +18,9 @@ func NewRandomSaltGenerator(saltSize int) (*RandomSaltGenerator, error) {
 	}, nil
 }
 
-func (g *RandomSaltGenerator) Get() []byte {
-	salt := pool.GetBuffer(g.saltSize)
-	fastrand.Read(salt)
-	return salt
+func (g *RandomSaltGenerator) Get(buf []byte) []byte {
+	fastrand.Read(buf)
+	return buf
 }
 
 func (g *RandomSaltGenerator) Close() error {

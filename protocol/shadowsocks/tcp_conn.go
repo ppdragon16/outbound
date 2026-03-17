@@ -176,9 +176,9 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 	defer pool.PutBytesBuffer(payload)
 	if !c.onceWrite {
 		// Generate salt and setup encryption
-		salt := c.sg.Get()
+		salt := pool.GetBuffer(c.cipherConf.SaltLen)
 		defer pool.PutBuffer(salt)
-		c.cipherWrite, err = CreateCipher(c.masterKey, salt, c.cipherConf)
+		c.cipherWrite, err = CreateCipher(c.masterKey, c.sg.Get(salt), c.cipherConf)
 		if err != nil {
 			return 0, oops.Wrapf(err, "fail to initiate cipher")
 		}
