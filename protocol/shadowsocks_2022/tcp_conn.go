@@ -99,12 +99,11 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 		return n, nil
 	}
 
-	var payloadLength uint16
+	var payloadLength int
 
 	if !c.onceRead {
-		var salt = pool.GetBuffer(c.cipherConf.SaltLen)
-		defer pool.PutBuffer(salt)
-
+		var stackBuf [128]byte // Enough space for: Salt(32) + Header(11+32+16)
+		salt := stackBuf[:c.cipherConf.SaltLen]
 		n, err = io.ReadFull(c.Conn, salt)
 		if err != nil {
 			return 0, err
@@ -114,12 +113,13 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 			return 0, oops.Wrapf(err, "fail to initiate cipher")
 		}
 
-		header := pool.GetBuffer(11 + c.cipherConf.SaltLen + c.cipherConf.TagLen)
-		defer pool.PutBuffer(header)
-		if _, err := io.ReadFull(c.Conn, header); err != nil {
+		// Fixed Header + Server Salt
+		hLen := 11 + c.cipherConf.SaltLen + c.cipherConf.TagLen
+		headerRaw := stackBuf[:hLen]
+		if _, err := io.ReadFull(c.Conn, headerRaw); err != nil {
 			return 0, err
 		}
-		header, err := c.cipherRead.Open(header[:0], c.nonceRead, header, nil)
+		header, err := c.cipherRead.Open(headerRaw[:0], c.nonceRead, headerRaw, nil)
 		if err != nil {
 			return 0, protocol.ErrFailAuth
 		}
@@ -148,7 +148,7 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 		// Skip request salt
 		offset += c.cipherConf.SaltLen
 
-		payloadLength = binary.BigEndian.Uint16(header[offset : offset+2])
+		payloadLength = int(binary.BigEndian.Uint16(header[offset : offset+2]))
 
 		c.onceRead = true
 	} else {
@@ -160,19 +160,33 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 			return 0, protocol.ErrFailAuth
 		}
 		common.BytesIncLittleEndian(c.nonceRead)
-		payloadLength = binary.BigEndian.Uint16(payloadLenBuf)
+		payloadLength = int(binary.BigEndian.Uint16(payloadLenBuf))
 	}
 
 	if c.cipherRead == nil {
 		return 0, oops.Wrapf(err, "cipher is not initialized")
 	}
 
-	payload := pool.GetBuffer(int(payloadLength) + c.cipherConf.TagLen)
+	if len(b) >= payloadLength+c.cipherConf.TagLen {
+		// Fast path
+		// Uses b for inplace decryption if it's bigger than Payload + Tag
+		target := b[:payloadLength+c.cipherConf.TagLen]
+		if _, err = io.ReadFull(c.Conn, target); err != nil {
+			return 0, err
+		}
+		_, err = c.cipherRead.Open(b[:0], c.nonceRead, target, nil)
+		common.BytesIncLittleEndian(c.nonceRead)
+		return payloadLength, err
+	}
+
+	// Slow path
+	payload := pool.GetBuffer(payloadLength + c.cipherConf.TagLen)
 	if _, err = io.ReadFull(c.Conn, payload); err != nil {
 		return 0, err
 	}
 	payload, err = c.cipherRead.Open(payload[:0], c.nonceRead, payload, nil)
 	if err != nil {
+		pool.PutBuffer(payload)
 		return 0, protocol.ErrFailAuth
 	}
 	common.BytesIncLittleEndian(c.nonceRead)
