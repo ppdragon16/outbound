@@ -13,15 +13,25 @@ var (
 	Shadowsocks2022IdentityHeaderInfo = "shadowsocks 2022 identity subkey"
 )
 
-func GenerateSubKey(psk []byte, salt []byte, context string) (subKey []byte) {
-	// TODO: SaltLen or KeyLen
-	subKey = pool.GetBuffer(len(psk))
-	keyMaterial := pool.GetBytesBuffer()
-	defer pool.PutBytesBuffer(keyMaterial)
-	keyMaterial.Write(psk)
-	keyMaterial.Write(salt)
-	blake3.DeriveKey(subKey, context, keyMaterial.Bytes())
-	return
+func GenerateSubKey(psk []byte, salt []byte, context string) []byte {
+	pskLen := len(psk)
+	saltLen := len(salt)
+	totalLen := pskLen + saltLen
+	subKey := pool.GetBuffer(pskLen)
+
+	if totalLen <= 128 { // fast path
+		var bufStack [128]byte
+		copy(bufStack[:], psk)
+		copy(bufStack[pskLen:], salt)
+		blake3.DeriveKey(subKey, context, bufStack[:totalLen])
+	} else {
+		buf := pool.GetBuffer(totalLen)
+		copy(buf, psk)
+		copy(buf[pskLen:], salt)
+		blake3.DeriveKey(subKey, context, buf)
+		pool.PutBuffer(buf)
+	}
+	return subKey
 }
 
 func CreateCipher(masterKey []byte, salt []byte, cipherConf *ciphers.CipherConf2022) (cipher cipher.AEAD, err error) {

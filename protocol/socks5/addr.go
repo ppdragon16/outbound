@@ -41,7 +41,7 @@ func WriteAddr(addr string, buf *bytes.Buffer) error {
 	return WriteAddrInfo(addressInfo, buf)
 }
 
-// WriteAddr writes address information to buffer
+// WriteAddrInfo writes address information to buffer
 func WriteAddrInfo(addr *AddressInfo, buf *bytes.Buffer) error {
 	buf.WriteByte(byte(addr.Type))
 	switch addr.Type {
@@ -60,6 +60,54 @@ func WriteAddrInfo(addr *AddressInfo, buf *bytes.Buffer) error {
 		return fmt.Errorf("unsupported address type: %v", addr.Type)
 	}
 	return nil
+}
+
+// WriteAddrInfoInplace writes address information to the given slice.
+func WriteAddrInfoInplace(addr *AddressInfo, buf []byte) (int, error) {
+	// 1. 手动构造 Variable Header 的地址部分
+	// 布局: [Type(1)][Addr(...)][Port(2)]
+	curr := 0
+	if len(buf) < 1 {
+		return 0, io.ErrShortBuffer
+	}
+	// 写入 Address Type
+	buf[curr] = byte(addr.Type)
+	curr += 1
+	switch addr.Type {
+	case AddressTypeIPv4:
+		if len(buf) < curr+4+2 {
+			return 0, io.ErrShortBuffer
+		}
+		// 注意：addr.IP.AsSlice() 可能会分配内存，直接用 addr.IP.As4()则不会
+		ip4 := addr.IP.As4()
+		copy(buf[curr:curr+4], ip4[:])
+		curr += 4
+	case AddressTypeIPv6:
+		if len(buf) < curr+16+2 {
+			return 0, io.ErrShortBuffer
+		}
+		ip16 := addr.IP.As16()
+		copy(buf[curr:curr+16], ip16[:])
+		curr += 16
+	case AddressTypeDomain:
+		lenDN := len(addr.Hostname)
+		if lenDN > 255 {
+			return 0, fmt.Errorf("domain name too long: %d bytes", lenDN)
+		}
+		if len(buf) < curr+1+lenDN+2 {
+			return 0, io.ErrShortBuffer
+		}
+		buf[curr] = uint8(lenDN)
+		copy(buf[curr+1:curr+1+lenDN], addr.Hostname)
+		curr += 1 + lenDN
+	default:
+		return 0, fmt.Errorf("unsupported address type: %v", addr.Type)
+	}
+	if len(buf) < curr+2 {
+		return 0, io.ErrShortBuffer
+	}
+	binary.BigEndian.PutUint16(buf[curr:], addr.Port)
+	return curr + 2, nil
 }
 
 func ReadAddr(data io.Reader) (net.Addr, error) {

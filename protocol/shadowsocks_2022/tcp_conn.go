@@ -1,14 +1,11 @@
 package shadowsocks_2022
 
 import (
-	"bytes"
-	"crypto/aes"
 	"crypto/cipher"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
-	"runtime/debug"
 	"sync"
 	"time"
 
@@ -31,8 +28,6 @@ const (
 	HeaderTypeServerStream = 1
 	MinPaddingLength       = 0
 	MaxPaddingLength       = 900
-
-	initWriteBufSize = 2048
 )
 
 // TCPConn represents a Shadowsocks TCP connection
@@ -94,23 +89,6 @@ func (c *TCPConn) Close() error {
 	pool.PutBuffer(c.writeBuf)
 	c.bufReader.reset()
 	return c.Conn.Close()
-}
-
-// prepareWriteBuf ensures c.writeBuf has enough capacity for the given plaintext length.
-// It dynamically grows: 2K -> 4K -> 8K -> ... to avoid heap allocation in Seal().
-func (c *TCPConn) prepareWriteBuf(plaintextLen int) []byte {
-	needCap := plaintextLen + c.cipherConf.TagLen
-	if cap(c.writeBuf) < needCap {
-		// Grow: 2K -> 4K -> 8K -> ...
-		newCap := initWriteBufSize
-		for newCap < needCap {
-			newCap *= 2
-		}
-		pool.PutBuffer(c.writeBuf)
-		c.writeBuf = pool.GetBuffer(newCap)
-	}
-	// Reset length, keep capacity
-	return c.writeBuf[:0]
 }
 
 func (c *TCPConn) Read(b []byte) (n int, err error) {
@@ -208,107 +186,129 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 	return n, nil
 }
 
-func EncodeRequestHeader(typ uint8, timestamp uint64, addressInfo *socks5.AddressInfo, b *[]byte) (*bytes.Buffer, *bytes.Buffer, error) {
-	fixedHeader := pool.GetBytesBuffer()
-	varHeader := pool.GetBytesBuffer()
-
-	// Variable-length header: address (variable) + paddingLength (2) + padding (variable, 0) + payload (variable)
-	if err := socks5.WriteAddrInfo(addressInfo, varHeader); err != nil {
-		return nil, nil, err
+func EncodeRequestHeaderInPlace(typ uint8, ts uint64, addr *socks5.AddressInfo, b []byte, dstFixed []byte, dstVar []byte) (int, int, int, error) {
+	// 1. 写入 Variable Header 的地址部分
+	curr, err := socks5.WriteAddrInfoInplace(addr, dstVar)
+	if err != nil {
+		return 0, 0, 0, err
 	}
-	// No padding
-	binary.Write(varHeader, binary.BigEndian, uint16(0))
-	initialPayloadMaxLength := TCPChunkMaxLen - varHeader.Len()
-	var n int
-	if len(*b) > initialPayloadMaxLength {
-		varHeader.Write((*b)[:initialPayloadMaxLength])
-		n = initialPayloadMaxLength
-	} else {
-		varHeader.Write(*b)
-		n = len(*b)
+
+	// 2. 写入 PaddingLen (2 bytes, SS2022 目前固定为 0)
+	if len(dstVar) < curr+2 {
+		return 0, 0, 0, io.ErrShortBuffer
 	}
-	*b = (*b)[n:]
+	binary.BigEndian.PutUint16(dstVar[curr:], 0)
 
-	// Fixed-length header: type (1) + timestamp (8) + length (2) = 11 bytes
-	fixedHeader.WriteByte(typ)
-	binary.Write(fixedHeader, binary.BigEndian, timestamp)
-	binary.Write(fixedHeader, binary.BigEndian, uint16(varHeader.Len()))
+	vHeaderOff := curr + 2
 
-	return fixedHeader, varHeader, nil
-}
+	// 3. 确定 Payload 填充限制 (协议 16KB vs 缓冲区剩余空间)
+	vMaxConsumeOff := common.Min(TCPChunkMaxLen, len(dstVar))
 
-func (c *TCPConn) writeIdentityHeader(buf *bytes.Buffer, salt []byte) error {
-	identityHeader := pool.GetBuffer(aes.BlockSize)
-	defer pool.PutBuffer(identityHeader)
-	for i := 0; i < len(c.pskList)-1; i++ {
-		identity_subkey := GenerateSubKey(c.pskList[i], salt, Shadowsocks2022IdentityHeaderInfo)
-		plaintext := blake3.Sum512(c.pskList[i+1])
-		b, err := c.cipherConf.NewBlockCipher(identity_subkey)
-		if err != nil {
-			return err
-		}
-		b.Encrypt(identityHeader, plaintext[:aes.BlockSize])
-		buf.Write(identityHeader)
+	// 4. 执行拷贝并获取实际消耗长度
+	consumed := 0
+	if vMaxConsumeOff > vHeaderOff {
+		consumed = copy(dstVar[vHeaderOff:vMaxConsumeOff], b)
 	}
-	return nil
+	vTotal := vHeaderOff + consumed
+
+	// 5. 填充 Fixed Header (dstFixed)
+	// 布局：Type(1) + Timestamp(8) + VarHeaderLen(2)
+	dstFixed[0] = typ
+	binary.BigEndian.PutUint64(dstFixed[1:9], ts)
+	binary.BigEndian.PutUint16(dstFixed[9:11], uint16(vTotal))
+
+	return 11, vTotal, consumed, nil
 }
 
 func (c *TCPConn) Write(b []byte) (n int, err error) {
 	n = len(b)
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
-	buf := pool.GetBytesBuffer()
-	defer pool.PutBytesBuffer(buf)
-	if !c.onceWrite {
-		// Generate salt
-		salt := pool.GetBuffer(c.cipherConf.SaltLen)
-		defer pool.PutBuffer(salt)
-		buf.Write(c.sg.Get(salt))
 
-		err := c.writeIdentityHeader(buf, salt)
-		if err != nil {
-			debug.PrintStack()
-			return 0, oops.Wrapf(err, "fail to write identity header")
+	// 1. 预计算总空间，一次性拿够
+	totalNeed := c.cipherConf.SaltLen + (len(c.pskList)-1)*16 + 2048 + len(b) + (len(b)/16384+2)*40
+	buf := pool.GetBuffer(totalNeed)
+	defer pool.PutBuffer(buf)
+
+	curr := 0
+	remainingB := b
+
+	if !c.onceWrite {
+		// --- A. Salt ---
+		salt := buf[curr : curr+c.cipherConf.SaltLen]
+		c.sg.Get(salt)
+		curr += c.cipherConf.SaltLen
+
+		// --- B. Identity Headers ---
+		for i := 0; i < len(c.pskList)-1; i++ {
+			subKey := GenerateSubKey(c.pskList[i], salt, Shadowsocks2022IdentityHeaderInfo)
+			bc, _ := c.cipherConf.NewBlockCipher(subKey)
+			pool.PutBuffer(subKey) // 即取即还
+
+			plaintext := blake3.Sum512(c.pskList[i+1])
+			bc.Encrypt(buf[curr:curr+16], plaintext[:16])
+			curr += 16
 		}
 
-		// Setup encryption
+		// 初始化会话加密器
 		c.cipherWrite, err = CreateCipher(c.uPSK, salt, c.cipherConf)
 		if err != nil {
-			debug.PrintStack()
-			return 0, oops.Wrapf(err, "fail to initiate cipher")
+			return 0, err
 		}
 
-		// Add Request headers
-		fixedHeader, varHeader, err := EncodeRequestHeader(HeaderTypeClientStream, uint64(time.Now().Unix()), c.addr, &b)
-		defer pool.PutBytesBuffer(fixedHeader)
-		defer pool.PutBytesBuffer(varHeader)
+		// --- C. Request Headers (Fixed + Variable) ---
+		// 关键改动：先在栈上/临时位置构造明文，再 Seal 到 buf 的 curr 位置
+		// 这样可以彻底避免复杂的 Offset 挪动逻辑
+
+		// 预留两个 Header 的明文空间 (Fixed 11 + Var 最大约 1500)
+		// 使用一个小的栈空间做中转，确保逻辑清晰
+		var headerStack [2048]byte
+		fHeader := headerStack[:11]
+		vHeader := headerStack[11:]
+
+		fLen, vLen, consumed, err := EncodeRequestHeaderInPlace(
+			HeaderTypeClientStream, uint64(time.Now().Unix()),
+			c.addr, remainingB, fHeader, vHeader)
 		if err != nil {
-			debug.PrintStack()
-			return 0, oops.Wrapf(err, "fail to encode request header")
+			return 0, err
 		}
-		buf.Write(c.cipherWrite.Seal(c.prepareWriteBuf(fixedHeader.Len()), c.nonceWrite, fixedHeader.Bytes(), nil))
+		remainingB = remainingB[consumed:]
+
+		// 1. Seal Fixed Header 到 buf
+		c.cipherWrite.Seal(buf[curr:curr], c.nonceWrite, fHeader[:fLen], nil)
+		curr += fLen + c.cipherConf.TagLen
 		common.BytesIncLittleEndian(c.nonceWrite)
-		buf.Write(c.cipherWrite.Seal(c.prepareWriteBuf(varHeader.Len()), c.nonceWrite, varHeader.Bytes(), nil))
+
+		// 2. Seal Variable Header 到 buf
+		c.cipherWrite.Seal(buf[curr:curr], c.nonceWrite, vHeader[:vLen], nil)
+		curr += vLen + c.cipherConf.TagLen
 		common.BytesIncLittleEndian(c.nonceWrite)
 
 		c.onceWrite = true
 	}
-	if c.cipherWrite == nil {
-		debug.PrintStack()
-		return 0, oops.Wrapf(err, "cipher is not initialized")
-	}
-	// Seal.
+
+	// --- D. Data Chunks ---
 	var chunkLengthBuf [2]byte
-	for i := 0; i < len(b); i += TCPChunkMaxLen {
-		// write chunk
-		var chunkLength = common.Min(TCPChunkMaxLen, len(b)-i)
-		binary.BigEndian.PutUint16(chunkLengthBuf[:], uint16(chunkLength))
-		buf.Write(c.cipherWrite.Seal(c.prepareWriteBuf(2), c.nonceWrite, chunkLengthBuf[:], nil))
+	for len(remainingB) > 0 {
+		chunkLen := common.Min(TCPChunkMaxLen, len(remainingB))
+
+		// 1. Seal Length (2 bytes)
+		binary.BigEndian.PutUint16(chunkLengthBuf[:], uint16(chunkLen))
+		c.cipherWrite.Seal(buf[curr:curr], c.nonceWrite, chunkLengthBuf[:], nil)
+		curr += 2 + c.cipherConf.TagLen
 		common.BytesIncLittleEndian(c.nonceWrite)
-		buf.Write(c.cipherWrite.Seal(c.prepareWriteBuf(chunkLength), c.nonceWrite, b[i:i+chunkLength], nil))
+
+		// 2. Seal Payload
+		// 注意：Payload 数据在 remainingB 中，Seal 到 buf[curr:]
+		c.cipherWrite.Seal(buf[curr:curr], c.nonceWrite, remainingB[:chunkLen], nil)
+		curr += chunkLen + c.cipherConf.TagLen
 		common.BytesIncLittleEndian(c.nonceWrite)
+
+		remainingB = remainingB[chunkLen:]
 	}
-	_, err = c.Conn.Write(buf.Bytes())
+
+	// --- E. 发送 ---
+	_, err = c.Conn.Write(buf[:curr])
 	return n, err
 }
 
