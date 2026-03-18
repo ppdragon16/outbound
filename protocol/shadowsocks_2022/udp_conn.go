@@ -8,8 +8,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
+	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/outbound/ciphers"
@@ -31,10 +33,11 @@ type UdpConn struct {
 	blockCipherEncrypt cipher.Block
 	blockCipherDecrypt cipher.Block
 
-	pskList      [][]byte
-	cipherBlocks []cipher.Block
-	uPSK         []byte
-	bloom        *disk_bloom.FilterGroup
+	pskList        [][]byte
+	identityHashes [][]byte
+	cipherBlocks   []cipher.Block
+	uPSK           []byte
+	bloom          *disk_bloom.FilterGroup
 
 	writeCipher       cipher.AEAD
 	lastReadCipher    cipher.AEAD
@@ -42,31 +45,38 @@ type UdpConn struct {
 }
 
 func NewUdpConn(conn net.Conn, conf *ciphers.CipherConf2022, blockCipherEncrypt cipher.Block, blockCipherDecrypt cipher.Block, pskList [][]byte, uPSK []byte, bloom *disk_bloom.FilterGroup) (*UdpConn, error) {
-	u := UdpConn{
+	u := &UdpConn{
 		Conn:               conn,
 		cipherConf:         conf,
 		blockCipherEncrypt: blockCipherEncrypt,
 		blockCipherDecrypt: blockCipherDecrypt,
 		pskList:            pskList,
+		identityHashes:     make([][]byte, len(pskList)-1),
 		cipherBlocks:       make([]cipher.Block, len(pskList)-1),
 		uPSK:               uPSK,
 		bloom:              bloom,
 	}
+
 	for i := 0; i < len(pskList)-1; i++ {
+		// 1. 提前计算 Identity Header 需要的 Hash
+		h := blake3.Sum512(pskList[i+1])
+		u.identityHashes[i] = h[:16]
+
+		// 2. 提前创建 Block Cipher
 		bc, err := conf.NewBlockCipher(pskList[i])
 		if err != nil {
 			return nil, err
 		}
 		u.cipherBlocks[i] = bc
 	}
-	// TODO: salt generator?
+
 	fastrand.Read(u.sessionID[:])
 	wc, err := CreateCipher(u.uPSK, u.sessionID[:], u.cipherConf)
 	if err != nil {
 		return nil, err
 	}
 	u.writeCipher = wc
-	return &u, nil
+	return u, nil
 }
 
 func ToAddrPort(addr net.Addr) (netip.AddrPort, error) {
@@ -95,26 +105,16 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 }
 
 func (c *UdpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
-	c.packetID++
-
 	// Separate Header (16 bytes)
 	var separateHeader [16]byte
 	copy(separateHeader[:8], c.sessionID[:])
-	binary.BigEndian.PutUint64(separateHeader[8:16], c.packetID)
-
-	// Addr length
-	addr := ap.Addr()
-	addrLen := 7 // atyp(1) + ipv4(4) + port(2)
-	if addr.Is6() {
-		addrLen = 19
-	}
+	binary.BigEndian.PutUint64(separateHeader[8:16], atomic.AddUint64(&c.packetID, 1))
 
 	// SeparateHeader(16) + IdentityHeaders(BlockSize * (len-1)) + Message(1 + 8 + 2 + addrLen + payload) + Tag
 	identityHeadersLen := aes.BlockSize * (len(c.pskList) - 1)
-	messagePlainLen := 1 + 8 + 2 + addrLen + len(b)
-	totalLen := 16 + identityHeadersLen + messagePlainLen + c.cipherConf.TagLen
-
-	buf := pool.GetBuffer(totalLen)
+	// Header(11) + Addr(max 19) + Payload + Tag
+	maxTotal := 16 + identityHeadersLen + 11 + 19 + len(b) + c.cipherConf.TagLen
+	buf := pool.GetBuffer(maxTotal)
 	defer pool.PutBuffer(buf)
 
 	// Encrpt Separate Header
@@ -123,43 +123,46 @@ func (c *UdpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
 	// Identity Headers
 	currPos := 16
 	for i := 0; i < len(c.pskList)-1; i++ {
-		hash := blake3.Sum512(c.pskList[i+1])
-		subtle.XORBytes(buf[currPos:currPos+16], hash[:16], separateHeader[:])
+		subtle.XORBytes(buf[currPos:currPos+16], c.identityHashes[i], separateHeader[:])
 		c.cipherBlocks[i].Encrypt(buf[currPos:currPos+16], buf[currPos:currPos+16])
 		currPos += 16
 	}
 
 	// Message plaintext
-	msgBuf := buf[currPos : currPos+messagePlainLen]
-
+	msgBuf := buf[currPos:]
 	msgBuf[0] = HeaderTypeClientStream
 	binary.BigEndian.PutUint64(msgBuf[1:9], uint64(time.Now().Unix()))
 	binary.BigEndian.PutUint16(msgBuf[9:11], 0) // No padding
 
+	// Address info
+	addr := ap.Addr()
+	addrInfo := socks5.AddressInfo{IP: addr, Port: ap.Port()}
 	if addr.Is4() {
-		msgBuf[11] = byte(socks5.AddressTypeIPv4)
-		copy(msgBuf[12:16], addr.AsSlice())
-		binary.BigEndian.PutUint16(msgBuf[16:18], ap.Port())
+		addrInfo.Type = socks5.AddressTypeIPv4
 	} else {
-		msgBuf[11] = byte(socks5.AddressTypeIPv6)
-		copy(msgBuf[12:28], addr.AsSlice())
-		binary.BigEndian.PutUint16(msgBuf[28:30], ap.Port())
+		addrInfo.Type = socks5.AddressTypeIPv6
 	}
-	copy(msgBuf[11+addrLen:], b)
+	addrLen, err := socks5.WriteAddrInfoInplace(&addrInfo, msgBuf[11:])
+	if err != nil {
+		return 0, err
+	}
 
-	// Seal in-place
-	c.writeCipher.Seal(msgBuf[:0], separateHeader[4:16], msgBuf, nil)
+	// Seal
+	payloadOff := 11 + addrLen
+	messageLen := payloadOff + copy(msgBuf[payloadOff:], b)
+	c.writeCipher.Seal(msgBuf[:0], separateHeader[4:16], msgBuf[:messageLen], nil)
 
-	_, err := c.Conn.Write(buf[:totalLen])
-	return len(b), err
+	if _, err = c.Conn.Write(buf[:currPos+messageLen+c.cipherConf.TagLen]); err != nil {
+		return 0, err
+	}
+	return len(b), nil
 }
 
 func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
-	if len(b) < 16+c.cipherConf.TagLen {
-		return 0, netip.AddrPort{}, errors.New("buffer too small")
-	}
+	wireBuf := pool.GetBuffer(2048)
+	defer pool.PutBuffer(wireBuf)
 
-	n, err := c.Conn.Read(b)
+	n, err := c.Conn.Read(wireBuf)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
@@ -168,9 +171,9 @@ func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 	}
 
 	// Get SessionID from Separate Header
-	c.blockCipherDecrypt.Decrypt(b[:16], b[:16])
-	sessionID := b[:8]
-	nonce := b[4:16]
+	c.blockCipherDecrypt.Decrypt(wireBuf[:16], wireBuf[:16])
+	sessionID := wireBuf[:8]
+	nonce := wireBuf[4:16]
 
 	// Payload (AEAD)
 	var ciph cipher.AEAD
@@ -181,37 +184,37 @@ func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 		if err != nil {
 			return 0, netip.AddrPort{}, err
 		}
-		c.lastReadSessionID = [8]byte(sessionID)
+		copy(c.lastReadSessionID[:], sessionID)
 		c.lastReadCipher = ciph
 	}
 
-	decrypted, err := ciph.Open(b[16:16], nonce, b[16:n], nil)
+	// Decrypt Message in-place
+	decrypted, err := ciph.Open(wireBuf[16:16], nonce, wireBuf[16:n], nil)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
 
 	// Message header must contain at least type(1) + time(8) + paddingLen(2)
-	if len(decrypted) < 11 {
-		return 0, netip.AddrPort{}, errors.New("decrypted too short")
+	if len(decrypted) < 19 {
+		return 0, netip.AddrPort{}, errors.New("decrypted message too short")
 	}
 
-	typ := decrypted[0]
-	if typ != HeaderTypeServerStream {
-		return 0, netip.AddrPort{}, fmt.Errorf("unexpected header type: %d", typ)
+	if decrypted[0] != HeaderTypeServerStream {
+		return 0, netip.AddrPort{}, fmt.Errorf("unexpected header type: %d", decrypted[0])
 	}
 
-	timestampRaw := binary.BigEndian.Uint64(decrypted[1:9])
-	if time.Unix(int64(timestampRaw), 0).Before(time.Now().Add(-ciphers.TimestampTolerance)) {
+	// Timestamp
+	ts := binary.BigEndian.Uint64(decrypted[1:9])
+	if time.Unix(int64(ts), 0).Before(time.Now().Add(-ciphers.TimestampTolerance)) {
 		return 0, netip.AddrPort{}, protocol.ErrReplayAttack
 	}
 
 	// Skip client session ID (8 bytes) and read padding length
-	paddingLen := binary.BigEndian.Uint16(decrypted[17:19])
-	offset := 19 + int(paddingLen)
+	offset := 19 + int(binary.BigEndian.Uint16(decrypted[17:19]))
 
 	// ATYP + ADDR + PORT
 	if len(decrypted) < offset+1 {
-		return 0, netip.AddrPort{}, errors.New("no address field")
+		return 0, netip.AddrPort{}, errors.New("malformed address field")
 	}
 
 	atyp := socks5.AddressType(decrypted[offset])
@@ -220,10 +223,18 @@ func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 
 	switch atyp {
 	case socks5.AddressTypeIPv4:
-		ipAddr = netip.AddrFrom4([4]byte(decrypted[offset+1 : offset+5]))
+		if len(decrypted) < offset+7 {
+			return 0, netip.AddrPort{}, io.ErrUnexpectedEOF
+		}
+		// Uses array pointer to avoid escape to heap
+		ipAddr = netip.AddrFrom4(*(*[4]byte)(decrypted[offset+1 : offset+5]))
 		addrFieldLen = 1 + 4 + 2
 	case socks5.AddressTypeIPv6:
-		ipAddr = netip.AddrFrom16([16]byte(decrypted[offset+1 : offset+17]))
+		if len(decrypted) < offset+19 {
+			return 0, netip.AddrPort{}, io.ErrUnexpectedEOF
+		}
+		// Uses array pointer to avoid escape to heap
+		ipAddr = netip.AddrFrom16(*(*[16]byte)(decrypted[offset+1 : offset+17]))
 		addrFieldLen = 1 + 16 + 2
 	default:
 		return 0, netip.AddrPort{}, fmt.Errorf("unsupported atyp: %v", atyp)
@@ -234,5 +245,10 @@ func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 
 	// Payload
 	dataOffset := offset + addrFieldLen
-	return copy(b, decrypted[dataOffset:]), ap, nil
+	payload := decrypted[dataOffset:]
+	if len(b) < len(payload) {
+		return 0, ap, io.ErrShortBuffer
+	}
+
+	return copy(b, payload), ap, nil
 }
