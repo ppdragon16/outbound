@@ -54,90 +54,100 @@ func (c *UdpConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 	var ap netip.AddrPort
 	n, ap, err = c.ReadFromAddrPort(b)
-	return n, net.UDPAddrFromAddrPort(ap), err
+	if err != nil {
+		return 0, nil, err
+	}
+	return n, net.UDPAddrFromAddrPort(ap), nil
 }
 
 func (c *UdpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
 	addr := ap.Addr()
 	isV4 := addr.Is4()
 
-	// atyp(1) + ipv4/ipv6(4/16) + port(2)
+	// 1. Calculate address field length: ATYP(1) + IP(4 or 16) + Port(2)
 	addrLen := 19
 	if isV4 {
 		addrLen = 7
 	}
 
-	// [Salt] [Encrypted(Address + Data + Tag)]
+	// 2. Pre-calculate total buffer size: [Salt] [Address + Data + Tag]
 	totalPayloadLen := addrLen + len(b)
 	totalBufLen := c.cipherConf.SaltLen + totalPayloadLen + c.cipherConf.TagLen
 
 	buf := pool.GetBuffer(totalBufLen)
 	defer pool.PutBuffer(buf)
 
-	// Salt
+	// 3. Handshake: Generate Salt
 	salt := c.sg.Get(buf[:c.cipherConf.SaltLen])
 
+	// 4. Construct Plaintext: [Address][Payload]
 	plaintext := buf[c.cipherConf.SaltLen : c.cipherConf.SaltLen+totalPayloadLen]
-
 	if isV4 {
 		plaintext[0] = byte(socks5.AddressTypeIPv4)
-		copy(plaintext[1:5], addr.AsSlice())
+		// Use fixed-size array copy to avoid slice escape
+		ip4 := addr.As4()
+		copy(plaintext[1:5], ip4[:])
 		binary.BigEndian.PutUint16(plaintext[5:7], ap.Port())
 	} else {
 		plaintext[0] = byte(socks5.AddressTypeIPv6)
-		copy(plaintext[1:17], addr.AsSlice())
+		ip16 := addr.As16()
+		copy(plaintext[1:17], ip16[:])
 		binary.BigEndian.PutUint16(plaintext[17:19], ap.Port())
 	}
 	copy(plaintext[addrLen:], b)
 
-	// Cipher
+	// 5. Encrypt In-place
 	ciph, err := CreateCipher(c.masterKey, salt, c.cipherConf)
 	if err != nil {
 		return 0, err
 	}
-	// Seal in-place
+	// Destination and Source overlap for in-place AEAD
 	ciph.Seal(plaintext[:0], ciphers.ZeroNonce[:c.cipherConf.NonceLen], plaintext, nil)
 
+	// 6. Transmit
 	_, err = c.Conn.Write(buf[:totalBufLen])
 	return len(b), err
 }
 
 func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
-	if len(b) < c.cipherConf.SaltLen+c.cipherConf.TagLen {
-		return 0, netip.AddrPort{}, fmt.Errorf("buffer too small")
-	}
+	// Use pool for wire buffer to handle overhead and avoid corruption of user buffer 'b'
+	wireBuf := pool.GetBuffer(2048)
+	defer pool.PutBuffer(wireBuf)
 
-	n, err := c.Conn.Read(b)
+	n, err := c.Conn.Read(wireBuf)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
 
-	// Verify length
-	if n < c.cipherConf.SaltLen+c.cipherConf.TagLen {
+	// Minimum length: Salt + ATYP + Port + Tag
+	if n < c.cipherConf.SaltLen+c.cipherConf.TagLen+3 {
 		return 0, netip.AddrPort{}, fmt.Errorf("packet too short")
 	}
 
-	salt := b[:c.cipherConf.SaltLen]
+	// 1. Replay Protection
+	salt := wireBuf[:c.cipherConf.SaltLen]
 	if c.bloom != nil && c.bloom.ExistOrAdd(salt) {
 		return 0, netip.AddrPort{}, protocol.ErrReplayAttack
 	}
 
+	// 2. Decrypt In-place within wireBuf
 	ciph, err := CreateCipher(c.masterKey, salt, c.cipherConf)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
 
-	decrypted, err := ciph.Open(b[c.cipherConf.SaltLen:c.cipherConf.SaltLen],
+	decrypted, err := ciph.Open(wireBuf[c.cipherConf.SaltLen:c.cipherConf.SaltLen],
 		ciphers.ZeroNonce[:c.cipherConf.NonceLen],
-		b[c.cipherConf.SaltLen:n], nil)
+		wireBuf[c.cipherConf.SaltLen:n], nil)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
 
 	if len(decrypted) < 1 {
-		return 0, netip.AddrPort{}, fmt.Errorf("empty decrypted payload")
+		return 0, netip.AddrPort{}, fmt.Errorf("empty payload")
 	}
 
+	// 3. Parse Address Header (Zero-allocation)
 	atyp := socks5.AddressType(decrypted[0])
 	var addr netip.Addr
 	var portOffset int
@@ -147,26 +157,25 @@ func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 		if len(decrypted) < 7 {
 			return 0, netip.AddrPort{}, fmt.Errorf("short ipv4")
 		}
-		addr = netip.AddrFrom4([4]byte(decrypted[1:5]))
+		// Direct array conversion to prevent slice escape
+		addr = netip.AddrFrom4(*(*[4]byte)(decrypted[1:5]))
 		portOffset = 5
 	case socks5.AddressTypeIPv6:
 		if len(decrypted) < 19 {
 			return 0, netip.AddrPort{}, fmt.Errorf("short ipv6")
 		}
-		addr = netip.AddrFrom16([16]byte(decrypted[1:17]))
+		addr = netip.AddrFrom16(*(*[16]byte)(decrypted[1:17]))
 		portOffset = 17
 	default:
-		return 0, netip.AddrPort{}, fmt.Errorf("unsupported atyp in ss: %v", atyp)
+		return 0, netip.AddrPort{}, fmt.Errorf("unsupported atyp: %v", atyp)
 	}
 
 	port := binary.BigEndian.Uint16(decrypted[portOffset : portOffset+2])
 	ap := netip.AddrPortFrom(addr, port)
 
-	// Payload
+	// 4. Deliver Data to User Buffer
 	dataOffset := portOffset + 2
-	if len(decrypted) < dataOffset {
-		return 0, ap, fmt.Errorf("no data after address")
-	}
+	payload := decrypted[dataOffset:]
 
-	return copy(b, decrypted[dataOffset:]), ap, nil
+	return copy(b, payload), ap, nil
 }
