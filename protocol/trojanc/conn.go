@@ -1,14 +1,7 @@
-// protocol spec:
-// https://trojan-gfw.github.io/trojan/protocol
-
 package trojanc
 
 import (
-	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
 	"net"
 	"sync"
 
@@ -22,7 +15,6 @@ var (
 	FailAuthErr = fmt.Errorf("incorrect password")
 )
 
-// Command constants for Trojan protocol
 const (
 	CommandConnect = 0x01
 	CommandUDP     = 0x03
@@ -32,7 +24,7 @@ type Conn struct {
 	net.Conn
 	addr    *socks5.AddressInfo
 	command byte
-	pass    [56]byte
+	pass    [56]byte // Hex SHA224
 
 	writeMutex sync.Mutex
 	onceWrite  bool
@@ -60,66 +52,19 @@ func NetworkToByte(network string) byte {
 	}
 }
 
-func NewConn(conn net.Conn, addr *socks5.AddressInfo, network string, password string) net.Conn {
-	hash := sha256.New224()
-	hash.Write([]byte(password))
+// NewConn now accepts the pre-computed hexPass to save CPU cycles.
+func NewConn(conn net.Conn, addr *socks5.AddressInfo, network string, hexPass []byte) net.Conn {
 	c := &Conn{
 		Conn:    conn,
 		addr:    addr,
 		command: NetworkToByte(network),
-		pass:    [56]byte{},
 	}
-	hex.Encode(c.pass[:], hash.Sum(nil))
-	if _, ok := conn.(netproxy.CloseWriter); ok {
-		return &netproxy.CloseWriteConn{Conn: c, CloseWriter: conn.(netproxy.CloseWriter)}
+	copy(c.pass[:], hexPass)
+
+	if cw, ok := conn.(netproxy.CloseWriter); ok {
+		return &netproxy.CloseWriteConn{Conn: c, CloseWriter: cw}
 	}
 	return c
-}
-
-// buildTrojanRequest builds the Trojan request according to spec:
-// +-----+------+----------+----------+
-// | CMD | ATYP | DST.ADDR | DST.PORT |
-// +-----+------+----------+----------+
-// |  1  |  1   | Variable |    2     |
-// +-----+------+----------+----------+
-func (c *Conn) buildTrojanRequest(buf *bytes.Buffer) error {
-	// Write command
-	buf.WriteByte(c.command)
-
-	// Encode address using shadowsocks format
-	err := socks5.WriteAddrInfo(c.addr, buf)
-	if err != nil {
-		return fmt.Errorf("failed to write address: %w", err)
-	}
-
-	return nil
-}
-
-// buildRequestHeader builds the complete Trojan request header:
-// +-----------------------+---------+----------------+---------+----------+
-// | hex(SHA224(password)) |  CRLF   | Trojan Request |  CRLF   | Payload  |
-// +-----------------------+---------+----------------+---------+----------+
-// |          56           | X'0D0A' |    Variable    | X'0D0A' | Variable |
-// +-----------------------+---------+----------------+---------+----------+
-func (c *Conn) buildRequestHeader(buf *bytes.Buffer, payload []byte) error {
-	// Write hex(SHA224(password))
-	buf.Write(c.pass[:])
-
-	// Write CRLF
-	buf.Write(CRLF)
-
-	// Write Trojan Request
-	if err := c.buildTrojanRequest(buf); err != nil {
-		return err
-	}
-
-	// Write CRLF
-	buf.Write(CRLF)
-
-	// Write payload
-	buf.Write(payload)
-
-	return nil
 }
 
 func (c *Conn) Write(b []byte) (n int, err error) {
@@ -127,15 +72,37 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	defer c.writeMutex.Unlock()
 
 	if !c.onceWrite {
-		buf := pool.GetBytesBuffer()
-		defer pool.PutBytesBuffer(buf)
+		// Calculate potential header size: Pass(56) + CRLF(2) + Cmd(1) + Addr(max 259) + CRLF(2)
+		// Total max header is around 320 bytes.
+		maxHeaderLen := 56 + 2 + 1 + 259 + 2
+		totalLen := maxHeaderLen + len(b)
 
-		if err := c.buildRequestHeader(buf, b); err != nil {
-			return 0, fmt.Errorf("failed to build request header: %w", err)
+		buf := pool.GetBuffer(totalLen)
+		defer pool.PutBuffer(buf)
+
+		// 1. Write Password Hash and CRLF
+		curr := copy(buf, c.pass[:])
+		curr += copy(buf[curr:], CRLF)
+
+		// 2. Write Trojan Request (Command + Address)
+		buf[curr] = c.command
+		curr++
+
+		aLen, err := socks5.WriteAddrInfoInplace(c.addr, buf[curr:])
+		if err != nil {
+			return 0, fmt.Errorf("failed to write address: %w", err)
 		}
+		curr += aLen
 
-		if _, err := c.Conn.Write(buf.Bytes()); err != nil {
-			return 0, fmt.Errorf("failed to write request header: %w", err)
+		// 3. Write second CRLF
+		curr += copy(buf[curr:], CRLF)
+
+		// 4. Write Payload (zero-copy from 'b')
+		curr += copy(buf[curr:], b)
+
+		// Send everything in one single syscall
+		if _, err := c.Conn.Write(buf[:curr]); err != nil {
+			return 0, fmt.Errorf("failed to write handshake: %w", err)
 		}
 
 		c.onceWrite = true
@@ -143,58 +110,4 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	}
 
 	return c.Conn.Write(b)
-}
-
-// readReqHeader reads and validates the Trojan request header when used as server
-func (c *Conn) readReqHeader() error {
-	// Read password hash (56 bytes)
-	passwordBuf := pool.GetBuffer(56)
-	defer pool.PutBuffer(passwordBuf)
-
-	if _, err := io.ReadFull(c.Conn, passwordBuf); err != nil {
-		return fmt.Errorf("failed to read password: %w", err)
-	}
-
-	if !bytes.Equal(c.pass[:], passwordBuf) {
-		return FailAuthErr
-	}
-
-	// Read CRLF after password
-	crlfBuf := pool.GetBuffer(2)
-	defer pool.PutBuffer(crlfBuf)
-
-	if _, err := io.ReadFull(c.Conn, crlfBuf); err != nil {
-		return fmt.Errorf("failed to read CRLF after password: %w", err)
-	}
-
-	if !bytes.Equal(CRLF, crlfBuf) {
-		return fmt.Errorf("invalid CRLF after password")
-	}
-
-	// Read command (1 byte)
-	commandBuf := pool.GetBuffer(1)
-	defer pool.PutBuffer(commandBuf)
-
-	if _, err := io.ReadFull(c.Conn, commandBuf); err != nil {
-		return fmt.Errorf("failed to read command: %w", err)
-	}
-
-	c.command = commandBuf[0]
-
-	var err error
-	c.addr, err = socks5.ReadAddrInfo(c.Conn)
-	if err != nil {
-		return fmt.Errorf("failed to decode address: %w", err)
-	}
-
-	// Read CRLF after address
-	if _, err := io.ReadFull(c.Conn, crlfBuf); err != nil {
-		return fmt.Errorf("failed to read CRLF after address: %w", err)
-	}
-
-	if !bytes.Equal(CRLF, crlfBuf) {
-		return fmt.Errorf("invalid CRLF after address")
-	}
-
-	return nil
 }

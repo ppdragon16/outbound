@@ -18,7 +18,6 @@ type Tls struct {
 	protocol.StatelessDialer
 	addr                string
 	tlsImplentation     string
-	utlsImitate         string
 	passthroughUdp      bool
 	fragmentation       bool
 	fragmentMinLength   int64
@@ -26,7 +25,9 @@ type Tls struct {
 	fragmentMinInterval int64
 	fragmentMaxInterval int64
 
-	tlsConfig *tls.Config
+	tlsConfig  *tls.Config
+	utlsConfig *utls.Config
+	utlsID     *utls.ClientHelloID
 }
 
 type TLSConfig struct {
@@ -46,7 +47,6 @@ func (s *TLSConfig) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Diale
 		},
 		addr:            s.Host,
 		tlsImplentation: option.TlsImplementation,
-		utlsImitate:     option.UtlsImitate,
 		passthroughUdp:  s.PassthroughUdp,
 	}
 	if s.Sni == "" {
@@ -79,7 +79,24 @@ func (s *TLSConfig) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Diale
 		t.fragmentMinInterval = minInterval
 		t.fragmentMaxInterval = maxInterval
 	}
-
+	if option.TlsImplementation == "utls" {
+		utlsID, err := nameToUtlsClientHelloID(option.UtlsImitate)
+		if err != nil {
+			return nil, err
+		}
+		t.utlsID = utlsID
+		t.utlsConfig = &utls.Config{
+			ServerName:         s.Sni,
+			InsecureSkipVerify: s.AllowInsecure || option.AllowInsecure,
+			NextProtos:         t.tlsConfig.NextProtos,
+			// 内存优化：只保留成熟、低分配的传统曲线
+			CurvePreferences: []utls.CurveID{
+				utls.X25519,
+				utls.CurveP256,
+				utls.CurveP384,
+			},
+		}
+	}
 	return t, nil
 }
 
@@ -105,13 +122,7 @@ func (s *Tls) DialContext(ctx context.Context, network, addr string) (c net.Conn
 			tlsConn = tls.Client(rc, s.tlsConfig)
 
 		case "utls":
-			clientHelloID, err := nameToUtlsClientHelloID(s.utlsImitate)
-			if err != nil {
-				rc.Close()
-				return nil, err
-			}
-
-			tlsConn = utls.UClient(rc, uTLSConfigFromTLSConfig(s.tlsConfig), *clientHelloID)
+			tlsConn = utls.UClient(rc, s.utlsConfig, *s.utlsID)
 
 		default:
 			rc.Close()
