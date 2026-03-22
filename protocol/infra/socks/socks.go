@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 )
 
@@ -81,27 +82,26 @@ func (a Addr) String() string {
 func (a Addr) Network() string { return "socks" }
 
 // ReadAddr reads just enough bytes from r to get a valid Addr.
-func ReadAddr(r io.Reader) (Addr, error) {
-	b := make([]byte, MaxAddrLen)
-	_, err := io.ReadFull(r, b[:1]) // read 1st byte for address type
+func ReadAddr(r io.Reader, buf []byte) (Addr, error) {
+	_, err := io.ReadFull(r, buf[:1]) // read 1st byte for address type
 	if err != nil {
 		return nil, err
 	}
 
-	switch b[0] {
+	switch buf[0] {
 	case ATypDomain:
-		_, err = io.ReadFull(r, b[1:2]) // read 2nd byte for domain length
+		_, err = io.ReadFull(r, buf[1:2]) // read 2nd byte for domain length
 		if err != nil {
 			return nil, err
 		}
-		_, err = io.ReadFull(r, b[2:2+int(b[1])+2])
-		return b[:1+1+int(b[1])+2], err
+		_, err = io.ReadFull(r, buf[2:2+int(buf[1])+2])
+		return buf[:1+1+int(buf[1])+2], err
 	case ATypIP4:
-		_, err = io.ReadFull(r, b[1:1+net.IPv4len+2])
-		return b[:1+net.IPv4len+2], err
+		_, err = io.ReadFull(r, buf[1:1+net.IPv4len+2])
+		return buf[:1+net.IPv4len+2], err
 	case ATypIP6:
-		_, err = io.ReadFull(r, b[1:1+net.IPv6len+2])
-		return b[:1+net.IPv6len+2], err
+		_, err = io.ReadFull(r, buf[1:1+net.IPv6len+2])
+		return buf[:1+net.IPv6len+2], err
 	}
 
 	return nil, Errors[8]
@@ -171,4 +171,42 @@ func ParseAddr(s string) (Addr, error) {
 	addr[len(addr)-2], addr[len(addr)-1] = byte(portnum>>8), byte(portnum)
 
 	return addr, nil
+}
+
+// AppendParseAddr parses the address in string s, and append bytes to the given buffer.
+func AppendParseAddr(s string, buf []byte) ([]byte, error) {
+	host, port, err := net.SplitHostPort(s)
+	if err != nil {
+		return buf, err
+	}
+
+	// Parse ip addr.
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if addr.Is4() {
+			buf = append(buf, ATypIP4)
+			ip4 := addr.As4()
+			buf = append(buf, ip4[:]...)
+		} else {
+			buf = append(buf, ATypIP6)
+			ip16 := addr.As16()
+			buf = append(buf, ip16[:]...)
+		}
+	} else {
+		// Parse domain.
+		if len(host) > 255 {
+			return buf, fmt.Errorf("address %v is too long", s)
+		}
+		buf = append(buf, ATypDomain, byte(len(host)))
+		buf = append(buf, host...)
+	}
+
+	// Parse port.
+	portnum, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return buf, err
+	}
+	// Append port (BigEndian).
+	buf = append(buf, byte(portnum>>8), byte(portnum))
+
+	return buf, nil
 }

@@ -10,11 +10,11 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
-	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
-
 	"github.com/daeuniverse/outbound/pool"
+
 	"github.com/daeuniverse/outbound/protocol/infra/socks"
 )
 
@@ -26,15 +26,25 @@ func NewSocks5Dialer(s string, d netproxy.Dialer) (netproxy.Dialer, error) {
 func (s *Socks5) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	switch network {
 	case "tcp":
-		c, err := s.ParentDialer.DialContext(ctx, "tcp", s.addr)
+		c, err := s.ParentDialer.DialContext(ctx, s.network, s.addr)
 		if err != nil {
 			return nil, fmt.Errorf("[socks5]: dial to %s error: %w", s.addr, err)
 		}
-		_, err = common.Invoke(ctx, func() (socks.Addr, error) {
-			return s.connect(c, address, socks.CmdConnect)
-		}, func() {
+		if deadline, ok := ctx.Deadline(); ok {
+			c.SetReadDeadline(deadline)
+			c.SetWriteDeadline(deadline)
+		}
+		// the size here is just an estimate
+		buf := pool.GetBuffer(socks.MaxAddrLen)
+		defer pool.PutBuffer(buf)
+		_, err = s.connect(c, address, socks.CmdConnect, buf)
+		if err != nil {
 			c.Close()
-		})
+			return nil, err
+		}
+		resetTime := time.Time{}
+		c.SetReadDeadline(resetTime)
+		c.SetWriteDeadline(resetTime)
 		return c, err
 	case "udp":
 		c, err := s.ListenPacket(ctx, address)
@@ -51,20 +61,27 @@ func (s *Socks5) DialContext(ctx context.Context, network, address string) (net.
 }
 
 func (s *Socks5) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
-	ctrlConn, err := s.ParentDialer.DialContext(ctx, "tcp", s.addr)
+	ctrlConn, err := s.ParentDialer.DialContext(ctx, s.network, s.addr)
 	if err != nil {
 		return nil, fmt.Errorf("[socks5]: dial to %s error: %w", s.addr, err)
 	}
 	// Get the proxy addr we should dial.
 	// TODO: target should be laddr of udp conn
-	uAddr, err := common.Invoke(ctx, func() (socks.Addr, error) {
-		return s.connect(ctrlConn, addr, socks.CmdUDPAssociate)
-	}, func() {
-		ctrlConn.Close()
-	})
+	if deadline, ok := ctx.Deadline(); ok {
+		ctrlConn.SetReadDeadline(deadline)
+		ctrlConn.SetWriteDeadline(deadline)
+	}
+	// the size here is just an estimate
+	buf := pool.GetBuffer(socks.MaxAddrLen)
+	defer pool.PutBuffer(buf)
+	uAddr, err := s.connect(ctrlConn, addr, socks.CmdUDPAssociate, buf)
 	if err != nil {
+		ctrlConn.Close()
 		return nil, err
 	}
+	resetTime := time.Time{}
+	ctrlConn.SetReadDeadline(resetTime)
+	ctrlConn.SetWriteDeadline(resetTime)
 
 	uAddress := uAddr.String()
 	h, p, err := net.SplitHostPort(uAddress)
@@ -89,11 +106,7 @@ func (s *Socks5) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 // connect takes an existing connection to a socks5 proxy server,
 // and commands the server to extend that connection to target,
 // which must be a canonical address with a host and port.
-func (s *Socks5) connect(conn net.Conn, target string, cmd byte) (addr socks.Addr, err error) {
-	// the size here is just an estimate
-	buf := pool.GetBuffer(socks.MaxAddrLen)
-	defer pool.PutBuffer(buf)
-
+func (s *Socks5) connect(conn net.Conn, target string, cmd byte, buf []byte) (addr socks.Addr, err error) {
 	buf = append(buf[:0], Version)
 	if len(s.user) > 0 && len(s.user) < 256 && len(s.password) < 256 {
 		buf = append(buf, 2 /* num auth methods */, socks.AuthNone, socks.AuthPassword)
@@ -138,11 +151,10 @@ func (s *Socks5) connect(conn net.Conn, target string, cmd byte) (addr socks.Add
 
 	buf = buf[:0]
 	buf = append(buf, Version, cmd, 0 /* reserved */)
-	tgtAddr, err := socks.ParseAddr(target)
+	buf, err = socks.AppendParseAddr(target, buf)
 	if err != nil {
 		return nil, err
 	}
-	buf = append(buf, tgtAddr...)
 
 	if _, err := conn.Write(buf); err != nil {
 		return addr, errors.New("proxy: failed to write connect request to SOCKS5 proxy at " + s.addr + ": " + err.Error())
@@ -165,5 +177,5 @@ func (s *Socks5) connect(conn net.Conn, target string, cmd byte) (addr socks.Add
 		return addr, errors.New("proxy: SOCKS5 proxy at " + s.addr + " failed to connect: " + failure)
 	}
 
-	return socks.ReadAddr(conn)
+	return socks.ReadAddr(conn, buf[:cap(buf)])
 }

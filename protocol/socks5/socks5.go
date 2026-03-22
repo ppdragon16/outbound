@@ -13,6 +13,8 @@
 package socks5
 
 import (
+	"net"
+	"net/netip"
 	"net/url"
 
 	"github.com/daeuniverse/outbound/netproxy"
@@ -28,6 +30,7 @@ type Socks5 struct {
 	addr     string
 	user     string
 	password string
+	network  string
 }
 
 // NewSocks5 returns a Proxy that makes SOCKS v5 connections to the given address.
@@ -41,6 +44,20 @@ func NewSocks5(s string, d netproxy.Dialer) (*Socks5, error) {
 	addr := u.Host
 	user := u.User.Username()
 	pass, _ := u.User.Password()
+	network := "tcp"
+
+	host, _, err := net.SplitHostPort(s)
+	if err != nil {
+		host = s
+	}
+	ip, err := netip.ParseAddr(host)
+	if err == nil {
+		if ip.Is4() {
+			network = "tcp4"
+		} else if ip.Is6() {
+			network = "tcp6"
+		}
+	}
 
 	h := &Socks5{
 		StatelessDialer: protocol.StatelessDialer{
@@ -49,6 +66,7 @@ func NewSocks5(s string, d netproxy.Dialer) (*Socks5, error) {
 		addr:     addr,
 		user:     user,
 		password: pass,
+		network:  network,
 	}
 
 	return h, nil
