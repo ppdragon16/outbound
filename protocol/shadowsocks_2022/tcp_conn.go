@@ -48,7 +48,6 @@ type TCPConn struct {
 	nonceWrite       []byte
 	payloadLengthBuf []byte
 
-	// writeBuf is used for Seal() to avoid heap allocation
 	writeBuf []byte
 
 	readMutex  sync.Mutex
@@ -56,7 +55,8 @@ type TCPConn struct {
 
 	bufReader *ReusableReader
 
-	bloom *disk_bloom.FilterGroup
+	bloom       *disk_bloom.FilterGroup
+	writeHasher *blake3.Hasher
 }
 
 type Key struct {
@@ -253,21 +253,19 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 		c.sg.Get(salt)
 		curr += c.cipherConf.SaltLen
 
-		// --- B. Identity Headers ---
-		for i := 0; i < len(c.pskList)-1; i++ {
-			subKey := GenerateSubKey(c.pskList[i], salt, Shadowsocks2022IdentityHeaderInfo)
-			bc, _ := c.cipherConf.NewBlockCipher(subKey)
-			pool.PutBuffer(subKey) // 即取即还
-
-			plaintext := blake3.Sum512(c.pskList[i+1])
-			bc.Encrypt(buf[curr:curr+16], plaintext[:16])
-			curr += 16
-		}
-
 		// 初始化会话加密器
 		c.cipherWrite, err = CreateCipher(c.uPSK, salt, c.cipherConf)
 		if err != nil {
 			return 0, err
+		}
+
+		var subKeyBuf [32]byte
+		// --- B. Identity Headers ---
+		for i := 0; i < len(c.pskList)-1; i++ {
+			bc, _ := c.cipherConf.NewBlockCipher(GenerateSubKey(c.pskList[i], salt, Shadowsocks2022IdentityHeaderInfo, subKeyBuf[:c.cipherConf.KeyLen]))
+			plaintext := blake3.Sum512(c.pskList[i+1])
+			bc.Encrypt(buf[curr:curr+16], plaintext[:16])
+			curr += 16
 		}
 
 		// --- C. Request Headers (Fixed + Variable) ---

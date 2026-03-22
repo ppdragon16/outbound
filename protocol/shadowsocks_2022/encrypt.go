@@ -2,10 +2,10 @@ package shadowsocks_2022
 
 import (
 	"crypto/cipher"
+	"fmt"
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/pool"
-	"lukechampine.com/blake3"
 )
 
 var (
@@ -13,29 +13,30 @@ var (
 	Shadowsocks2022IdentityHeaderInfo = "shadowsocks 2022 identity subkey"
 )
 
-func GenerateSubKey(psk []byte, salt []byte, context string) []byte {
+func GenerateSubKey(psk []byte, salt []byte, context string, subKeyBuf []byte) []byte {
 	pskLen := len(psk)
 	saltLen := len(salt)
 	totalLen := pskLen + saltLen
-	subKey := pool.GetBuffer(pskLen)
 
 	if totalLen <= 128 { // fast path
 		var bufStack [128]byte
 		copy(bufStack[:], psk)
 		copy(bufStack[pskLen:], salt)
-		blake3.DeriveKey(subKey, context, bufStack[:totalLen])
+		DeriveKey(subKeyBuf, context, bufStack[:totalLen])
 	} else {
 		buf := pool.GetBuffer(totalLen)
 		copy(buf, psk)
 		copy(buf[pskLen:], salt)
-		blake3.DeriveKey(subKey, context, buf)
+		DeriveKey(subKeyBuf, context, buf)
 		pool.PutBuffer(buf)
 	}
-	return subKey
+	return subKeyBuf
 }
 
 func CreateCipher(masterKey []byte, salt []byte, cipherConf *ciphers.CipherConf2022) (cipher cipher.AEAD, err error) {
-	subKey := GenerateSubKey(masterKey, salt, Shadowsocks2022ReusedInfo)
-	defer pool.PutBuffer(subKey)
-	return cipherConf.NewCipher(subKey)
+	var subKeyBuf [32]byte
+	if cipherConf.KeyLen > len(subKeyBuf) {
+		return nil, fmt.Errorf("unsupported key length: %d", cipherConf.KeyLen)
+	}
+	return cipherConf.NewCipher(GenerateSubKey(masterKey, salt, Shadowsocks2022ReusedInfo, subKeyBuf[:cipherConf.KeyLen]))
 }
