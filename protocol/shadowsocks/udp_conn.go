@@ -130,7 +130,7 @@ func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 		return 0, netip.AddrPort{}, protocol.ErrReplayAttack
 	}
 
-	// 2. Decrypt In-place within wireBuf
+	// 2. Creates cipher
 	ciph, err := CreateCipher(c.masterKey, salt, c.cipherConf)
 	if err != nil {
 		return 0, netip.AddrPort{}, err

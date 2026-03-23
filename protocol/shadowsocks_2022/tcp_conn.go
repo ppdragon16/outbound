@@ -44,11 +44,9 @@ type TCPConn struct {
 	onceRead    bool
 	onceWrite   bool
 
-	nonceRead        []byte
-	nonceWrite       []byte
+	nonceRead        [12]byte
+	nonceWrite       [12]byte
 	payloadLengthBuf []byte
-
-	writeBuf []byte
 
 	readMutex  sync.Mutex
 	writeMutex sync.Mutex
@@ -72,8 +70,6 @@ func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf2022, pskList [][]byte, u
 		pskList:          pskList,
 		uPSK:             uPSK,
 		sg:               sg,
-		nonceRead:        make([]byte, conf.NonceLen),
-		nonceWrite:       make([]byte, conf.NonceLen),
 		payloadLengthBuf: pool.GetBuffer(2 + conf.TagLen),
 		bufReader:        &ReusableReader{},
 		bloom:            bloom,
@@ -86,7 +82,6 @@ func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf2022, pskList [][]byte, u
 
 func (c *TCPConn) Close() error {
 	pool.PutBuffer(c.payloadLengthBuf)
-	pool.PutBuffer(c.writeBuf)
 	c.bufReader.reset()
 	return c.Conn.Close()
 }
@@ -101,6 +96,7 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 
 	var payloadLength int
 
+	nonceRead := c.nonceRead[:]
 	if !c.onceRead {
 		var stackBuf [128]byte // Enough space for: Salt(32) + Header(11+32+16)
 		salt := stackBuf[:c.cipherConf.SaltLen]
@@ -119,11 +115,11 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 		if _, err := io.ReadFull(c.Conn, headerRaw); err != nil {
 			return 0, err
 		}
-		header, err := c.cipherRead.Open(headerRaw[:0], c.nonceRead, headerRaw, nil)
+		header, err := c.cipherRead.Open(headerRaw[:0], nonceRead, headerRaw, nil)
 		if err != nil {
 			return 0, protocol.ErrFailAuth
 		}
-		common.BytesIncLittleEndian(c.nonceRead)
+		common.BytesIncLittleEndian(nonceRead)
 		offset := 0
 		typ := uint8(header[offset])
 		offset += 1
@@ -155,11 +151,11 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 		if _, err := io.ReadFull(c.Conn, c.payloadLengthBuf); err != nil {
 			return 0, err
 		}
-		payloadLenBuf, err := c.cipherRead.Open(c.payloadLengthBuf[:0], c.nonceRead, c.payloadLengthBuf, nil)
+		payloadLenBuf, err := c.cipherRead.Open(c.payloadLengthBuf[:0], nonceRead, c.payloadLengthBuf, nil)
 		if err != nil {
 			return 0, protocol.ErrFailAuth
 		}
-		common.BytesIncLittleEndian(c.nonceRead)
+		common.BytesIncLittleEndian(nonceRead)
 		payloadLength = int(binary.BigEndian.Uint16(payloadLenBuf))
 	}
 
@@ -174,8 +170,8 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 		if _, err = io.ReadFull(c.Conn, target); err != nil {
 			return 0, err
 		}
-		_, err = c.cipherRead.Open(b[:0], c.nonceRead, target, nil)
-		common.BytesIncLittleEndian(c.nonceRead)
+		_, err = c.cipherRead.Open(b[:0], nonceRead, target, nil)
+		common.BytesIncLittleEndian(nonceRead)
 		return payloadLength, err
 	}
 
@@ -184,12 +180,12 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 	if _, err = io.ReadFull(c.Conn, payload); err != nil {
 		return 0, err
 	}
-	payload, err = c.cipherRead.Open(payload[:0], c.nonceRead, payload, nil)
+	payload, err = c.cipherRead.Open(payload[:0], nonceRead, payload, nil)
 	if err != nil {
 		pool.PutBuffer(payload)
 		return 0, protocol.ErrFailAuth
 	}
-	common.BytesIncLittleEndian(c.nonceRead)
+	common.BytesIncLittleEndian(nonceRead)
 
 	n = copy(b, payload)
 	if len(payload) > n {
@@ -247,6 +243,7 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 	curr := 0
 	remainingB := b
 
+	nonceWrite := c.nonceWrite[:]
 	if !c.onceWrite {
 		// --- A. Salt ---
 		salt := buf[curr : curr+c.cipherConf.SaltLen]
@@ -287,14 +284,14 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 		remainingB = remainingB[consumed:]
 
 		// 1. Seal Fixed Header 到 buf
-		c.cipherWrite.Seal(buf[curr:curr], c.nonceWrite, fHeader[:fLen], nil)
+		c.cipherWrite.Seal(buf[curr:curr], nonceWrite, fHeader[:fLen], nil)
 		curr += fLen + c.cipherConf.TagLen
-		common.BytesIncLittleEndian(c.nonceWrite)
+		common.BytesIncLittleEndian(nonceWrite)
 
 		// 2. Seal Variable Header 到 buf
-		c.cipherWrite.Seal(buf[curr:curr], c.nonceWrite, vHeader[:vLen], nil)
+		c.cipherWrite.Seal(buf[curr:curr], nonceWrite, vHeader[:vLen], nil)
 		curr += vLen + c.cipherConf.TagLen
-		common.BytesIncLittleEndian(c.nonceWrite)
+		common.BytesIncLittleEndian(nonceWrite)
 
 		c.onceWrite = true
 	}
@@ -306,15 +303,15 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 
 		// 1. Seal Length (2 bytes)
 		binary.BigEndian.PutUint16(chunkLengthBuf[:], uint16(chunkLen))
-		c.cipherWrite.Seal(buf[curr:curr], c.nonceWrite, chunkLengthBuf[:], nil)
+		c.cipherWrite.Seal(buf[curr:curr], nonceWrite, chunkLengthBuf[:], nil)
 		curr += 2 + c.cipherConf.TagLen
-		common.BytesIncLittleEndian(c.nonceWrite)
+		common.BytesIncLittleEndian(nonceWrite)
 
 		// 2. Seal Payload
 		// 注意：Payload 数据在 remainingB 中，Seal 到 buf[curr:]
-		c.cipherWrite.Seal(buf[curr:curr], c.nonceWrite, remainingB[:chunkLen], nil)
+		c.cipherWrite.Seal(buf[curr:curr], nonceWrite, remainingB[:chunkLen], nil)
 		curr += chunkLen + c.cipherConf.TagLen
-		common.BytesIncLittleEndian(c.nonceWrite)
+		common.BytesIncLittleEndian(nonceWrite)
 
 		remainingB = remainingB[chunkLen:]
 	}

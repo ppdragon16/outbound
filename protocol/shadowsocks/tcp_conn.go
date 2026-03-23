@@ -31,8 +31,8 @@ type TCPConn struct {
 	cipherWrite cipher.AEAD
 	onceRead    bool
 	onceWrite   bool
-	nonceRead   []byte
-	nonceWrite  []byte
+	nonceRead   [12]byte
+	nonceWrite  [12]byte
 
 	readMutex  sync.Mutex
 	writeMutex sync.Mutex
@@ -48,8 +48,6 @@ func NewTCPConn(conn net.Conn, conf *ciphers.CipherConf, masterKey []byte, sg Sa
 		cipherConf: conf,
 		masterKey:  masterKey,
 		sg:         sg,
-		nonceRead:  make([]byte, conf.NonceLen),
-		nonceWrite: make([]byte, conf.NonceLen),
 		bufReader:  &ReusableReader{},
 		bloom:      bloom,
 	}
@@ -98,11 +96,12 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 	if _, err = io.ReadFull(c.Conn, lenBuf[:lenBufSize]); err != nil {
 		return 0, err
 	}
-	pLenPlain, err := c.cipherRead.Open(lenBuf[:0], c.nonceRead, lenBuf[:lenBufSize], nil)
+	nonceRead := c.nonceRead[:]
+	pLenPlain, err := c.cipherRead.Open(lenBuf[:0], nonceRead, lenBuf[:lenBufSize], nil)
 	if err != nil {
 		return 0, protocol.ErrFailAuth
 	}
-	common.BytesIncLittleEndian(c.nonceRead)
+	common.BytesIncLittleEndian(nonceRead)
 	payloadLength := int(binary.BigEndian.Uint16(pLenPlain))
 
 	// 4. Decrypt Payload Chunk
@@ -114,8 +113,8 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 			return 0, err
 		}
 		// In-place decryption directly into user buffer
-		_, err = c.cipherRead.Open(b[:0], c.nonceRead, b[:totalChunkLen], nil)
-		common.BytesIncLittleEndian(c.nonceRead)
+		_, err = c.cipherRead.Open(b[:0], nonceRead, b[:totalChunkLen], nil)
+		common.BytesIncLittleEndian(nonceRead)
 		return payloadLength, err
 	}
 
@@ -125,12 +124,12 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 		pool.PutBuffer(tempBuf)
 		return 0, err
 	}
-	decrypted, err := c.cipherRead.Open(tempBuf[:0], c.nonceRead, tempBuf[:totalChunkLen], nil)
+	decrypted, err := c.cipherRead.Open(tempBuf[:0], nonceRead, tempBuf[:totalChunkLen], nil)
 	if err != nil {
 		pool.PutBuffer(tempBuf)
 		return 0, protocol.ErrFailAuth
 	}
-	common.BytesIncLittleEndian(c.nonceRead)
+	common.BytesIncLittleEndian(nonceRead)
 
 	// Copy to user buffer and store leftovers
 	n = copy(b, decrypted)
@@ -144,8 +143,8 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 
 func (c *TCPConn) Write(b []byte) (n int, err error) {
 	n = len(b)
-	c.readMutex.Lock() // Fixed: Should be writeMutex, but using a single mutex is also safe.
-	defer c.readMutex.Unlock()
+	c.writeMutex.Lock()
+	defer c.writeMutex.Unlock()
 
 	overhead := (2 + c.cipherConf.TagLen) + c.cipherConf.TagLen
 
@@ -206,9 +205,10 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 		// A. Seal Chunk Length (2 bytes)
 		var lenStack [2]byte
 		binary.BigEndian.PutUint16(lenStack[:], uint16(plainLen))
-		c.cipherWrite.Seal(buf[curr:curr], c.nonceWrite, lenStack[:], nil)
+		nonceWrite := c.nonceWrite[:]
+		c.cipherWrite.Seal(buf[curr:curr], nonceWrite, lenStack[:], nil)
 		curr += 2 + c.cipherConf.TagLen
-		common.BytesIncLittleEndian(c.nonceWrite)
+		common.BytesIncLittleEndian(nonceWrite)
 
 		// B. Seal Payload Chunk (Metadata + Data)
 		payloadStart := curr
@@ -221,9 +221,9 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 		}
 
 		// In-place encryption: dst and src overlap
-		c.cipherWrite.Seal(buf[payloadStart:payloadStart], c.nonceWrite, buf[payloadStart:curr], nil)
+		c.cipherWrite.Seal(buf[payloadStart:payloadStart], nonceWrite, buf[payloadStart:curr], nil)
 		curr += c.cipherConf.TagLen
-		common.BytesIncLittleEndian(c.nonceWrite)
+		common.BytesIncLittleEndian(nonceWrite)
 	}
 
 	// 3. Flush everything in a single syscall
