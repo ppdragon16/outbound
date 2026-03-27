@@ -105,25 +105,25 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 }
 
 func (c *UdpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
+	// SeparateHeader_PreEnc(16) + SeparateHeader(16) + IdentityHeaders(BlockSize * (len-1))
+	//  + Header(11) + Addr(max 19) + Payload + Tag
+	maxTotal := 16 + 16 + aes.BlockSize*(len(c.pskList)-1) + 11 + 19 + len(b) + c.cipherConf.TagLen
+	totalBuf := pool.GetBuffer(maxTotal)
+	defer pool.PutBuffer(totalBuf)
+
 	// Separate Header (16 bytes)
-	var separateHeader [16]byte
+	separateHeader := totalBuf[:16]
 	copy(separateHeader[:8], c.sessionID[:])
 	binary.BigEndian.PutUint64(separateHeader[8:16], atomic.AddUint64(&c.packetID, 1))
 
-	// SeparateHeader(16) + IdentityHeaders(BlockSize * (len-1)) + Message(1 + 8 + 2 + addrLen + payload) + Tag
-	identityHeadersLen := aes.BlockSize * (len(c.pskList) - 1)
-	// Header(11) + Addr(max 19) + Payload + Tag
-	maxTotal := 16 + identityHeadersLen + 11 + 19 + len(b) + c.cipherConf.TagLen
-	buf := pool.GetBuffer(maxTotal)
-	defer pool.PutBuffer(buf)
-
+	buf := totalBuf[16:]
 	// Encrpt Separate Header
-	c.blockCipherEncrypt.Encrypt(buf[:16], separateHeader[:])
+	c.blockCipherEncrypt.Encrypt(buf[:16], separateHeader)
 
 	// Identity Headers
 	currPos := 16
 	for i := 0; i < len(c.pskList)-1; i++ {
-		subtle.XORBytes(buf[currPos:currPos+16], c.identityHashes[i], separateHeader[:])
+		subtle.XORBytes(buf[currPos:currPos+16], c.identityHashes[i], separateHeader)
 		c.cipherBlocks[i].Encrypt(buf[currPos:currPos+16], buf[currPos:currPos+16])
 		currPos += 16
 	}

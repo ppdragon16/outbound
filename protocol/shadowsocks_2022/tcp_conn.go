@@ -98,8 +98,9 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 
 	nonceRead := c.nonceRead[:]
 	if !c.onceRead {
-		var stackBuf [128]byte // Enough space for: Salt(32) + Header(11+32+16)
-		salt := stackBuf[:c.cipherConf.SaltLen]
+		headerBuf := pool.GetBuffer(128) // Enough space for: Salt(32) + Header(11+32+16)
+		defer pool.PutBuffer(headerBuf)
+		salt := headerBuf[:c.cipherConf.SaltLen]
 		n, err = io.ReadFull(c.Conn, salt)
 		if err != nil {
 			return 0, err
@@ -111,7 +112,7 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 
 		// Fixed Header + Server Salt
 		hLen := 11 + c.cipherConf.SaltLen + c.cipherConf.TagLen
-		headerRaw := stackBuf[:hLen]
+		headerRaw := headerBuf[:hLen]
 		if _, err := io.ReadFull(c.Conn, headerRaw); err != nil {
 			return 0, err
 		}
@@ -256,25 +257,23 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 			return 0, err
 		}
 
-		var subKeyBuf [32]byte
+		// 预留 Header 的明文空间 (Fixed 11 + Var 最大约 1500)
+		// 这个空间也可以用来做subKey buffer。
+		headerBuf := pool.GetBuffer(2048)
+		defer pool.PutBuffer(headerBuf)
+
 		// --- B. Identity Headers ---
+		subKeyBuf := headerBuf[:c.cipherConf.KeyLen]
 		for i := 0; i < len(c.pskList)-1; i++ {
-			bc, _ := c.cipherConf.NewBlockCipher(GenerateSubKey(c.pskList[i], salt, Shadowsocks2022IdentityHeaderInfo, subKeyBuf[:c.cipherConf.KeyLen]))
+			bc, _ := c.cipherConf.NewBlockCipher(GenerateSubKey(c.pskList[i], salt, Shadowsocks2022IdentityHeaderInfo, subKeyBuf))
 			plaintext := blake3.Sum512(c.pskList[i+1])
 			bc.Encrypt(buf[curr:curr+16], plaintext[:16])
 			curr += 16
 		}
 
 		// --- C. Request Headers (Fixed + Variable) ---
-		// 关键改动：先在栈上/临时位置构造明文，再 Seal 到 buf 的 curr 位置
-		// 这样可以彻底避免复杂的 Offset 挪动逻辑
-
-		// 预留两个 Header 的明文空间 (Fixed 11 + Var 最大约 1500)
-		// 使用一个小的栈空间做中转，确保逻辑清晰
-		var headerStack [2048]byte
-		fHeader := headerStack[:11]
-		vHeader := headerStack[11:]
-
+		fHeader := headerBuf[:11]
+		vHeader := headerBuf[11:]
 		fLen, vLen, consumed, err := EncodeRequestHeaderInPlace(
 			HeaderTypeClientStream, uint64(time.Now().Unix()),
 			c.addr, remainingB, fHeader, vHeader)
