@@ -2,11 +2,12 @@ package direct
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/netip"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
 )
@@ -23,46 +24,46 @@ type Option struct {
 	FallbackDNS string
 	Mptcp       bool
 	Mark        int
+	CacheTTL    time.Duration
 }
 
 type directDialer struct {
-	resolver          *net.Resolver
-	tcpDialer         *net.Dialer
-	udpDialer         *net.Dialer
-	tcpFallbackDialer *net.Dialer
-	udpFallbackDialer *net.Dialer
-	option            Option
+	resolver         *net.Resolver
+	fallbackResolver *net.Resolver
+	dialer           *net.Dialer
+	option           Option
+	dnsCache         map[string]*dnsCacheEntry
+	dnsCacheMu       sync.RWMutex
 }
 
-// TODO: Cache
+type dnsCacheEntry struct {
+	ip       string
+	expireAt time.Time
+}
+
 func NewDirectDialer(option Option) netproxy.Dialer {
+	if option.CacheTTL == 0 {
+		option.CacheTTL = 30 * time.Minute
+	}
 	resolver := createResolver(option.Mark, "")
 	fallbackResolver := createResolver(option.Mark, option.FallbackDNS)
-	tcpDialer := &net.Dialer{Resolver: resolver}
-	udpDialer := &net.Dialer{Resolver: resolver}
-	tcpFallbackDialer := &net.Dialer{Resolver: fallbackResolver}
-	udpFallbackDialer := &net.Dialer{Resolver: fallbackResolver}
+	dialer := &net.Dialer{Resolver: resolver}
 	if option.Mptcp {
-		tcpDialer.SetMultipathTCP(true)
-		tcpFallbackDialer.SetMultipathTCP(true)
+		dialer.SetMultipathTCP(true)
 	}
 	if option.Mark != 0 {
 		control := func(_, _ string, c syscall.RawConn) error {
 			return netproxy.SoMarkControl(c, option.Mark)
 		}
-		tcpDialer.Control = control
-		udpDialer.Control = control
-		tcpFallbackDialer.Control = control
-		udpFallbackDialer.Control = control
+		dialer.Control = control
 	}
 
 	return &directDialer{
-		resolver:          resolver,
-		tcpDialer:         tcpDialer,
-		udpDialer:         udpDialer,
-		tcpFallbackDialer: tcpFallbackDialer,
-		udpFallbackDialer: udpFallbackDialer,
-		option:            option,
+		resolver:         resolver,
+		fallbackResolver: fallbackResolver,
+		dialer:           dialer,
+		option:           option,
+		dnsCache:         make(map[string]*dnsCacheEntry),
 	}
 }
 
@@ -91,34 +92,6 @@ func createResolver(mark int, dnsAddress string) *net.Resolver {
 	}
 }
 
-func (d *directDialer) shouldRetry(err error, addr string) bool {
-	host, _, _ := net.SplitHostPort(addr)
-	// Check if the host is domain
-	if _, e := netip.ParseAddr(host); e == nil {
-		// addr is IP
-		return false
-	}
-
-	var dnsErr *net.DNSError
-	return errors.As(err, &dnsErr)
-}
-
-func (d *directDialer) dialUDP(ctx context.Context, addr string, fallback bool) (net.Conn, error) {
-	if fallback {
-		return d.udpFallbackDialer.DialContext(ctx, "udp", addr)
-	} else {
-		return d.udpDialer.DialContext(ctx, "udp", addr)
-	}
-}
-
-func (d *directDialer) dialTCP(ctx context.Context, addr string, fallback bool) (net.Conn, error) {
-	if fallback {
-		return d.tcpFallbackDialer.DialContext(ctx, "tcp", addr)
-	} else {
-		return d.tcpDialer.DialContext(ctx, "tcp", addr)
-	}
-}
-
 func (d *directDialer) Alive() bool {
 	return true
 }
@@ -128,22 +101,74 @@ func (d *directDialer) Connect() error {
 }
 
 func (d *directDialer) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
-	switch network {
-	case "tcp":
-		c, err = d.dialTCP(ctx, addr, false)
-		if err != nil && d.shouldRetry(err, addr) {
-			c, err = d.dialTCP(ctx, addr, true)
-		}
-		return
-	case "udp":
-		c, err = d.dialUDP(ctx, addr, false)
-		if err != nil && d.shouldRetry(err, addr) {
-			c, err = d.dialUDP(ctx, addr, true)
-		}
-		return
-	default:
+	if network != "tcp" && network != "udp" {
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
+	addr, err = d.resolveAddr(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	return d.dialer.DialContext(ctx, network, addr)
+}
+
+func (d *directDialer) resolveAddr(ctx context.Context, addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", err
+	}
+
+	// Check if host is already an IP address
+	if _, err := netip.ParseAddr(host); err == nil {
+		// host is IP, return as-is
+		return addr, nil
+	}
+
+	// Host is a domain, check cache
+	d.dnsCacheMu.RLock()
+	entry, ok := d.dnsCache[host]
+	d.dnsCacheMu.RUnlock()
+
+	if ok && time.Now().Before(entry.expireAt) {
+		// Cache hit
+		return net.JoinHostPort(entry.ip, port), nil
+	}
+
+	// Cache miss or expired, resolve the domain
+	// Try to resolve using the resolver
+	addrs, err := d.resolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		// Try fallback resolver if main resolver fails
+		addrs, err = d.fallbackResolver.LookupIP(ctx, "ip", host)
+	}
+	if err != nil {
+		return "", err
+	}
+
+	if len(addrs) == 0 {
+		return "", fmt.Errorf("no IP found for domain: %s", host)
+	}
+
+	// Use the first IP (prefer IPv4 if available)
+	var resolvedIP string
+	for _, ip := range addrs {
+		if ip4 := ip.To4(); ip4 != nil {
+			resolvedIP = ip4.String()
+			break
+		}
+	}
+	if resolvedIP == "" {
+		resolvedIP = addrs[0].String()
+	}
+
+	// Store in cache
+	d.dnsCacheMu.Lock()
+	d.dnsCache[host] = &dnsCacheEntry{
+		ip:       resolvedIP,
+		expireAt: time.Now().Add(d.option.CacheTTL),
+	}
+	d.dnsCacheMu.Unlock()
+
+	return net.JoinHostPort(resolvedIP, port), nil
 }
 
 // TODO: Resolver fallback
