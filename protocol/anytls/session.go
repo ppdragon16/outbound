@@ -39,7 +39,7 @@ func newSession(conn net.Conn, seq uint64) *session {
 		conn:            conn,
 		streams:         map[uint32]*stream{},
 		seq:             seq,
-		closeStreamChan: make(chan uint32, 2),
+		closeStreamChan: make(chan uint32),
 		sendPadding:     true,
 	}
 	s.padding.Store(DefaultPaddingFactory.Load())
@@ -47,6 +47,9 @@ func newSession(conn net.Conn, seq uint64) *session {
 }
 
 func (s *session) newStream(addr string) (*stream, error) {
+	if s.Closed() {
+		return nil, net.ErrClosed
+	}
 	s.sid.Add(1)
 	sid := s.sid.Load()
 
@@ -92,9 +95,16 @@ func (s *session) newPacketStream(addr, packetAddr string) (*packetStream, error
 
 func (s *session) removeStream(sid uint32) {
 	s.streamLock.Lock()
-	s.closeStreamChan <- sid
 	delete(s.streams, sid)
 	s.streamLock.Unlock()
+
+	if s.Closed() {
+		return
+	}
+	select {
+	case s.closeStreamChan <- sid:
+	default:
+	}
 }
 
 func (s *session) run() error {
@@ -130,12 +140,11 @@ func (s *session) run() error {
 			stream, ok := s.streams[sid]
 			s.streamLock.RUnlock()
 			if ok {
-				if _, err := stream.pw.Write(buf); err != nil {
-					pool.PutBuffer(buf)
-					return err
-				}
+				// pushData takes ownership of buf; must not Put it.
+				stream.pushData(buf)
+			} else {
+				pool.PutBuffer(buf)
 			}
-			pool.PutBuffer(buf)
 		case cmdAlert:
 			buf := pool.GetBuffer(length)
 			if _, err := io.ReadFull(s.conn, buf); err != nil {
@@ -183,14 +192,12 @@ func (s *session) run() error {
 					pool.PutBuffer(buffer)
 					return err
 				}
-				// check server's version
 				m := stringMapFromBytes(buffer)
 				if v, err := strconv.Atoi(m["v"]); err == nil {
 					s.peerVersion = byte(v)
 				}
 				pool.PutBuffer(buffer)
 			}
-
 		case cmdHeartRequest:
 			frame := newFrame(cmdHeartResponse, sid)
 			if _, err := writeFrame(s, frame); err != nil {
@@ -206,11 +213,14 @@ func (s *session) run() error {
 func (s *session) Close() error {
 	if s.closed.CompareAndSwap(false, true) {
 		s.streamLock.Lock()
-		defer s.streamLock.Unlock()
 		for i := range s.streams {
-			s.streams[i].Close()
+			s.streams[i].terminate()
 		}
 		s.streams = make(map[uint32]*stream)
+		// Hold streamLock while closing the channel so removeStream
+		// cannot observe closed=true and then send to a closed channel.
+		close(s.closeStreamChan)
+		s.streamLock.Unlock()
 		return s.conn.Close()
 	}
 	return nil
@@ -232,7 +242,6 @@ func (s *session) writeConn(b []byte) (n int, err error) {
 	s.connLock.Lock()
 	defer s.connLock.Unlock()
 
-	// calulate & send padding
 	if s.sendPadding {
 		pkt := s.pktCounter.Add(1)
 		paddingF := s.GetPadding()
@@ -243,19 +252,17 @@ func (s *session) writeConn(b []byte) (n int, err error) {
 				if l == CheckMark {
 					if remainPayloadLen == 0 {
 						break
-					} else {
-						continue
 					}
+					continue
 				}
-				// logrus.Debugln(pkt, "write", l, "len", remainPayloadLen, "remain", remainPayloadLen-l)
-				if remainPayloadLen > l { // this packet is all payload
+				if remainPayloadLen > l {
 					_, err = s.conn.Write(b[:l])
 					if err != nil {
 						return 0, err
 					}
 					n += l
 					b = b[l:]
-				} else if remainPayloadLen > 0 { // this packet contains padding and the last part of payload
+				} else if remainPayloadLen > 0 {
 					paddingLen := l - remainPayloadLen - headerOverHeadSize
 					if paddingLen > 0 {
 						padding := make([]byte, headerOverHeadSize+paddingLen)
@@ -270,7 +277,7 @@ func (s *session) writeConn(b []byte) (n int, err error) {
 					}
 					n += remainPayloadLen
 					b = nil
-				} else { // this packet is all padding
+				} else {
 					padding := make([]byte, headerOverHeadSize+l)
 					padding[0] = cmdWaste
 					binary.BigEndian.PutUint32(padding[1:5], 0)
@@ -282,16 +289,13 @@ func (s *session) writeConn(b []byte) (n int, err error) {
 					b = nil
 				}
 			}
-			// maybe still remain payload to write
 			if len(b) == 0 {
-				return
-			} else {
-				n2, err := s.conn.Write(b)
-				return n + n2, err
+				return n, nil
 			}
-		} else {
-			s.sendPadding = false
+			n2, err := s.conn.Write(b)
+			return n + n2, err
 		}
+		s.sendPadding = false
 	}
 
 	return s.conn.Write(b)

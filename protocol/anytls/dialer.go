@@ -27,8 +27,8 @@ type Dialer struct {
 
 	sessionCounter atomic.Uint64
 
-	idleSessionLock sync.Mutex
-	idleSessions    map[uint64]*session
+	mu           sync.Mutex
+	idleSessions map[uint64]*session
 }
 
 func NewDialer(ParentDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
@@ -79,17 +79,18 @@ func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 }
 
 func (d *Dialer) getSession(ctx context.Context) (*session, error) {
-	d.idleSessionLock.Lock()
+	d.mu.Lock()
 	for seq := range d.idleSessions {
 		s := d.idleSessions[seq]
-		delete(d.idleSessions, seq)
 		if s.closed.Load() {
+			delete(d.idleSessions, seq)
 			continue
 		}
-		d.idleSessionLock.Unlock()
+		delete(d.idleSessions, seq)
+		d.mu.Unlock()
 		return s, nil
 	}
-	d.idleSessionLock.Unlock()
+	d.mu.Unlock()
 
 	conn, err := d.ParentDialer.DialContext(ctx, "tcp", d.proxyAddress)
 	if err != nil {
@@ -109,20 +110,32 @@ func (d *Dialer) getSession(ctx context.Context) (*session, error) {
 
 	seq := d.sessionCounter.Add(1)
 	s := newSession(tlsConn, seq)
-	go func(s *session) {
-		for range s.closeStreamChan {
-			if s.closed.Load() {
-				return
-			}
-			d.idleSessionLock.Lock()
-			if _, ok := d.idleSessions[seq]; !ok {
-				d.idleSessions[seq] = s
-			}
-			d.idleSessionLock.Unlock()
-		}
-	}(s)
 
+	go d.manageSession(s, seq)
 	go s.run()
 
 	return s, nil
+}
+
+// manageSession handles returning a session to the idle pool after each
+// stream close, and removes it from the pool when the session terminates.
+func (d *Dialer) manageSession(s *session, seq uint64) {
+	for sid := range s.closeStreamChan {
+		_ = sid
+		if s.closed.Load() {
+			d.mu.Lock()
+			delete(d.idleSessions, seq)
+			d.mu.Unlock()
+			return
+		}
+		d.mu.Lock()
+		if _, ok := d.idleSessions[seq]; !ok {
+			d.idleSessions[seq] = s
+		}
+		d.mu.Unlock()
+	}
+	// closeStreamChan was closed → session is dead, clean up.
+	d.mu.Lock()
+	delete(d.idleSessions, seq)
+	d.mu.Unlock()
 }
