@@ -168,21 +168,18 @@ func NewReality(s string, d netproxy.Dialer) (*Reality, error) {
 	parse("r", 8) // return
 	u.RawQuery = q.Encode()
 	x.spiderX = tmpU.String()
-	// x.infoWriter = logger.Logger.WriterLevel(logrus.TraceLevel)
-	// logrus.Printf("%#v", x)
 	return x, nil
 }
 
 func (x *Reality) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
 	switch network {
 	case "tcp":
-		// logrus.Printf("%#v, %T, %v", x.nextDialer, magicNetwork.Network, addr)
-		c, err := x.nextDialer.DialContext(ctx, network, addr)
+		retry := 0
+	retryHandshake:
+		c, err = x.nextDialer.DialContext(ctx, network, addr)
 		if err != nil {
 			return nil, fmt.Errorf("[REALITY]: dial to %s: %w", addr, err)
 		}
-		retry := 0
-	retryHandshake:
 		uConn := &RealityUConn{}
 		utlsConfig := &utls.Config{
 			VerifyPeerCertificate:  uConn.VerifyPeerCertificate,
@@ -196,6 +193,7 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c net.
 		{
 			err = uConn.BuildHandshakeState()
 			if err != nil {
+				c.Close()
 				return nil, err
 			}
 			hello := uConn.HandshakeState.Hello
@@ -207,23 +205,28 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c net.
 			hello.SessionId[3] = 0 // reserved
 			binary.BigEndian.PutUint32(hello.SessionId[4:], uint32(time.Now().Unix()))
 			copy(hello.SessionId[8:], x.shortId[:])
-			// if config.Show {
-			// logrus.Printf("REALITY hello.SessionId[:16]: %v\n", hello.SessionId[:16])
-			// }
-			if uConn.HandshakeState.State13.EcdheKey == nil {
-				// logrus.Println("wtf", retry, addr)
+			var ecdheKey *ecdh.PrivateKey
+			if ks := uConn.HandshakeState.State13.KeyShareKeys; ks != nil {
+				ecdheKey = ks.Ecdhe
+			} else {
+				ecdheKey = uConn.HandshakeState.State13.EcdheKey
+			}
+			if ecdheKey == nil {
 				if retry > 2 {
+					c.Close()
 					return nil, errors.New("nil ecdheKey")
 				}
+				c.Close()
 				retry++
-				goto retryHandshake // retry
+				goto retryHandshake
 			}
-			// logrus.Println("OH YEAH", retry)
-			uConn.AuthKey, _ = uConn.HandshakeState.State13.EcdheKey.ECDH(x.publicKey)
+			uConn.AuthKey, _ = ecdheKey.ECDH(x.publicKey)
 			if uConn.AuthKey == nil {
+				c.Close()
 				return nil, errors.New("REALITY: SharedKey == nil")
 			}
 			if _, err := hkdf.New(sha256.New, uConn.AuthKey, hello.Random[:20], []byte("REALITY")).Read(uConn.AuthKey); err != nil {
+				c.Close()
 				return nil, err
 			}
 			var aead cipher.AEAD
@@ -233,20 +236,12 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c net.
 			} else {
 				aead, _ = chacha20poly1305.New(uConn.AuthKey)
 			}
-			// if config.Show {
-			// logrus.Printf("REALITY uConn.AuthKey[:16]: %v\tAEAD: %T\n", uConn.AuthKey[:16], aead)
-			// }
 			aead.Seal(hello.SessionId[:0], hello.Random[20:], hello.SessionId[:16], hello.Raw)
 			copy(hello.Raw[39:], hello.SessionId)
 		}
-		// logrus.Println("00")
 		if err := uConn.HandshakeContext(ctx); err != nil {
 			return nil, err
 		}
-		// if config.Show {
-		// 	newError(fmt.Sprintf("REALITY localAddr: %v\tuConn.Verified: %v\n", localAddr, uConn.Verified)).WriteToLog(session.ExportIDToError(ctx))
-		// }
-		// logrus.Println("11", uConn.Verified)
 		if !uConn.Verified {
 			// Trigger spider.
 			go func() {
@@ -285,10 +280,6 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c net.
 						maps.Unlock()
 					}
 					req.Header.Set("User-Agent", x.fingerprint.Client) // TODO: User-Agent map
-					// if first && config.Show {
-					// 	newError(fmt.Sprintf("REALITY localAddr: %v\treq.UserAgent(): %v\n", localAddr, req.UserAgent())).WriteToLog(session.ExportIDToError(ctx))
-					// }
-					// logrus.Printf("session %#v", uConn.HandshakeState.Session)
 					times := 1
 					if !first {
 						times = int(randBetween(x.spiderY[4], x.spiderY[5]))
@@ -313,11 +304,6 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c net.
 							}
 						}
 						req.URL.Path = getPathLocked(paths)
-						// if config.Show {
-						// 	newError(fmt.Sprintf("REALITY localAddr: %v\treq.Referer(): %v\n", localAddr, req.Referer())).WriteToLog(session.ExportIDToError(ctx))
-						// 	newError(fmt.Sprintf("REALITY localAddr: %v\tlen(body): %v\n", localAddr, len(body))).WriteToLog(session.ExportIDToError(ctx))
-						// 	newError(fmt.Sprintf("REALITY localAddr: %v\tlen(paths): %v\n", localAddr, len(paths))).WriteToLog(session.ExportIDToError(ctx))
-						// }
 						maps.Unlock()
 						if !first {
 							time.Sleep(time.Duration(randBetween(x.spiderY[6], x.spiderY[7])) * time.Millisecond) // interval
