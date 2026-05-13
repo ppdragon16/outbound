@@ -46,13 +46,17 @@ func (d *Defragger) Feed(m *protocol.UDPMessage) *protocol.UDPMessage {
 		return m
 	}
 	if m.FragID >= m.FragCount {
-		// wtf is this?
 		return nil
 	}
 	if m.PacketID != d.pktID || m.FragCount != uint8(len(d.frags)) {
-		// new message, clear previous state
 		d.pktID = m.PacketID
-		d.frags = make([]*protocol.UDPMessage, m.FragCount)
+		// reuse existing slice if capacity allows
+		if int(m.FragCount) <= cap(d.frags) {
+			d.frags = d.frags[:m.FragCount]
+			clear(d.frags)
+		} else {
+			d.frags = make([]*protocol.UDPMessage, m.FragCount)
+		}
 		d.frags[m.FragID] = m
 		d.count = 1
 		d.size = len(m.Data)
@@ -67,7 +71,7 @@ func (d *Defragger) Feed(m *protocol.UDPMessage) *protocol.UDPMessage {
 			for _, frag := range d.frags {
 				off += copy(data[off:], frag.Data)
 			}
-			m.Data = data
+			m.Data = data[:off]
 			m.FragID = 0
 			m.FragCount = 1
 			return m

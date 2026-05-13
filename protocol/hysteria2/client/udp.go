@@ -31,11 +31,10 @@ type udpConn struct {
 	ReceiveCh chan *protocol.UDPMessage
 
 	conn quic.Connection
+	sm   *udpSessionManager
 
 	ctx    context.Context
 	cancel context.CancelFunc
-
-	closeCallback func()
 
 	readDeadline P.Deadline
 }
@@ -82,7 +81,6 @@ func (u *udpConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
 	err = u.WritePacket(buf, msg)
 	var errTooLarge *quic.DatagramTooLargeError
 	if errors.As(err, &errTooLarge) {
-		// Message too large, try fragmentation
 		msg.PacketID = uint16(rand.Intn(0xFFFF)) + 1
 		fMsgs := frag.FragUDPMessage(msg, int(errTooLarge.MaxDataLen))
 		for _, fMsg := range fMsgs {
@@ -92,9 +90,8 @@ func (u *udpConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
 			}
 		}
 		return len(b), nil
-	} else {
-		return len(b), err
 	}
+	return len(b), err
 }
 
 func (u *udpConn) WritePacket(buf []byte, msg *protocol.UDPMessage) error {
@@ -109,7 +106,7 @@ func (u *udpConn) WritePacket(buf []byte, msg *protocol.UDPMessage) error {
 
 func (u *udpConn) Close() error {
 	u.cancel()
-	u.closeCallback()
+	u.sm.connMap.Delete(u.ID)
 	return nil
 }
 
@@ -203,12 +200,10 @@ func (m *udpSessionManager) NewUDP() (net.PacketConn, error) {
 		D:            &frag.Defragger{},
 		ReceiveCh:    make(chan *protocol.UDPMessage, udpMessageChanSize),
 		conn:         m.conn,
+		sm:           m,
 		ctx:          ctx,
 		cancel:       cancel,
 		readDeadline: P.MakeDeadline(),
-	}
-	conn.closeCallback = func() {
-		m.connMap.Delete(conn.ID)
 	}
 	m.connMap.Store(id, conn)
 

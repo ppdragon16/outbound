@@ -5,11 +5,9 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
-	"net/url"
 
 	"github.com/samber/oops"
 
-	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/utils"
@@ -103,11 +101,12 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 		if err != nil {
 			return nil, err
 		}
-		return common.Invoke(ctx, func() (net.Conn, error) {
-			return c.DialConn(stream, address)
-		}, func() {
+		conn, err := c.DialConn(stream, address)
+		if err != nil {
 			stream.Close()
-		})
+			return nil, err
+		}
+		return conn, nil
 	case "udp":
 		conn, err := c.ListenPacket(ctx, address)
 		if err != nil {
@@ -180,12 +179,7 @@ func (c *Client) Connect() (err error) {
 		},
 	}
 	// Send auth HTTP request
-	u := &url.URL{
-		Scheme: "https",
-		Host:   protocol.URLHost,
-		Path:   protocol.URLPath,
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, protocol.AuthURL, nil)
 	if err != nil {
 		return oops.
 			In("HTTP3 handshake").

@@ -17,8 +17,11 @@ type padding struct {
 func (p padding) String() string {
 	n := p.Min + rand.Intn(p.Max-p.Min)
 	bs := make([]byte, n)
-	for i := range bs {
-		bs[i] = paddingChars[rand.Intn(len(paddingChars))]
+	if n > 0 {
+		_, _ = rand.Read(bs)
+		for i, b := range bs {
+			bs[i] = paddingChars[int(b)%len(paddingChars)]
+		}
 	}
 	return string(bs)
 }

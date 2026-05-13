@@ -1,11 +1,11 @@
 package protocol
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
 
+	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/quic-go/quicvarint"
 	"github.com/samber/oops"
 )
@@ -43,7 +43,13 @@ func ReadTCPRequest(r io.Reader) (string, error) {
 	if addrLen == 0 || addrLen > MaxAddressLength {
 		return "", oops.Tags("protocol error").New("invalid address length")
 	}
-	addrBuf := make([]byte, addrLen)
+	var addrBuf []byte
+	if addrLen <= 256 {
+		var stackBuf [256]byte
+		addrBuf = stackBuf[:addrLen]
+	} else {
+		addrBuf = make([]byte, addrLen)
+	}
 	_, err = io.ReadFull(r, addrBuf)
 	if err != nil {
 		return "", err
@@ -71,7 +77,8 @@ func WriteTCPRequest(w io.Writer, addr string) error {
 	sz := int(quicvarint.Len(FrameTypeTCPRequest)) +
 		int(quicvarint.Len(uint64(addrLen))) + addrLen +
 		int(quicvarint.Len(uint64(paddingLen))) + paddingLen
-	buf := make([]byte, sz)
+	buf := pool.GetBuffer(sz)
+	defer pool.PutBuffer(buf)
 	i := varintPut(buf, FrameTypeTCPRequest)
 	i += varintPut(buf[i:], uint64(addrLen))
 	i += copy(buf[i:], addr)
@@ -102,9 +109,13 @@ func ReadTCPResponse(r io.Reader) (bool, string, error) {
 		return false, "", oops.Tags("protocol error").New("invalid message length")
 	}
 	var msgBuf []byte
-	// No message is fine
 	if msgLen > 0 {
-		msgBuf = make([]byte, msgLen)
+		if msgLen <= 256 {
+			var stackBuf [256]byte
+			msgBuf = stackBuf[:msgLen]
+		} else {
+			msgBuf = make([]byte, msgLen)
+		}
 		_, err = io.ReadFull(r, msgBuf)
 		if err != nil {
 			return false, "", err
@@ -132,7 +143,8 @@ func WriteTCPResponse(w io.Writer, ok bool, msg string) error {
 	msgLen := len(msg)
 	sz := 1 + int(quicvarint.Len(uint64(msgLen))) + msgLen +
 		int(quicvarint.Len(uint64(paddingLen))) + paddingLen
-	buf := make([]byte, sz)
+	buf := pool.GetBuffer(sz)
+	defer pool.PutBuffer(buf)
 	if ok {
 		buf[0] = 0
 	} else {
@@ -189,35 +201,57 @@ func (m *UDPMessage) Serialize(buf []byte) int {
 }
 
 func ParseUDPMessage(msg []byte) (*UDPMessage, error) {
+	if len(msg) < 9 {
+		return nil, oops.Tags("protocol error").New("message too short")
+	}
 	m := &UDPMessage{}
-	buf := bytes.NewBuffer(msg)
-	if err := binary.Read(buf, binary.BigEndian, &m.SessionID); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(buf, binary.BigEndian, &m.PacketID); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(buf, binary.BigEndian, &m.FragID); err != nil {
-		return nil, err
-	}
-	if err := binary.Read(buf, binary.BigEndian, &m.FragCount); err != nil {
-		return nil, err
-	}
-	lAddr, err := quicvarint.Read(buf)
-	if err != nil {
-		return nil, err
-	}
-	if lAddr == 0 || lAddr > MaxMessageLength {
+	m.SessionID = binary.BigEndian.Uint32(msg)
+	m.PacketID = binary.BigEndian.Uint16(msg[4:])
+	m.FragID = msg[6]
+	m.FragCount = msg[7]
+
+	lAddr, varintLen := varintParse(msg[8:])
+	if varintLen < 0 || lAddr == 0 || lAddr > MaxMessageLength {
 		return nil, oops.Tags("protocol error").New("invalid address length")
 	}
-	bs := buf.Bytes()
-	if len(bs) <= int(lAddr) {
-		// We use <= instead of < here as we expect at least one byte of data after the address
+
+	addrStart := 8 + varintLen
+	addrEnd := addrStart + int(lAddr)
+	if len(msg) <= addrEnd {
 		return nil, oops.Tags("protocol error").New("invalid message length")
 	}
-	m.Addr = string(bs[:lAddr])
-	m.Data = bs[lAddr:]
+	m.Addr = string(msg[addrStart:addrEnd])
+	m.Data = msg[addrEnd:]
 	return m, nil
+}
+
+// varintParse reads a QUIC varint from a byte slice.
+// Returns (value, bytesRead) or (0, -1) if the buffer is too short.
+func varintParse(b []byte) (uint64, int) {
+	if len(b) < 1 {
+		return 0, -1
+	}
+	switch b[0] >> 6 {
+	case 0:
+		return uint64(b[0]), 1
+	case 1:
+		if len(b) < 2 {
+			return 0, -1
+		}
+		return uint64(b[0]&0x3f)<<8 | uint64(b[1]), 2
+	case 2:
+		if len(b) < 4 {
+			return 0, -1
+		}
+		return uint64(b[0]&0x3f)<<24 | uint64(b[1])<<16 | uint64(b[2])<<8 | uint64(b[3]), 4
+	case 3:
+		if len(b) < 8 {
+			return 0, -1
+		}
+		return uint64(b[0]&0x3f)<<56 | uint64(b[1])<<48 | uint64(b[2])<<40 | uint64(b[3])<<32 |
+			uint64(b[4])<<24 | uint64(b[5])<<16 | uint64(b[6])<<8 | uint64(b[7]), 8
+	}
+	return 0, -1
 }
 
 // varintPut is like quicvarint.Append, but instead of appending to a slice,

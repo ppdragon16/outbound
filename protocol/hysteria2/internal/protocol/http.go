@@ -6,8 +6,7 @@ import (
 )
 
 const (
-	URLHost = "hysteria"
-	URLPath = "/auth"
+	AuthURL = "https://hysteria/auth"
 
 	RequestHeaderAuth        = "Hysteria-Auth"
 	ResponseHeaderUDPEnabled = "Hysteria-UDP"
