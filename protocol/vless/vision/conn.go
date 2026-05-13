@@ -12,7 +12,6 @@ import (
 	"sync"
 
 	"github.com/daeuniverse/outbound/common/iout"
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 
 	"github.com/google/uuid"
@@ -54,10 +53,10 @@ func (w *writeWrapper) Write(p []byte) (int, error) {
 
 type Conn struct {
 	net.Conn                  // underlay conn (net.Conn/net.PacketConn)
-	overlayConn netproxy.Conn // (vless.Conn)
+	overlayConn net.Conn // (vless.Conn)
 	userUUID    []byte
 
-	tlsConn  netproxy.Conn
+	tlsConn  net.Conn
 	input    *bytes.Reader
 	rawInput *bytes.Buffer
 
@@ -121,20 +120,20 @@ func getUnderlayTCPConnUnixConn(conn any) (any, bool) {
 // WriteTo implements io.WriterTo.
 func (vc *Conn) WriteTo(w io.Writer) (n int64, err error) {
 	if !vc.reader.directRead {
-		b := pool.Get(4096)
+		b := pool.GetBuffer(4096)
 		for {
 			_n, err := vc.Read(b)
 			if err != nil {
-				b.Put()
+				pool.PutBuffer(b)
 				return n, err
 			}
 			if _, err = w.Write(b[:_n]); err != nil {
-				b.Put()
+				pool.PutBuffer(b)
 				return n, err
 			}
 			n += int64(_n)
 			if vc.reader.directRead {
-				b.Put()
+				pool.PutBuffer(b)
 				break
 			}
 		}
@@ -278,20 +277,20 @@ func (vc *Conn) Write(p []byte) (int, error) {
 // // ReadFrom implements io.ReaderFrom.
 // func (vc *Conn) ReadFrom(r io.Reader) (n int64, err error) {
 // 	if !vc.writer.writeDirect {
-// 		b := pool.Get(4096)
+// 		b := pool.GetBuffer(4096)
 // 		for {
 // 			_n, err := r.Read(b)
 // 			if err != nil {
-// 				b.Put()
+// 				pool.PutBuffer(b)
 // 				return n, err
 // 			}
 // 			if _, err = vc.Write(b[:_n]); err != nil {
-// 				b.Put()
+// 				pool.PutBuffer(b)
 // 				return n, err
 // 			}
 // 			n += int64(_n)
 // 			if vc.writer.writeDirect {
-// 				b.Put()
+// 				pool.PutBuffer(b)
 // 				break
 // 			}
 // 		}
@@ -308,7 +307,7 @@ func (vc *Conn) Write(p []byte) (int, error) {
 
 func (vc *Conn) write(p []byte) (err error) {
 	if vc.needHandshake {
-		var prefix, suffix pool.PB
+		var prefix, suffix []byte
 		vc.needHandshake = false
 		if len(p) == 0 {
 			prefix, suffix = ApplyPaddingFromPool(p, commandPaddingContinue, vc.userUUID, false)
@@ -317,8 +316,8 @@ func (vc *Conn) write(p []byte) (err error) {
 			// logrus.Println("isTLS", vc.isTLS)
 			prefix, suffix = ApplyPaddingFromPool(p, commandPaddingContinue, vc.userUUID, vc.isTLS)
 		}
-		defer prefix.Put()
-		defer suffix.Put()
+		defer pool.PutBuffer(prefix)
+		defer pool.PutBuffer(suffix)
 		_, err = iout.MultiWrite(vc.writer, prefix, p, suffix)
 		if err != nil {
 			return err
@@ -360,8 +359,8 @@ func (vc *Conn) write(p []byte) (err error) {
 		}
 		// logrus.Println("command", commandPaddingDirect, "vc.writer.toWriteDirect", vc.writer.toWriteDirect)
 		prefix, suffix := ApplyPaddingFromPool(p, command, nil, vc.isTLS)
-		defer prefix.Put()
-		defer suffix.Put()
+		defer pool.PutBuffer(prefix)
+		defer pool.PutBuffer(suffix)
 		_, err = iout.MultiWrite(vc.writer, prefix, p, suffix)
 		if err != nil {
 			return err
@@ -391,8 +390,8 @@ func (vc *Conn) write(p []byte) (err error) {
 			}
 			// logrus.Println("command", commandPaddingDirect)
 			prefix2, suffix2 := ApplyPaddingFromPool(p2, command, nil, vc.isTLS)
-			defer prefix2.Put()
-			defer suffix2.Put()
+			defer pool.PutBuffer(prefix2)
+			defer pool.PutBuffer(suffix2)
 			_, err = iout.MultiWrite(vc.writer, prefix2, p2, suffix2)
 			if vc.toWriteDirect {
 				vc.writer.writeDirect = true

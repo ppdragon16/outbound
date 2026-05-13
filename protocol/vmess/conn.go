@@ -13,7 +13,6 @@ import (
 	"sync"
 
 	"github.com/daeuniverse/outbound/common"
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 )
@@ -24,7 +23,7 @@ const (
 )
 
 type Conn struct {
-	netproxy.Conn
+	net.Conn
 	initRead        sync.Once
 	initWrite       sync.Once
 	metadata        Metadata
@@ -58,7 +57,7 @@ type Conn struct {
 	indexToRead int
 }
 
-func NewConn(conn netproxy.Conn, metadata Metadata, dialTgt string, cmdKey []byte) (c *Conn, err error) {
+func NewConn(conn net.Conn, metadata Metadata, dialTgt string, cmdKey []byte) (c *Conn, err error) {
 	// DO NOT use pool here because Close() cannot interrupt the reading or writing, which will modify the value of the pool buffer.
 	key := make([]byte, len(cmdKey))
 	copy(key, cmdKey)
@@ -105,7 +104,7 @@ func (c *Conn) sealFromPool(b []byte) (data []byte) {
 	encryptedSize := int32(len(b) + c.writeBodyCipher.Overhead())
 	paddingSize := int32(c.writePaddingGenerator.NextPaddingLen())
 
-	data = pool.Get(int(sizeSize + encryptedSize + paddingSize))
+	data = pool.GetBuffer(int(sizeSize + encryptedSize + paddingSize))
 	c.writeChunkSizeParser.Encode(uint16(encryptedSize+paddingSize), data)
 
 	c.writeBodyCipher.Seal(data[sizeSize:sizeSize], c.writeNonceGenerator(), b, nil)
@@ -123,7 +122,7 @@ func (c *Conn) writeStream(b []byte, preWrite []byte) (n int, err error) {
 	if preWrite != nil {
 		start++
 		data := c.sealFromPool(b[n:common.Min(n+payloadSize, len(b))])
-		defer pool.Put(data)
+		defer pool.PutBuffer(data)
 		if _, err = c.Conn.Write(bytes.Join([][]byte{preWrite, data}, nil)); err != nil {
 			return 0, err
 		}
@@ -134,7 +133,7 @@ func (c *Conn) writeStream(b []byte, preWrite []byte) (n int, err error) {
 		if _, err = c.Conn.Write(data); err != nil {
 			return n, err
 		}
-		pool.Put(data)
+		pool.PutBuffer(data)
 		n += payloadSize
 	}
 	if n > len(b) {
@@ -146,7 +145,7 @@ func (c *Conn) writeStream(b []byte, preWrite []byte) (n int, err error) {
 // writePacket simply seal every buffer of mb and write.
 func (c *Conn) writePacket(b []byte, preWrite []byte) (n int, err error) {
 	data := c.sealFromPool(b)
-	defer pool.Put(data)
+	defer pool.PutBuffer(data)
 	if preWrite != nil {
 		if _, err = c.Conn.Write(bytes.Join([][]byte{preWrite, data}, nil)); err != nil {
 			return 0, err
@@ -186,7 +185,7 @@ func (c *Conn) InitContext(instructionData []byte) error {
 func (c *Conn) WriteReqHeader() (err error) {
 	c.initWrite.Do(func() {
 		instructionData := ReqInstructionDataFromPool(c.metadata)
-		defer pool.Put(instructionData)
+		defer pool.PutBuffer(instructionData)
 
 		if err = c.InitContext(instructionData); err != nil {
 			return
@@ -196,7 +195,7 @@ func (c *Conn) WriteReqHeader() (err error) {
 		if header, err = EncryptReqHeaderFromPool(instructionData, c.cmdKey); err != nil {
 			return
 		}
-		defer pool.Put(header)
+		defer pool.PutBuffer(header)
 		if c.writeBodyCipher, err = c.NewAEAD(c.requestBodyKey[:]); err != nil {
 			return
 		}
@@ -227,7 +226,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			}
 			c.dialTgtAddrPort = tgt.AddrPort()
 		}
-		return c.WriteTo(b, c.dialTgtAddrPort.String())
+		return c.WriteTo(b, net.UDPAddrFromAddrPort(c.dialTgtAddrPort))
 	} else {
 		return c.write(b)
 	}
@@ -241,7 +240,7 @@ func (c *Conn) write(b []byte) (n int, err error) {
 	c.initWrite.Do(func() {
 		if !c.metadata.IsClient {
 			header := RespHeaderFromPool(c.responseAuth)
-			defer pool.Put(header)
+			defer pool.PutBuffer(header)
 			encRespHeader, err = c.EncryptRespHeaderFromPool(header)
 			if err != nil {
 				return
@@ -265,14 +264,14 @@ func (c *Conn) write(b []byte) (n int, err error) {
 		}
 	})
 	if len(encRespHeader) != 0 {
-		defer pool.Put(encRespHeader)
+		defer pool.PutBuffer(encRespHeader)
 	}
 	if err != nil {
 		return 0, err
 	}
 	if len(b) == 0 {
 		data := c.sealFromPool(nil)
-		defer pool.Put(data)
+		defer pool.PutBuffer(data)
 		_, err = c.Conn.Write(data)
 		return 0, err
 	}
@@ -301,8 +300,8 @@ func (c *Conn) read(b []byte) (n int, err error) {
 	defer c.readMutex.Unlock()
 	c.initRead.Do(func() {
 		if c.metadata.IsClient {
-			bufSize := pool.Get(18) // 2+16
-			defer pool.Put(bufSize)
+			bufSize := pool.GetBuffer(18) // 2+16
+			defer pool.PutBuffer(bufSize)
 			if _, err = io.ReadFull(c.Conn, bufSize); err != nil {
 				err = fmt.Errorf("failed to read response header length: %w", err)
 				return
@@ -316,8 +315,8 @@ func (c *Conn) read(b []byte) (n int, err error) {
 				return
 			}
 			headerSize := binary.BigEndian.Uint16(bufSize[:2])
-			buf := pool.Get(int(headerSize) + 16)
-			defer pool.Put(buf)
+			buf := pool.GetBuffer(int(headerSize) + 16)
+			defer pool.PutBuffer(buf)
 			if _, err = io.ReadFull(c.Conn, buf); err != nil {
 				err = fmt.Errorf("failed to read response header: %w", err)
 				return
@@ -357,8 +356,8 @@ func (c *Conn) read(b []byte) (n int, err error) {
 			c.readNonceGenerator = GenerateChunkNonce(c.responseBodyIV[:], uint32(c.readBodyCipher.NonceSize()))
 		} else {
 			// assume that EAuthID has been read
-			buf := pool.Get(26) // len(2) + tag(16) + connection_nonce(8)
-			defer pool.Put(buf)
+			buf := pool.GetBuffer(26) // len(2) + tag(16) + connection_nonce(8)
+			defer pool.PutBuffer(buf)
 			if _, err = io.ReadFull(c.Conn, buf); err != nil {
 				err = fmt.Errorf("failed to read ALength and ConnectionNonce: %w", err)
 				return
@@ -375,8 +374,8 @@ func (c *Conn) read(b []byte) (n int, err error) {
 			}
 			lenInstruction := binary.BigEndian.Uint16(buf)
 
-			instructionData := pool.Get(int(lenInstruction) + 16)
-			defer pool.Put(instructionData)
+			instructionData := pool.GetBuffer(int(lenInstruction) + 16)
+			defer pool.PutBuffer(instructionData)
 			if _, err = io.ReadFull(c.Conn, instructionData); err != nil {
 				err = fmt.Errorf("failed to read instruction data: %w", err)
 				return
@@ -431,7 +430,7 @@ func (c *Conn) read(b []byte) (n int, err error) {
 		c.indexToRead += n
 		if c.indexToRead >= len(c.leftToRead) {
 			// put the buf back
-			pool.Put(c.leftToRead)
+			pool.PutBuffer(c.leftToRead)
 		}
 		return n, nil
 	}
@@ -448,7 +447,7 @@ func (c *Conn) read(b []byte) (n int, err error) {
 		c.indexToRead = n
 	} else {
 		// full reading. put the buf back
-		pool.Put(chunk)
+		pool.PutBuffer(chunk)
 	}
 	return n, nil
 }
@@ -459,8 +458,8 @@ func (c *Conn) Metadata() Metadata {
 
 // readSize reads the size and padding from Conn. size=encryptedSize+padding
 func (c *Conn) readSize() (size uint16, padding uint16, err error) {
-	buf := pool.Get(int(c.readChunkSizeParser.SizeBytes()))
-	defer pool.Put(buf)
+	buf := pool.GetBuffer(int(c.readChunkSizeParser.SizeBytes()))
+	defer pool.PutBuffer(buf)
 	if _, err := io.ReadFull(c.Conn, buf); err != nil {
 		return 0, 0, err
 	}
@@ -482,20 +481,20 @@ func (c *Conn) readChunkFromPool() (b []byte, err error) {
 	if size == uint16(c.readBodyCipher.Overhead())+padding {
 		return nil, io.EOF
 	}
-	b = pool.Get(int(size))
+	b = pool.GetBuffer(int(size))
 	if _, err = io.ReadFull(c.Conn, b); err != nil {
-		pool.Put(b)
+		pool.PutBuffer(b)
 		return nil, err
 	}
 	return c.readBodyCipher.Open(b[:0], c.readNonceGenerator(), b[:len(b)-int(padding)], nil)
 }
 
 func (c *Conn) EncryptRespHeaderFromPool(header []byte) (b []byte, err error) {
-	buf := pool.Get(34 + len(header)) // length(2) + tag(16) + len(header) + tag(16)
+	buf := pool.GetBuffer(34 + len(header)) // length(2) + tag(16) + len(header) + tag(16)
 
 	ciph, err := NewAesGcm(KDF(c.responseBodyKey[:], []byte(KDFSaltConstAEADRespHeaderLenKey))[:16])
 	if err != nil {
-		pool.Put(buf)
+		pool.PutBuffer(buf)
 		return
 	}
 	binary.BigEndian.PutUint16(buf, uint16(len(header)))
@@ -503,7 +502,7 @@ func (c *Conn) EncryptRespHeaderFromPool(header []byte) (b []byte, err error) {
 
 	ciph, err = NewAesGcm(KDF(c.responseBodyKey[:], []byte(KDFSaltConstAEADRespHeaderPayloadKey))[:16])
 	if err != nil {
-		pool.Put(buf)
+		pool.PutBuffer(buf)
 		return
 	}
 	ciph.Seal(buf[18:18], KDF(c.responseBodyIV[:], []byte(KDFSaltConstAEADRespHeaderPayloadIV))[:12], header, nil)

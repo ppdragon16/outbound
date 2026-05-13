@@ -9,10 +9,11 @@ import (
 	"strings"
 
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/protocol"
 )
 
 type Dialer struct {
-	nextDialer netproxy.Dialer
+	protocol.StatelessDialer
 	tlsConfig  *tls.Config
 	addr       string
 	url        string
@@ -28,8 +29,10 @@ func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 	}
 
 	m := &Dialer{
-		nextDialer: d,
-		addr:       u.Host,
+		StatelessDialer: protocol.StatelessDialer{
+			ParentDialer: d,
+		},
+		addr: u.Host,
 	}
 
 	query := u.Query()
@@ -58,6 +61,8 @@ func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 	} else {
 		m.alpn = []string{"h2", "http/1.1"}
 	}
+	// serverName
+	m.serverName = query.Get("serverName")
 	if m.serverName == "" {
 		m.serverName = u.Hostname()
 	}
@@ -74,7 +79,7 @@ func (m *Dialer) DialContext(ctx context.Context, network, addr string) (c net.C
 	switch network {
 	case "tcp":
 		tripper := &httpTripperClient{
-			nextDialer: m.nextDialer,
+			nextDialer: m.ParentDialer,
 			addr:       addr,
 			url:        m.url,
 		}
@@ -101,4 +106,8 @@ func (m *Dialer) DialContext(ctx context.Context, network, addr string) (c net.C
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
+}
+
+func (m *Dialer) ListenPacket(ctx context.Context, address string) (net.PacketConn, error) {
+	return nil, fmt.Errorf("%w: meek does not support UDP", netproxy.UnsupportedTunnelTypeError)
 }

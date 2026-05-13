@@ -6,22 +6,25 @@ import (
 	gotls "crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"reflect"
 	"unsafe"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/transport/tls"
 	utls "github.com/refraction-networking/utls"
 )
 
 var ErrNotTLS13 = errors.New("XTLS Vision based on TLS 1.3 outer connection")
 
-func NewPacketConn(conn netproxy.Conn, userUUID []byte, network string, addr string) (*PacketConn, error) {
+func NewPacketConn(conn net.Conn, userUUID []byte, network string, addr string) (*PacketConn, error) {
 	c, err := NewConn(conn, userUUID)
-	return &PacketConn{c, network, addr}, err
+	if err != nil {
+		return nil, err
+	}
+	return &PacketConn{c, network, addr}, nil
 }
 
-func NewConn(conn netproxy.Conn, userUUID []byte) (*Conn, error) {
+func NewConn(conn net.Conn, userUUID []byte) (*Conn, error) {
 	c := &Conn{
 		overlayConn:                conn,
 		userUUID:                   userUUID,
@@ -38,7 +41,7 @@ func NewConn(conn netproxy.Conn, userUUID []byte) (*Conn, error) {
 	}
 	var t reflect.Type
 	var p unsafe.Pointer
-	if iconn, ok := conn.(interface{ IntrinsicConn() netproxy.Conn }); ok {
+	if iconn, ok := conn.(interface{ IntrinsicConn() net.Conn }); ok {
 		ic := iconn.IntrinsicConn()
 		if tlsConn, ok := ic.(*gotls.Conn); ok {
 			c.Conn = tlsConn.NetConn()

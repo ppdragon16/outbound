@@ -32,7 +32,7 @@ type Metadata struct {
 }
 
 type Conn struct {
-	netproxy.Conn
+	net.Conn
 	metadata            Metadata
 	cmdKey              []byte
 	cachedProxyAddrIpIP netip.AddrPort
@@ -45,7 +45,7 @@ type Conn struct {
 	addonsBytes []byte
 }
 
-func NewConn(conn netproxy.Conn, metadata Metadata, cmdKey []byte) (c *Conn, err error) {
+func NewConn(conn net.Conn, metadata Metadata, cmdKey []byte) (c *Conn, err error) {
 
 	// DO NOT use pool here because Close() cannot interrupt the reading or writing, which will modify the value of the pool buffer.
 	key := make([]byte, len(cmdKey))
@@ -81,16 +81,16 @@ func NewConn(conn netproxy.Conn, metadata Metadata, cmdKey []byte) (c *Conn, err
 	return c, nil
 }
 
-func (c *Conn) IntrinsicConn() netproxy.Conn {
+func (c *Conn) IntrinsicConn() net.Conn {
 	return c.Conn
 }
 
 func (c *Conn) reqHeaderFromPool(payload []byte) (buf []byte) {
 	addrLen := c.metadata.AddrLen()
 	if !c.metadata.Mux {
-		buf = pool.Get(1 + 16 + len(c.addonsBytes) + 1 + 1 + 2 + 1 + addrLen + len(payload))
+		buf = pool.GetBuffer(1 + 16 + len(c.addonsBytes) + 1 + 1 + 2 + 1 + addrLen + len(payload))
 	} else {
-		buf = pool.Get(1 + 16 + len(c.addonsBytes) + 1 + 1 + len(payload))
+		buf = pool.GetBuffer(1 + 16 + len(c.addonsBytes) + 1 + 1 + len(payload))
 	}
 	start := 0
 	buf[start] = 0 // version
@@ -124,8 +124,8 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	defer c.writeMutex.Unlock()
 	if c.metadata.Network == "udp" && c.metadata.Flow != XRV {
 		// logrus.Println("!!!", "UDP, write")
-		bLen := pool.Get(2)
-		defer pool.Put(bLen)
+		bLen := pool.GetBuffer(2)
+		defer pool.PutBuffer(bLen)
 		binary.BigEndian.PutUint16(bLen, uint16(len(b)))
 		if _, err = c.write(bLen); err != nil {
 			return 0, err
@@ -138,7 +138,7 @@ func (c *Conn) write(b []byte) (n int, err error) {
 	if !c.onceWrite {
 		if c.metadata.IsClient {
 			buf := c.reqHeaderFromPool(b)
-			defer pool.Put(buf)
+			defer pool.PutBuffer(buf)
 			if _, err = c.Conn.Write(buf); err != nil {
 				return 0, fmt.Errorf("write header: %w", err)
 			}
@@ -158,8 +158,8 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 		// defer func() {
 		// 	logrus.Println("READ", n, err)
 		// }()
-		bLen := pool.Get(2)
-		defer pool.Put(bLen)
+		bLen := pool.GetBuffer(2)
+		defer pool.PutBuffer(bLen)
 		if _, err = io.ReadFull(&netproxy.ReadWrapper{ReadFunc: c.read}, bLen); err != nil {
 			return 0, err
 		}
@@ -191,8 +191,8 @@ func (c *Conn) read(b []byte) (n int, err error) {
 }
 
 func (c *Conn) ReadReqHeader() (err error) {
-	buf := pool.Get(18)
-	defer pool.Put(buf)
+	buf := pool.GetBuffer(18)
+	defer pool.PutBuffer(buf)
 	if _, err = io.ReadFull(c.Conn, buf); err != nil {
 		return err
 	}
@@ -205,8 +205,8 @@ func (c *Conn) ReadReqHeader() (err error) {
 	if _, err = io.CopyN(io.Discard, c.Conn, int64(buf[17])); err != nil { // ignore addons
 		return err
 	}
-	buf = pool.Get(4)
-	defer pool.Put(buf)
+	buf = pool.GetBuffer(4)
+	defer pool.PutBuffer(buf)
 	if _, err = io.ReadFull(c.Conn, buf); err != nil {
 		return err
 	}
@@ -217,8 +217,8 @@ func (c *Conn) ReadReqHeader() (err error) {
 }
 
 func (c *Conn) ReadRespHeader() (err error) {
-	buf := pool.Get(2)
-	defer pool.Put(buf)
+	buf := pool.GetBuffer(2)
+	defer pool.PutBuffer(buf)
 	if _, err = io.ReadFull(c.Conn, buf); err != nil {
 		return err
 	}

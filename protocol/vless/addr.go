@@ -15,22 +15,22 @@ func CompleteMetadataFromReader(m *Metadata, first4 []byte, r io.Reader) (err er
 	m.Type = vmess.ParseMetadataType(first4[3])
 	switch m.Type {
 	case protocol.MetadataTypeIPv4:
-		buf := pool.Get(4)
-		defer buf.Put()
+		buf := pool.GetBuffer(4)
+		defer pool.PutBuffer(buf)
 		if _, err = io.ReadFull(r, buf); err != nil {
 			return err
 		}
 		m.Hostname = net.IP(buf).String()
 	case protocol.MetadataTypeIPv6:
-		buf := pool.Get(16)
-		defer buf.Put()
+		buf := pool.GetBuffer(16)
+		defer pool.PutBuffer(buf)
 		if _, err = io.ReadFull(r, buf); err != nil {
 			return err
 		}
 		m.Hostname = net.IP(buf).String()
 	case protocol.MetadataTypeDomain:
-		buf := pool.Get(1 + 255)
-		defer buf.Put()
+		buf := pool.GetBuffer(1 + 255)
+		defer pool.PutBuffer(buf)
 		if _, err = io.ReadFull(r, buf[:1]); err != nil {
 			return err
 		}
@@ -39,8 +39,8 @@ func CompleteMetadataFromReader(m *Metadata, first4 []byte, r io.Reader) (err er
 		}
 		m.Hostname = string(buf[1 : 1+int(buf[0])])
 	case protocol.MetadataTypeMsg:
-		buf := pool.Get(1)
-		defer buf.Put()
+		buf := pool.GetBuffer(1)
+		defer pool.PutBuffer(buf)
 		if _, err = io.ReadFull(r, buf); err != nil {
 			return err
 		}

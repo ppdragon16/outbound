@@ -3,6 +3,7 @@ package vless
 import (
 	"context"
 	"fmt"
+	"net"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
@@ -19,93 +20,136 @@ func init() {
 }
 
 type Dialer struct {
+	protocol.StatelessDialer
 	proxyAddress string
 	nextDialer   netproxy.Dialer
-	metadata     protocol.Metadata
 	flow         string
 	xudp         bool
 	key          []byte
 }
 
 func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
-	metadata := protocol.Metadata{
-		IsClient: header.IsClient,
-	}
-	//log.Trace("vless.NewDialer: metadata: %v, password: %v", metadata, password)
 	id, err := Password2Key(header.Password)
 	if err != nil {
 		return nil, err
 	}
-	flow := header.Feature1
-	switch flow {
-	case XRV:
-		if !metadata.IsClient {
-			return nil, fmt.Errorf("unsupported server mode xtls flow type: %v", flow)
+
+	var flowStr string
+	if header.Feature1 != nil {
+		var ok bool
+		flowStr, ok = header.Feature1.(string)
+		if !ok {
+			return nil, fmt.Errorf("Feature1 must be a string, got %T", header.Feature1)
 		}
+	}
+
+	switch flowStr {
+	case XRV:
 	case "":
 	default:
-		return nil, fmt.Errorf("unsupported xtls flow type: %v", flow)
+		return nil, fmt.Errorf("unsupported xtls flow type: %v", flowStr)
 	}
+
 	return &Dialer{
+		StatelessDialer: protocol.StatelessDialer{
+			ParentDialer: nextDialer,
+		},
 		proxyAddress: header.ProxyAddress,
 		nextDialer:   nextDialer,
-		metadata:     metadata,
-		flow:         flow.(string),
-		// xudp:         header.Flags&protocol.Flags_VMess_UsePacketAddr == 0,
-		xudp: true && flow == XRV,
-		key:  id,
+		flow:         flowStr,
+		xudp:         flowStr == XRV,
+		key:          id,
 	}, nil
 }
 
-func (d *Dialer) DialTcp(ctx context.Context, addr string) (c netproxy.Conn, err error) {
-	return d.DialContext(ctx, "tcp", addr)
-}
-
-func (d *Dialer) DialUdp(ctx context.Context, addr string) (c netproxy.PacketConn, err error) {
-	pktConn, err := d.DialContext(ctx, "udp", addr)
-	if err != nil {
-		return nil, err
-	}
-	return pktConn.(netproxy.PacketConn), nil
-}
-
-func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (c netproxy.Conn, err error) {
-	magicNetwork, err := netproxy.ParseMagicNetwork(network)
-	if err != nil {
-		return nil, err
-	}
-	switch magicNetwork.Network {
+func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (net.Conn, error) {
+	switch network {
 	case "tcp", "udp":
 		mdata, err := protocol.ParseMetadata(addr)
 		if err != nil {
 			return nil, err
 		}
-		mdata.IsClient = d.metadata.IsClient
+		mdata.IsClient = true
 
-		tcpNetwork := netproxy.MagicNetwork{
-			Network: "tcp",
-			Mark:    magicNetwork.Mark,
-		}.Encode()
-		conn, err := d.nextDialer.DialContext(ctx, tcpNetwork, d.proxyAddress)
+		conn, err := d.ParentDialer.DialContext(ctx, "tcp", d.proxyAddress)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("dial proxy: %w", err)
 		}
+
 		conn, err = NewConn(conn, Metadata{
-			Metadata: vmess.Metadata{Metadata: mdata, Network: magicNetwork.Network},
-			Flow:     d.flow,
-			Mux:      magicNetwork.Network == "udp" && d.xudp,
+			Metadata: vmess.Metadata{
+				Metadata: mdata,
+				Network:  network,
+			},
+			Flow: d.flow,
+			Mux:  network == "udp" && d.xudp,
 		}, d.key)
 		if err != nil {
+			conn.Close()
 			return nil, err
 		}
+
 		if d.flow == XRV {
 			if d.xudp {
-				return vision.NewPacketConn(conn, d.key, magicNetwork.Network, addr)
+				pc, err := vision.NewPacketConn(conn, d.key, network, addr)
+				if err != nil {
+					conn.Close()
+					return nil, err
+				}
+				return pc, nil
 			}
-			return vision.NewConn(conn, d.key)
+			vc, err := vision.NewConn(conn, d.key)
+			if err != nil {
+				conn.Close()
+				return nil, err
+			}
+			return vc, nil
+		}
+
+		if network == "udp" {
+			return &netproxy.BindPacketConn{
+				PacketConn: conn.(net.PacketConn),
+				Address:    netproxy.NewAddr("udp", addr),
+			}, nil
 		}
 		return conn, nil
 	default:
-		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, magicNetwork.Network)
+		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
+}
+
+func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
+	mdata, err := protocol.ParseMetadata(addr)
+	if err != nil {
+		return nil, err
+	}
+	mdata.IsClient = true
+
+	conn, err := d.ParentDialer.DialContext(ctx, "tcp", d.proxyAddress)
+	if err != nil {
+		return nil, fmt.Errorf("dial proxy: %w", err)
+	}
+
+	vConn, err := NewConn(conn, Metadata{
+		Metadata: vmess.Metadata{
+			Metadata: mdata,
+			Network:  "udp",
+		},
+		Flow: d.flow,
+		Mux:  d.xudp,
+	}, d.key)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	if d.flow == XRV {
+		pc, err := vision.NewPacketConn(vConn, d.key, "udp", addr)
+		if err != nil {
+			vConn.Close()
+			return nil, err
+		}
+		return pc, nil
+	}
+	return vConn, nil
 }

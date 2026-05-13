@@ -5,20 +5,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
 
 	"github.com/daeuniverse/outbound/common/iout"
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 )
-
-var _ netproxy.PacketConn = (*PacketConn)(nil)
 
 type PacketConn struct {
 	*Conn
 	network string
 	addr    string
 }
+
+type stringAddr string
+
+func (s stringAddr) Network() string { return "udp" }
+func (s stringAddr) String() string  { return string(s) }
 
 func (c *PacketConn) Read(b []byte) (n int, err error) {
 	switch c.network {
@@ -37,10 +40,18 @@ func (c *PacketConn) Write(b []byte) (n int, err error) {
 	case "tcp":
 		return c.Conn.Write(b)
 	case "udp":
-		return c.WriteTo(b, c.addr)
+		return c.WriteTo(b, stringAddr(c.addr))
 	default:
 		return 0, fmt.Errorf("unsupported network: %s", c.network)
 	}
+}
+
+func (c *PacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	n, ap, err := c.readFromAddrPort(p)
+	if err != nil {
+		return 0, nil, err
+	}
+	return n, net.UDPAddrFromAddrPort(ap), nil
 }
 
 // +-------------------+-------------------+
@@ -50,7 +61,7 @@ func (c *PacketConn) Write(b []byte) (n int, err error) {
 // +-------------------+-------------------+
 // |   Length Data     |     Payload      |
 // +-------------------+-------------------+
-func (c *PacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
+func (c *PacketConn) readFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error) {
 	// Read frame length (2 bytes)
 	var frameLengthBytes [2]byte
 	if _, err = io.ReadFull(c.Conn, frameLengthBytes[:]); err != nil {
@@ -88,7 +99,7 @@ func (c *PacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) 
 	}
 
 	if frameHeaderBytes[3]&1 != 1 {
-		return c.ReadFrom(p)
+		return c.readFromAddrPort(p)
 	}
 
 	// Read length and payload
@@ -122,13 +133,13 @@ func (c *PacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) 
 // +------------------------+------------------------+
 // |   Data Length (2B)     |      Payload          |
 // +------------------------+------------------------+
-func (pc *PacketConn) WriteTo(p []byte, addr string) (n int, err error) {
+func (pc *PacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	dataLen := len(p)
-	prefix, err := pc.prefixPacket(addr)
+	prefix, err := pc.prefixPacket(addr.String())
 	if err != nil {
 		return 0, err
 	}
-	defer prefix.Put()
+	defer pool.PutBuffer(prefix)
 	_, err = iout.MultiWrite(pc.writer, prefix, []byte{byte(dataLen >> 8), byte(dataLen)}, p)
 	if err != nil {
 		return 0, err
@@ -136,13 +147,13 @@ func (pc *PacketConn) WriteTo(p []byte, addr string) (n int, err error) {
 	return len(p), nil
 }
 
-func (pc *PacketConn) prefixPacket(addr string) (pool.PB, error) {
+func (pc *PacketConn) prefixPacket(addr string) ([]byte, error) {
 	address, err := netip.ParseAddrPort(addr)
 	if err != nil {
 		return nil, err
 	}
 	packetAddrLen := IPAddrToPacketAddrLength(address)
-	prefix := pool.Get(7 + packetAddrLen)
+	prefix := pool.GetBuffer(7 + packetAddrLen)
 	l := len(prefix) - 2
 	err = PutPacketAddr(prefix[7:], address)
 	if err != nil {

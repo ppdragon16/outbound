@@ -2,15 +2,24 @@ package vmess
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 
 	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/pool"
 )
 
-func (c *Conn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
-	buf := pool.Get(MaxUDPSize)
-	defer pool.Put(buf)
+func (c *Conn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	n, ap, err := c.readFromAddrPort(p)
+	if err != nil {
+		return 0, nil, err
+	}
+	return n, net.UDPAddrFromAddrPort(ap), nil
+}
+
+func (c *Conn) readFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error) {
+	buf := pool.GetBuffer(MaxUDPSize)
+	defer pool.PutBuffer(buf)
 	n, err = c.read(buf)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
@@ -37,7 +46,11 @@ func (c *Conn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
 	}
 }
 
-func (c *Conn) WriteTo(p []byte, addr string) (n int, err error) {
+func (c *Conn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
+	return c.writeToAddr(p, addr.String())
+}
+
+func (c *Conn) writeToAddr(p []byte, addr string) (n int, err error) {
 	if c.metadata.IsPacketAddr() {
 		// VMess packet addr does not support domain.
 		address, err := common.ResolveUDPAddr(addr)
@@ -45,8 +58,8 @@ func (c *Conn) WriteTo(p []byte, addr string) (n int, err error) {
 			return 0, err
 		}
 		packetAddrLen := UDPAddrToPacketAddrLength(address)
-		buf := pool.Get(packetAddrLen + len(p))
-		defer pool.Put(buf)
+		buf := pool.GetBuffer(packetAddrLen + len(p))
+		defer pool.PutBuffer(buf)
 
 		err = PutPacketAddr(buf, address)
 		if err != nil {

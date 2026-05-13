@@ -34,6 +34,7 @@ import (
 	"unsafe"
 
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/protocol"
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
@@ -82,6 +83,7 @@ func (c *RealityUConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [
 }
 
 type Reality struct {
+	protocol.StatelessDialer
 	infoWriter io.Writer
 
 	nextDialer  netproxy.Dialer
@@ -100,6 +102,9 @@ func NewReality(s string, d netproxy.Dialer) (*Reality, error) {
 	}
 
 	x := &Reality{
+		StatelessDialer: protocol.StatelessDialer{
+			ParentDialer: d,
+		},
 		nextDialer: d,
 	}
 
@@ -337,6 +342,10 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c net.
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
 
+}
+
+func (x *Reality) ListenPacket(ctx context.Context, address string) (net.PacketConn, error) {
+	return nil, fmt.Errorf("%w: Reality does not support UDP", netproxy.UnsupportedTunnelTypeError)
 }
 
 var (

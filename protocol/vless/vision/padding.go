@@ -20,7 +20,7 @@ const (
 	BufferSize = 32 * 1024
 )
 
-func ApplyPaddingFromPool(p []byte, command byte, userUUID []byte, longPadding bool) (prefix, suffix pool.PB) {
+func ApplyPaddingFromPool(p []byte, command byte, userUUID []byte, longPadding bool) (prefix, suffix []byte) {
 	contentLen := int32(len(p))
 	var paddingLen int32
 	if contentLen < 900 && longPadding {
@@ -30,8 +30,8 @@ func ApplyPaddingFromPool(p []byte, command byte, userUUID []byte, longPadding b
 		paddingLen = fastrand.Int31n(256)
 	}
 
-	prefix = pool.Get(len(userUUID) + 1 + 2 + 2)
-	suffix = pool.Get(int(paddingLen))
+	prefix = pool.GetBuffer(len(userUUID) + 1 + 2 + 2)
+	suffix = pool.GetBuffer(int(paddingLen))
 	start := 0
 	if userUUID != nil {
 		copy(prefix, userUUID[:])

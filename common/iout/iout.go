@@ -16,8 +16,8 @@ func MultiWrite(dst io.Writer, bs ...[]byte) (int64, error) {
 	for _, b := range bs {
 		n += len(b)
 	}
-	buf := pool.Get(n)[:0]
-	defer buf.Put()
+	buf := pool.GetBuffer(n)[:0]
+	defer pool.PutBuffer(buf)
 	for _, b := range bs {
 		buf = append(buf, b...)
 	}

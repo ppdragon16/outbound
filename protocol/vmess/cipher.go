@@ -126,8 +126,8 @@ func PutEAuthID(dst []byte, cmdKey []byte) []byte {
 }
 
 func AuthEAuthID(blk cipher.Block, eAuthID []byte, doubleCuckoo *ReplayFilter, startTimestamp int64) error {
-	buf := pool.Get(16)
-	defer pool.Put(buf)
+	buf := pool.GetBuffer(16)
+	defer pool.PutBuffer(buf)
 	blk.Decrypt(buf, eAuthID)
 	if crc32.ChecksumIEEE(buf[:12]) != binary.BigEndian.Uint32(buf[12:16]) {
 		return fmt.Errorf("incorrect checksum")
@@ -153,7 +153,7 @@ func AuthEAuthID(blk cipher.Block, eAuthID []byte, doubleCuckoo *ReplayFilter, s
 func ReqInstructionDataFromPool(metadata Metadata) []byte {
 	P := fastrand.Intn(1 << 4)
 	// 1 + 16 + 16 + 1 + 1 + 1 + 1 + 1 + 2 + 1 + metadata.AddrLen() + P + 4
-	buf := pool.Get(metadata.AddrLen() + P + 45)
+	buf := pool.GetBuffer(metadata.AddrLen() + P + 45)
 	buf[0] = 1               // version
 	fastrand.Read(buf[1:34]) // random IV(16), Key(16), V(1)
 	// https://github.com/v2fly/v2ray-core/blob/a66bb28aee661caa191b5746ba4915eb99e12c59/proxy/vmess/outbound/outbound.go#L112
@@ -174,14 +174,14 @@ func ReqInstructionDataFromPool(metadata Metadata) []byte {
 }
 
 func EncryptReqHeaderFromPool(instruction []byte, cmdKey []byte) ([]byte, error) {
-	buf := pool.Get(58 + len(instruction)) // EAuthID(16) + length(2) + tag(16) + nonce(8) + len(instruction) + tag(16)
+	buf := pool.GetBuffer(58 + len(instruction)) // EAuthID(16) + length(2) + tag(16) + nonce(8) + len(instruction) + tag(16)
 	eAuthID := PutEAuthID(buf, cmdKey)
 	connectionNonce := buf[34:42] // 16+2+16
 	fastrand.Read(connectionNonce)
 
 	gcm, err := NewAesGcm(KDF(cmdKey, []byte(KDFSaltConstVMessHeaderPayloadLengthAEADKey), eAuthID, connectionNonce)[:16])
 	if err != nil {
-		pool.Put(buf)
+		pool.PutBuffer(buf)
 		return nil, err
 	}
 	binary.BigEndian.PutUint16(buf[16:18], uint16(len(instruction)))
@@ -189,7 +189,7 @@ func EncryptReqHeaderFromPool(instruction []byte, cmdKey []byte) ([]byte, error)
 
 	gcm, err = NewAesGcm(KDF(cmdKey, []byte(KDFSaltConstVMessHeaderPayloadAEADKey), eAuthID, connectionNonce)[:16])
 	if err != nil {
-		pool.Put(buf)
+		pool.PutBuffer(buf)
 		return nil, err
 	}
 	copy(buf[42:], instruction) // 16+2+16+8
@@ -199,7 +199,7 @@ func EncryptReqHeaderFromPool(instruction []byte, cmdKey []byte) ([]byte, error)
 }
 
 func RespHeaderFromPool(V byte) []byte {
-	buf := pool.GetZero(4) // V(1)+Option(1)+Cmd(1)+InstructionLen(1)
+	buf := pool.GetBuffer(4) // V(1)+Option(1)+Cmd(1)+InstructionLen(1); already zeroed
 	buf[0] = V
 	// no instruction data
 	return buf
@@ -215,7 +215,7 @@ func NewAesGcm(key []byte) (cipher.AEAD, error) {
 
 // GenerateChacha20Poly1305Key generates a 32-byte key from a given 16-byte array.
 func GenerateChacha20Poly1305KeyFromPool(b []byte) []byte {
-	key := pool.Get(32)
+	key := pool.GetBuffer(32)
 	t := md5.Sum(b)
 	copy(key, t[:])
 	t = md5.Sum(key[:16])
@@ -226,7 +226,7 @@ func GenerateChacha20Poly1305KeyFromPool(b []byte) []byte {
 func NewC20P1305(key []byte) (cipher.AEAD, error) {
 	if len(key) == 16 {
 		key = GenerateChacha20Poly1305KeyFromPool(key)
-		defer pool.Put(key)
+		defer pool.PutBuffer(key)
 	}
 	return chacha20poly1305.New(key)
 }
