@@ -36,17 +36,16 @@ func FragUDPMessage(m *protocol.UDPMessage, maxSize int) []protocol.UDPMessage {
 // in their entirety, any previous state is discarded.
 type Defragger struct {
 	pktID uint16
-	frags []*protocol.UDPMessage
+	frags [][]byte
 	count uint8
-	size  int // data size
 }
 
-func (d *Defragger) Feed(m *protocol.UDPMessage) *protocol.UDPMessage {
+func (d *Defragger) Feed(m *protocol.UDPMessage, p []byte) (int, bool) {
 	if m.FragCount <= 1 {
-		return m
+		return copy(p, m.Data), true
 	}
 	if m.FragID >= m.FragCount {
-		return nil
+		return 0, false
 	}
 	if m.PacketID != d.pktID || m.FragCount != uint8(len(d.frags)) {
 		d.pktID = m.PacketID
@@ -55,27 +54,25 @@ func (d *Defragger) Feed(m *protocol.UDPMessage) *protocol.UDPMessage {
 			d.frags = d.frags[:m.FragCount]
 			clear(d.frags)
 		} else {
-			d.frags = make([]*protocol.UDPMessage, m.FragCount)
+			d.frags = make([][]byte, m.FragCount)
 		}
-		d.frags[m.FragID] = m
+		d.frags[m.FragID] = m.Data
 		d.count = 1
-		d.size = len(m.Data)
 	} else if d.frags[m.FragID] == nil {
-		d.frags[m.FragID] = m
+		d.frags[m.FragID] = m.Data
 		d.count++
-		d.size += len(m.Data)
 		if int(d.count) == len(d.frags) {
 			// all fragments received, assemble
-			data := make([]byte, d.size)
 			off := 0
-			for _, frag := range d.frags {
-				off += copy(data[off:], frag.Data)
+			for _, data := range d.frags {
+				off += copy(p[off:], data)
 			}
-			m.Data = data[:off]
-			m.FragID = 0
-			m.FragCount = 1
-			return m
+			return off, true
 		}
 	}
+	return 0, false
+}
+
+func (d *Defragger) Close() error {
 	return nil
 }

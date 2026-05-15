@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -28,7 +29,7 @@ const (
 type udpConn struct {
 	ID        uint32
 	D         *frag.Defragger
-	ReceiveCh chan *protocol.UDPMessage
+	ReceiveCh chan []byte
 
 	conn quic.Connection
 	sm   *udpSessionManager
@@ -65,21 +66,25 @@ func (u *udpConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err erro
 			return 0, netip.AddrPort{}, io.ErrClosedPipe
 		case <-u.readDeadline.Wait():
 			return 0, netip.AddrPort{}, os.ErrDeadlineExceeded
-		case msg, ok := <-u.ReceiveCh:
+		case datagram, ok := <-u.ReceiveCh:
 			if !ok {
 				return 0, netip.AddrPort{}, io.EOF
 			}
-			dfMsg := u.D.Feed(msg)
-			if dfMsg == nil {
+			msg := &protocol.UDPMessage{}
+			if err := protocol.ParseUDPMessage(datagram, msg); err != nil {
+				// Invalid message, this is fine - just wait for the next
+				continue
+			}
+			n, ok := u.D.Feed(msg, p)
+			if !ok {
 				// Incomplete message, wait for more
 				continue
 			}
-			ap, err := netip.ParseAddrPort(dfMsg.Addr)
+			ap, err := netip.ParseAddrPort(msg.Addr)
 			if err != nil {
 				return 0, netip.AddrPort{}, err
 			}
-			// TODO: 避免copy
-			return copy(p, dfMsg.Data), ap, nil
+			return n, ap, nil
 		}
 	}
 }
@@ -138,6 +143,7 @@ func (u *udpConn) WritePacket(buf []byte, msg *protocol.UDPMessage) error {
 func (u *udpConn) Close() error {
 	u.cancel()
 	u.sm.connMap.Delete(u.ID)
+	u.D.Close()
 	return nil
 }
 
@@ -188,12 +194,7 @@ func (m *udpSessionManager) run() error {
 			m.Close()
 			return err
 		}
-		msg, err := protocol.ParseUDPMessage(datagram)
-		if err != nil {
-			// Invalid message, this is fine - just wait for the next
-			continue
-		}
-		m.feed(msg)
+		m.feed(datagram)
 	}
 }
 
@@ -205,15 +206,19 @@ func (m *udpSessionManager) IsClosed() bool {
 	return m.ctx.Err() != nil
 }
 
-func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
-	conn, ok := m.connMap.Load(msg.SessionID)
+func (m *udpSessionManager) feed(datagram []byte) {
+	if len(datagram) < 9 {
+		// Invalid message, this is fine - just wait for the next
+		return
+	}
+	conn, ok := m.connMap.Load(binary.BigEndian.Uint32(datagram))
 	if !ok {
 		// Ignore message from unknown session
 		return
 	}
 
 	select {
-	case conn.(*udpConn).ReceiveCh <- msg:
+	case conn.(*udpConn).ReceiveCh <- datagram:
 		// OK
 	default:
 		// Channel full, drop the message
@@ -229,7 +234,7 @@ func (m *udpSessionManager) NewUDP() (net.PacketConn, error) {
 	conn := &udpConn{
 		ID:           id,
 		D:            &frag.Defragger{},
-		ReceiveCh:    make(chan *protocol.UDPMessage, udpMessageChanSize),
+		ReceiveCh:    make(chan []byte, udpMessageChanSize),
 		conn:         m.conn,
 		sm:           m,
 		ctx:          ctx,

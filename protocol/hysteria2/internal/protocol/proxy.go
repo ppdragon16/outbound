@@ -200,11 +200,10 @@ func (m *UDPMessage) Serialize(buf []byte) int {
 	return 8 + i
 }
 
-func ParseUDPMessage(msg []byte) (*UDPMessage, error) {
+func ParseUDPMessage(msg []byte, m *UDPMessage) error {
 	if len(msg) < 9 {
-		return nil, oops.Tags("protocol error").New("message too short")
+		return oops.Tags("protocol error").New("message too short")
 	}
-	m := &UDPMessage{}
 	m.SessionID = binary.BigEndian.Uint32(msg)
 	m.PacketID = binary.BigEndian.Uint16(msg[4:])
 	m.FragID = msg[6]
@@ -212,17 +211,17 @@ func ParseUDPMessage(msg []byte) (*UDPMessage, error) {
 
 	lAddr, varintLen := varintParse(msg[8:])
 	if varintLen < 0 || lAddr == 0 || lAddr > MaxMessageLength {
-		return nil, oops.Tags("protocol error").New("invalid address length")
+		return oops.Tags("protocol error").New("invalid address length")
 	}
 
 	addrStart := 8 + varintLen
 	addrEnd := addrStart + int(lAddr)
 	if len(msg) <= addrEnd {
-		return nil, oops.Tags("protocol error").New("invalid message length")
+		return oops.Tags("protocol error").New("invalid message length")
 	}
 	m.Addr = string(msg[addrStart:addrEnd])
 	m.Data = msg[addrEnd:]
-	return m, nil
+	return nil
 }
 
 // varintParse reads a QUIC varint from a byte slice.

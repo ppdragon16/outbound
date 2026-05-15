@@ -78,7 +78,8 @@ func TestUDPMessage(t *testing.T) {
 				t.Errorf("Serialize() = %v, want %v", got, tt.want)
 			}
 			// Parse back
-			if m2, err := ParseUDPMessage(tt.want); err != nil {
+			m2 := &UDPMessage{}
+			if err := ParseUDPMessage(tt.want, m2); err != nil {
 				t.Errorf("ParseUDPMessage() error = %v", err)
 			} else {
 				if !reflect.DeepEqual(m2, m) {
@@ -118,7 +119,7 @@ func TestUDPMessageMalformed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := ParseUDPMessage(tt.data); err == nil {
+			if err := ParseUDPMessage(tt.data, &UDPMessage{}); err == nil {
 				t.Errorf("ParseUDPMessage() should fail")
 			}
 		})

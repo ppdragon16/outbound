@@ -136,9 +136,10 @@ func TestDefragger(t *testing.T) {
 		m *protocol.UDPMessage
 	}
 	tests := []struct {
-		name string
-		args args
-		want *protocol.UDPMessage
+		name    string
+		args    args
+		wantOk  bool
+		wantData string
 	}{
 		{
 			"no frag",
@@ -152,14 +153,8 @@ func TestDefragger(t *testing.T) {
 					Data:      []byte("hello"),
 				},
 			},
-			&protocol.UDPMessage{
-				SessionID: 123,
-				PacketID:  987,
-				FragID:    0,
-				FragCount: 1,
-				Addr:      "test:123",
-				Data:      []byte("hello"),
-			},
+			true,
+			"hello",
 		},
 		{
 			"frag 0 - 1/2",
@@ -173,7 +168,8 @@ func TestDefragger(t *testing.T) {
 					Data:      []byte("hello "),
 				},
 			},
-			nil,
+			false,
+			"",
 		},
 		{
 			"frag 0 - 2/2",
@@ -187,14 +183,8 @@ func TestDefragger(t *testing.T) {
 					Data:      []byte("moto"),
 				},
 			},
-			&protocol.UDPMessage{
-				SessionID: 123,
-				PacketID:  987,
-				FragID:    0,
-				FragCount: 1,
-				Addr:      "test:123",
-				Data:      []byte("hello moto"),
-			},
+			true,
+			"hello moto",
 		},
 		{
 			"frag 1 - 1/3",
@@ -208,7 +198,8 @@ func TestDefragger(t *testing.T) {
 					Data:      []byte("deco"),
 				},
 			},
-			nil,
+			false,
+			"",
 		},
 		{
 			"frag 1 - 2/3",
@@ -222,7 +213,8 @@ func TestDefragger(t *testing.T) {
 					Data:      []byte("*"),
 				},
 			},
-			nil,
+			false,
+			"",
 		},
 		{
 			"frag 1 - 3/3",
@@ -236,14 +228,8 @@ func TestDefragger(t *testing.T) {
 					Data:      []byte("27"),
 				},
 			},
-			&protocol.UDPMessage{
-				SessionID: 123,
-				PacketID:  987,
-				FragID:    0,
-				FragCount: 1,
-				Addr:      "test:123",
-				Data:      []byte("deco*27"),
-			},
+			true,
+			"deco*27",
 		},
 		{
 			"frag 2 - 1/2",
@@ -257,7 +243,8 @@ func TestDefragger(t *testing.T) {
 					Data:      []byte("shinsekai"),
 				},
 			},
-			nil,
+			false,
+			"",
 		},
 		{
 			"frag 3 - 2/2",
@@ -271,7 +258,8 @@ func TestDefragger(t *testing.T) {
 					Data:      []byte("what???"),
 				},
 			},
-			nil,
+			false,
+			"",
 		},
 		{
 			"frag 2 - 2/2",
@@ -285,7 +273,8 @@ func TestDefragger(t *testing.T) {
 					Data:      []byte(" annaijo"),
 				},
 			},
-			nil,
+			false,
+			"",
 		},
 		{
 			"invalid id",
@@ -299,7 +288,8 @@ func TestDefragger(t *testing.T) {
 					Data:      []byte("shinsekai"),
 				},
 			},
-			nil,
+			false,
+			"",
 		},
 		{
 			"frag 2 - 1/2 re",
@@ -313,23 +303,23 @@ func TestDefragger(t *testing.T) {
 					Data:      []byte("shinsekai"),
 				},
 			},
-			&protocol.UDPMessage{
-				SessionID: 123,
-				PacketID:  233,
-				FragID:    0,
-				FragCount: 1,
-				Addr:      "test:123",
-				Data:      []byte("shinsekai annaijo"),
-			},
+			true,
+			"shinsekai annaijo",
 		},
 	}
 
 	d := &Defragger{}
+	buf := make([]byte, 1024)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := d.Feed(tt.args.m); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("Feed() = %v, want %v", got, tt.want)
+			clear(buf)
+			n, ok := d.Feed(tt.args.m, buf)
+			if ok != tt.wantOk {
+				t.Errorf("Feed() ok = %v, want %v", ok, tt.wantOk)
+			}
+			if ok && string(buf[:n]) != tt.wantData {
+				t.Errorf("Feed() data = %q, want %q", string(buf[:n]), tt.wantData)
 			}
 		})
 	}
