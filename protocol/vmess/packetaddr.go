@@ -61,6 +61,27 @@ func PutPacketAddr(src []byte, addr *net.UDPAddr) error {
 	return nil
 }
 
+func PutPacketAddrFromAddrPort(src []byte, ap netip.AddrPort) {
+	if ap.Addr().Is4() {
+		src[0] = 1
+		ip4 := ap.Addr().As4()
+		copy(src[1:5], ip4[:])
+		binary.BigEndian.PutUint16(src[5:7], ap.Port())
+	} else {
+		src[0] = 2
+		ip16 := ap.Addr().As16()
+		copy(src[1:17], ip16[:])
+		binary.BigEndian.PutUint16(src[17:19], ap.Port())
+	}
+}
+
+func AddrPortToPacketAddrLength(ap netip.AddrPort) int {
+	if ap.Addr().Is4() {
+		return 1 + 4 + 2
+	}
+	return 1 + 16 + 2
+}
+
 func ParsePacketAddrType(t byte) protocol.MetadataType {
 	switch t {
 	case 1:

@@ -39,29 +39,60 @@ type udpConn struct {
 	readDeadline P.Deadline
 }
 
+func ToAddrPort(addr net.Addr) (netip.AddrPort, error) {
+	switch v := addr.(type) {
+	case *net.UDPAddr:
+		return v.AddrPort(), nil
+	case *net.TCPAddr:
+		return v.AddrPort(), nil
+	default:
+		return netip.ParseAddrPort(addr.String())
+	}
+}
+
 func (u *udpConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	n, ap, err := u.ReadFromAddrPort(p)
+	if err != nil {
+		return 0, nil, err
+	}
+	return n, net.UDPAddrFromAddrPort(ap), nil
+}
+
+func (u *udpConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err error) {
 	for {
 		select {
 		case <-u.ctx.Done():
-			return 0, nil, io.ErrClosedPipe
+			return 0, netip.AddrPort{}, io.ErrClosedPipe
 		case <-u.readDeadline.Wait():
-			return 0, nil, os.ErrDeadlineExceeded
+			return 0, netip.AddrPort{}, os.ErrDeadlineExceeded
 		case msg, ok := <-u.ReceiveCh:
 			if !ok {
-				return 0, nil, io.EOF
+				return 0, netip.AddrPort{}, io.EOF
 			}
 			dfMsg := u.D.Feed(msg)
 			if dfMsg == nil {
 				// Incomplete message, wait for more
 				continue
 			}
+			ap, err := netip.ParseAddrPort(dfMsg.Addr)
+			if err != nil {
+				return 0, netip.AddrPort{}, err
+			}
 			// TODO: 避免copy
-			return copy(p, dfMsg.Data), net.UDPAddrFromAddrPort(netip.MustParseAddrPort(dfMsg.Addr)), nil
+			return copy(p, dfMsg.Data), ap, nil
 		}
 	}
 }
 
 func (u *udpConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
+	ap, aErr := ToAddrPort(addr)
+	if aErr != nil {
+		return 0, aErr
+	}
+	return u.WriteToAddrPort(b, ap)
+}
+
+func (u *udpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (n int, err error) {
 	select {
 	case <-u.ctx.Done():
 		return 0, io.ErrClosedPipe
@@ -73,7 +104,7 @@ func (u *udpConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
 		PacketID:  0,
 		FragID:    0,
 		FragCount: 1,
-		Addr:      addr.String(),
+		Addr:      ap.String(),
 		Data:      b,
 	}
 	buf := pool.GetBuffer(protocol.MaxUDPSize)

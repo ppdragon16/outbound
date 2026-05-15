@@ -194,13 +194,21 @@ func (c *stream) SetWriteDeadline(t time.Time) error {
 type packetStream struct {
 	*stream
 
-	addr         string
+	addr         netip.AddrPort
 	udpWriteAddr atomic.Bool
 }
 
 func (ps *packetStream) ReadFrom(p []byte) (int, net.Addr, error) {
+	n, ap, err := ps.ReadFromAddrPort(p)
+	if err != nil {
+		return 0, nil, err
+	}
+	return n, net.UDPAddrFromAddrPort(ap), nil
+}
+
+func (ps *packetStream) ReadFromAddrPort(p []byte) (int, netip.AddrPort, error) {
 	if ps.closed.Load() {
-		return 0, nil, net.ErrClosed
+		return 0, netip.AddrPort{}, net.ErrClosed
 	}
 	ps.readMu.Lock()
 	defer ps.readMu.Unlock()
@@ -217,10 +225,10 @@ func (ps *packetStream) ReadFrom(p []byte) (int, net.Addr, error) {
 		ps.readCond.Wait()
 	}
 	if ps.readErr != nil {
-		return 0, nil, ps.readErr
+		return 0, netip.AddrPort{}, ps.readErr
 	}
 	if ps.chunkAvail() < 2 {
-		return 0, nil, io.EOF
+		return 0, netip.AddrPort{}, io.EOF
 	}
 
 	// Peek the 2-byte length prefix.
@@ -240,20 +248,20 @@ func (ps *packetStream) ReadFrom(p []byte) (int, net.Addr, error) {
 		ps.readCond.Wait()
 	}
 	if ps.readErr != nil {
-		return 0, nil, ps.readErr
+		return 0, netip.AddrPort{}, ps.readErr
 	}
 	if ps.chunkAvail() < int(length)+2 {
-		return 0, nil, io.ErrUnexpectedEOF
+		return 0, netip.AddrPort{}, io.ErrUnexpectedEOF
 	}
 
 	if len(p) < int(length) {
-		return 0, nil, io.ErrShortBuffer
+		return 0, netip.AddrPort{}, io.ErrShortBuffer
 	}
 
 	// Discard the 2-byte length prefix, then copy the payload.
 	ps.discardChunk(2)
 	n := ps.copyFromChunks(p[:length])
-	return n, net.UDPAddrFromAddrPort(netip.MustParseAddrPort(ps.addr)), nil
+	return n, ps.addr, nil
 }
 
 // chunkAvail returns the total available bytes in the chunk chain.
@@ -318,7 +326,26 @@ func (ps *packetStream) copyFromChunks(p []byte) int {
 	return total
 }
 
+func ToAddrPort(addr net.Addr) (netip.AddrPort, error) {
+	switch v := addr.(type) {
+	case *net.UDPAddr:
+		return v.AddrPort(), nil
+	case *net.TCPAddr:
+		return v.AddrPort(), nil
+	default:
+		return netip.ParseAddrPort(addr.String())
+	}
+}
+
 func (ps *packetStream) WriteTo(p []byte, addr net.Addr) (n int, err error) {
+	ap, err := ToAddrPort(addr)
+	if err != nil {
+		return 0, err
+	}
+	return ps.WriteToAddrPort(p, ap)
+}
+
+func (ps *packetStream) WriteToAddrPort(p []byte, ap netip.AddrPort) (n int, err error) {
 	if ps.closed.Load() {
 		return 0, net.ErrClosed
 	}
@@ -326,16 +353,29 @@ func (ps *packetStream) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	defer ps.writeMu.Unlock()
 
 	if ps.udpWriteAddr.CompareAndSwap(false, true) {
-		tgtAddr, err := socks.ParseAddr(addr.String())
-		if err != nil {
-			return 0, err
+		addr := ap.Addr()
+		var tgtAddrLen int
+		if addr.Is4() {
+			tgtAddrLen = 7 // ATYP(1) + IPv4(4) + Port(2)
+		} else {
+			tgtAddrLen = 19 // ATYP(1) + IPv6(16) + Port(2)
 		}
-		data := pool.GetBuffer(1 + len(tgtAddr) + 2 + len(p))
+		data := pool.GetBuffer(1 + tgtAddrLen + 2 + len(p))
 		defer pool.PutBuffer(data)
 		data[0] = 1
-		copy(data[1:], tgtAddr)
-		binary.BigEndian.PutUint16(data[1+len(tgtAddr):], uint16(len(p)))
-		copy(data[1+len(tgtAddr)+2:], p)
+		if addr.Is4() {
+			data[1] = socks.ATypIP4
+			ip4 := addr.As4()
+			copy(data[2:6], ip4[:])
+			binary.BigEndian.PutUint16(data[6:8], ap.Port())
+		} else {
+			data[1] = socks.ATypIP6
+			ip16 := addr.As16()
+			copy(data[2:18], ip16[:])
+			binary.BigEndian.PutUint16(data[18:20], ap.Port())
+		}
+		binary.BigEndian.PutUint16(data[1+tgtAddrLen:], uint16(len(p)))
+		copy(data[1+tgtAddrLen+2:], p)
 
 		frame := newFrame(cmdPSH, ps.id)
 		frame.data = data

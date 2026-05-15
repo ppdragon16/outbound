@@ -11,15 +11,26 @@ import (
 	"github.com/daeuniverse/outbound/pool"
 )
 
+func ToAddrPort(addr net.Addr) (netip.AddrPort, error) {
+	switch v := addr.(type) {
+	case *net.UDPAddr:
+		return v.AddrPort(), nil
+	case *net.TCPAddr:
+		return v.AddrPort(), nil
+	default:
+		return netip.ParseAddrPort(addr.String())
+	}
+}
+
 func (c *Conn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	n, ap, err := c.readFromAddrPort(p)
+	n, ap, err := c.ReadFromAddrPort(p)
 	if err != nil {
 		return 0, nil, err
 	}
 	return n, net.UDPAddrFromAddrPort(ap), nil
 }
 
-func (c *Conn) readFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error) {
+func (c *Conn) ReadFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error) {
 	c.readMutex.Lock()
 	defer c.readMutex.Unlock()
 	// FIXME: a compromise on Symmetric NAT
@@ -39,10 +50,14 @@ func (c *Conn) readFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error
 }
 
 func (c *Conn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	return c.writeToAddr(p, addr.String())
+	ap, aErr := ToAddrPort(addr)
+	if aErr != nil {
+		return 0, aErr
+	}
+	return c.WriteToAddrPort(p, ap)
 }
 
-func (c *Conn) writeToAddr(p []byte, addr string) (n int, err error) {
+func (c *Conn) WriteToAddrPort(p []byte, _ netip.AddrPort) (n int, err error) {
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
 	bLen := pool.GetBuffer(2)

@@ -23,6 +23,17 @@ type stringAddr string
 func (s stringAddr) Network() string { return "udp" }
 func (s stringAddr) String() string  { return string(s) }
 
+func ToAddrPort(addr net.Addr) (netip.AddrPort, error) {
+	switch v := addr.(type) {
+	case *net.UDPAddr:
+		return v.AddrPort(), nil
+	case *net.TCPAddr:
+		return v.AddrPort(), nil
+	default:
+		return netip.ParseAddrPort(addr.String())
+	}
+}
+
 func (c *PacketConn) Read(b []byte) (n int, err error) {
 	switch c.network {
 	case "tcp":
@@ -47,7 +58,7 @@ func (c *PacketConn) Write(b []byte) (n int, err error) {
 }
 
 func (c *PacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	n, ap, err := c.readFromAddrPort(p)
+	n, ap, err := c.ReadFromAddrPort(p)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -61,7 +72,7 @@ func (c *PacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 // +-------------------+-------------------+
 // |   Length Data     |     Payload      |
 // +-------------------+-------------------+
-func (c *PacketConn) readFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error) {
+func (c *PacketConn) ReadFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error) {
 	// Read frame length (2 bytes)
 	var frameLengthBytes [2]byte
 	if _, err = io.ReadFull(c.Conn, frameLengthBytes[:]); err != nil {
@@ -99,7 +110,7 @@ func (c *PacketConn) readFromAddrPort(p []byte) (n int, addr netip.AddrPort, err
 	}
 
 	if frameHeaderBytes[3]&1 != 1 {
-		return c.readFromAddrPort(p)
+		return c.ReadFromAddrPort(p)
 	}
 
 	// Read length and payload
@@ -134,8 +145,16 @@ func (c *PacketConn) readFromAddrPort(p []byte) (n int, addr netip.AddrPort, err
 // |   Data Length (2B)     |      Payload          |
 // +------------------------+------------------------+
 func (pc *PacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
+	ap, aErr := ToAddrPort(addr)
+	if aErr != nil {
+		return 0, aErr
+	}
+	return pc.WriteToAddrPort(p, ap)
+}
+
+func (pc *PacketConn) WriteToAddrPort(p []byte, ap netip.AddrPort) (n int, err error) {
 	dataLen := len(p)
-	prefix, err := pc.prefixPacket(addr.String())
+	prefix, err := pc.prefixPacketFromAddrPort(ap)
 	if err != nil {
 		return 0, err
 	}
@@ -147,15 +166,11 @@ func (pc *PacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	return len(p), nil
 }
 
-func (pc *PacketConn) prefixPacket(addr string) ([]byte, error) {
-	address, err := netip.ParseAddrPort(addr)
-	if err != nil {
-		return nil, err
-	}
+func (pc *PacketConn) prefixPacketFromAddrPort(address netip.AddrPort) ([]byte, error) {
 	packetAddrLen := IPAddrToPacketAddrLength(address)
 	prefix := pool.GetBuffer(7 + packetAddrLen)
 	l := len(prefix) - 2
-	err = PutPacketAddr(prefix[7:], address)
+	err := PutPacketAddr(prefix[7:], address)
 	if err != nil {
 		return nil, err
 	}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -87,9 +88,13 @@ func (s *session) newPacketStream(addr, packetAddr string) (*packetStream, error
 	if err != nil {
 		return nil, err
 	}
+	ap, err := netip.ParseAddrPort(packetAddr)
+	if err != nil {
+		return nil, err
+	}
 	return &packetStream{
 		stream: stream,
-		addr:   packetAddr,
+		addr:   ap,
 	}, nil
 }
 

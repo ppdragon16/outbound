@@ -9,15 +9,26 @@ import (
 	"github.com/daeuniverse/outbound/pool"
 )
 
+func ToAddrPort(addr net.Addr) (netip.AddrPort, error) {
+	switch v := addr.(type) {
+	case *net.UDPAddr:
+		return v.AddrPort(), nil
+	case *net.TCPAddr:
+		return v.AddrPort(), nil
+	default:
+		return netip.ParseAddrPort(addr.String())
+	}
+}
+
 func (c *Conn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
-	n, ap, err := c.readFromAddrPort(p)
+	n, ap, err := c.ReadFromAddrPort(p)
 	if err != nil {
 		return 0, nil, err
 	}
 	return n, net.UDPAddrFromAddrPort(ap), nil
 }
 
-func (c *Conn) readFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error) {
+func (c *Conn) ReadFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error) {
 	buf := pool.GetBuffer(MaxUDPSize)
 	defer pool.PutBuffer(buf)
 	n, err = c.read(buf)
@@ -47,24 +58,20 @@ func (c *Conn) readFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error
 }
 
 func (c *Conn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
-	return c.writeToAddr(p, addr.String())
+	ap, aErr := ToAddrPort(addr)
+	if aErr != nil {
+		return 0, aErr
+	}
+	return c.WriteToAddrPort(p, ap)
 }
 
-func (c *Conn) writeToAddr(p []byte, addr string) (n int, err error) {
+func (c *Conn) WriteToAddrPort(p []byte, ap netip.AddrPort) (n int, err error) {
 	if c.metadata.IsPacketAddr() {
-		// VMess packet addr does not support domain.
-		address, err := common.ResolveUDPAddr(addr)
-		if err != nil {
-			return 0, err
-		}
-		packetAddrLen := UDPAddrToPacketAddrLength(address)
+		packetAddrLen := AddrPortToPacketAddrLength(ap)
 		buf := pool.GetBuffer(packetAddrLen + len(p))
 		defer pool.PutBuffer(buf)
 
-		err = PutPacketAddr(buf, address)
-		if err != nil {
-			return 0, err
-		}
+		PutPacketAddrFromAddrPort(buf, ap)
 		copy(buf[packetAddrLen:], p)
 		return c.write(buf)
 	}
