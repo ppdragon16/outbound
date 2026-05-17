@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/daeuniverse/outbound/common"
@@ -263,7 +264,7 @@ func ParseVlessURL(vless string) (data *V2Ray, err error) {
 		TLS:           u.Query().Get("security"),
 		Flow:          u.Query().Get("flow"),
 		Alpn:          u.Query().Get("alpn"),
-		AllowInsecure: false,
+		AllowInsecure: parseAllowInsecure(u.Query()),
 		Fingerprint:   u.Query().Get("fp"),
 		PublicKey:     u.Query().Get("pbk"),
 		ShortId:       u.Query().Get("sid"),
@@ -348,7 +349,7 @@ func ParseVmessURL(vmess string) (data *V2Ray, err error) {
 			Aid:           aid,
 			TLS:           map[string]string{"1": "tls"}[q.Get("tls")],
 			SNI:           sni,
-			AllowInsecure: false,
+			AllowInsecure: parseAllowInsecure(q),
 		}
 		if info.Net == "websocket" {
 			info.Net = "ws"
@@ -369,6 +370,20 @@ func ParseVmessURL(vmess string) (data *V2Ray, err error) {
 	}
 	info.Protocol = "vmess"
 	return &info, nil
+}
+
+func parseAllowInsecure(q url.Values) bool {
+	insecure, _ := strconv.ParseBool(q.Get("allowInsecure"))
+	if !insecure {
+		insecure, _ = strconv.ParseBool(q.Get("allow_insecure"))
+	}
+	if !insecure {
+		insecure, _ = strconv.ParseBool(q.Get("insecure"))
+	}
+	if !insecure {
+		insecure, _ = strconv.ParseBool(q.Get("skipVerify"))
+	}
+	return insecure
 }
 
 func (s *V2Ray) ExportToURL() string {
@@ -401,6 +416,9 @@ func (s *V2Ray) ExportToURL() string {
 			common.SetValue(&query, "alpn", s.Alpn)
 			common.SetValue(&query, "flow", s.Flow)
 			common.SetValue(&query, "fp", s.Fingerprint)
+			if s.AllowInsecure {
+				common.SetValue(&query, "allowInsecure", "1")
+			}
 		}
 
 		U := url.URL{
