@@ -416,6 +416,9 @@ func (s *V2Ray) ExportToURL() string {
 			common.SetValue(&query, "alpn", s.Alpn)
 			common.SetValue(&query, "flow", s.Flow)
 			common.SetValue(&query, "fp", s.Fingerprint)
+			common.SetValue(&query, "pbk", s.PublicKey)
+			common.SetValue(&query, "sid", s.ShortId)
+			common.SetValue(&query, "spx", s.SpiderX)
 			if s.AllowInsecure {
 				common.SetValue(&query, "allowInsecure", "1")
 			}
