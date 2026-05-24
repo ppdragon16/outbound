@@ -25,6 +25,7 @@ func NewDialTimeoutContext() (context.Context, context.CancelFunc) {
 type Dialer interface {
 	Alive() bool
 	Connect() error
+	Disconnect() error
 	DialContext(ctx context.Context, network, address string) (net.Conn, error)
 	ListenPacket(ctx context.Context, address string) (net.PacketConn, error)
 }

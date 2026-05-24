@@ -48,6 +48,7 @@ func (s *SmuxConfig) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dial
 }
 
 func (s *Smux) Connect() (err error) {
+	_ = s.Disconnect()
 	ctx, cancel := netproxy.NewDialTimeoutContext()
 	defer cancel()
 	conn, err := s.Dialer.DialContext(ctx, "tcp", "sp.mux.sing-box.arpa:444")
@@ -64,6 +65,15 @@ func (s *Smux) Connect() (err error) {
 	}
 	s.session, _ = smux.Client(conn, nil)
 	return
+}
+
+func (s *Smux) Disconnect() error {
+	if s.session != nil {
+		err := s.session.Close()
+		s.session = nil
+		return err
+	}
+	return nil
 }
 
 func (s *Smux) Alive() bool {

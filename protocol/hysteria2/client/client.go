@@ -140,6 +140,7 @@ func (c *Client) Alive() bool {
 }
 
 func (c *Client) Connect() (err error) {
+	c.close()
 	ctx, cancel := netproxy.NewDialTimeoutContext()
 	defer func() {
 		cancel()
@@ -229,14 +230,22 @@ func (c *Client) Connect() (err error) {
 	return nil
 }
 
+func (c *Client) Disconnect() error {
+	c.close()
+	return nil
+}
+
 func (c *Client) close() {
 	if c.pktConn != nil {
 		c.pktConn.Close()
+		c.pktConn = nil
 	}
 	if c.conn != nil {
 		c.conn.CloseWithError(closeErrCodeProtocolError, "")
+		c.conn = nil
 	}
 	if c.udpSM != nil {
 		c.udpSM.Close()
+		c.udpSM = nil
 	}
 }

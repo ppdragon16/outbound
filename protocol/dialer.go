@@ -31,6 +31,10 @@ func (d *StatelessDialer) Connect() (err error) {
 	return d.ParentDialer.Connect()
 }
 
+func (d *StatelessDialer) Disconnect() error {
+	return d.ParentDialer.Disconnect()
+}
+
 func (d *StatelessDialer) Alive() bool {
 	return d.ParentDialer.Alive()
 }

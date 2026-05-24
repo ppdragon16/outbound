@@ -36,6 +36,10 @@ func (d *blockDialer) Connect() error {
 	return nil
 }
 
+func (d *blockDialer) Disconnect() error {
+	return nil
+}
+
 func (d *blockDialer) Alive() bool {
 	return true
 }

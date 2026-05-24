@@ -100,6 +100,10 @@ func (d *directDialer) Connect() error {
 	return nil
 }
 
+func (d *directDialer) Disconnect() error {
+	return nil
+}
+
 func (d *directDialer) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
 	if network != "tcp" && network != "udp" {
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
