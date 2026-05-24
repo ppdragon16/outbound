@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/dialer"
@@ -33,6 +34,7 @@ type Smux struct {
 	Dialer         netproxy.Dialer
 	PassthroughUdp bool
 
+	mu      sync.Mutex
 	session *smux.Session
 }
 
@@ -48,7 +50,14 @@ func (s *SmuxConfig) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dial
 }
 
 func (s *Smux) Connect() (err error) {
-	_ = s.Disconnect()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.session != nil {
+		s.session.Close()
+		s.session = nil
+	}
+
 	ctx, cancel := netproxy.NewDialTimeoutContext()
 	defer cancel()
 	conn, err := s.Dialer.DialContext(ctx, "tcp", "sp.mux.sing-box.arpa:444")
@@ -68,6 +77,9 @@ func (s *Smux) Connect() (err error) {
 }
 
 func (s *Smux) Disconnect() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.session != nil {
 		err := s.session.Close()
 		s.session = nil
@@ -80,6 +92,8 @@ func (s *Smux) Alive() bool {
 	if !s.Dialer.Alive() {
 		return false
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.session == nil {
 		return false
 	}
@@ -92,7 +106,13 @@ func (s *Smux) Alive() bool {
 func (s *Smux) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
 	switch network {
 	case "tcp":
-		stream, err := s.session.OpenStream()
+		s.mu.Lock()
+		session := s.session
+		s.mu.Unlock()
+		if session == nil {
+			return nil, net.ErrClosed
+		}
+		stream, err := session.OpenStream()
 		if err != nil {
 			return nil, err
 		}
@@ -112,7 +132,13 @@ func (s *Smux) DialContext(ctx context.Context, network, addr string) (c net.Con
 }
 
 func (s *Smux) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
-	stream, err := s.session.OpenStream()
+	s.mu.Lock()
+	session := s.session
+	s.mu.Unlock()
+	if session == nil {
+		return nil, net.ErrClosed
+	}
+	stream, err := session.OpenStream()
 	if err != nil {
 		return nil, err
 	}

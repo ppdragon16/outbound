@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"net"
 	"net/http"
+	"sync"
 
 	"github.com/samber/oops"
 
@@ -31,6 +32,7 @@ type HandshakeInfo struct {
 type Client struct {
 	config *Config
 
+	mu      sync.Mutex
 	pktConn net.PacketConn
 	conn    quic.Connection
 	udpSM   *udpSessionManager
@@ -47,7 +49,13 @@ func NewClient(config *Config) (*Client, error) {
 
 // openStream wraps the stream with QStream, which handles Close() properly
 func (c *Client) OpenStream(ctx context.Context) (*utils.QStream, error) {
-	stream, err := c.conn.OpenStreamSync(ctx)
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return nil, net.ErrClosed
+	}
+	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -60,14 +68,17 @@ func (c *Client) DialConn(stream *utils.QStream, addr string) (net.Conn, error) 
 	if err != nil {
 		return nil, err
 	}
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
 	if c.config.FastOpen {
 		// Don't wait for the response when fast open is enabled.
 		// Return the connection immediately, defer the response handling
 		// to the first Read() call.
 		return &tcpConn{
 			Orig:             stream,
-			PseudoLocalAddr:  c.conn.LocalAddr(),
-			PseudoRemoteAddr: c.conn.RemoteAddr(),
+			PseudoLocalAddr:  conn.LocalAddr(),
+			PseudoRemoteAddr: conn.RemoteAddr(),
 			Established:      false,
 		}, nil
 	}
@@ -81,17 +92,20 @@ func (c *Client) DialConn(stream *utils.QStream, addr string) (net.Conn, error) 
 	}
 	return &tcpConn{
 		Orig:             stream,
-		PseudoLocalAddr:  c.conn.LocalAddr(),
-		PseudoRemoteAddr: c.conn.RemoteAddr(),
+		PseudoLocalAddr:  conn.LocalAddr(),
+		PseudoRemoteAddr: conn.RemoteAddr(),
 		Established:      true,
 	}, nil
 }
 
 func (c *Client) ListenPacket(_ context.Context, _ string) (net.PacketConn, error) {
-	if c.udpSM == nil {
+	c.mu.Lock()
+	udpSM := c.udpSM
+	c.mu.Unlock()
+	if udpSM == nil {
 		return nil, oops.In("Hysteria2").New("UDP not enabled")
 	}
-	return c.udpSM.NewUDP()
+	return udpSM.NewUDP()
 }
 
 func (c *Client) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -125,6 +139,8 @@ func (c *Client) Alive() bool {
 	if !c.config.NextDialer.Alive() {
 		return false
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.conn == nil {
 		return false
 	}
@@ -140,7 +156,11 @@ func (c *Client) Alive() bool {
 }
 
 func (c *Client) Connect() (err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.close()
+
 	ctx, cancel := netproxy.NewDialTimeoutContext()
 	defer func() {
 		cancel()
@@ -231,6 +251,8 @@ func (c *Client) Connect() (err error) {
 }
 
 func (c *Client) Disconnect() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.close()
 	return nil
 }
