@@ -17,6 +17,7 @@ const (
 	defaultConnReceiveWindow   = defaultStreamReceiveWindow * 5 / 2 // 20MB
 	defaultMaxIdleTimeout      = 30 * time.Second
 	defaultKeepAlivePeriod     = 10 * time.Second
+	defaultHandshakeIdleTimeout = 10 * time.Second
 )
 
 type Config struct {
@@ -70,6 +71,11 @@ func (c *Config) verifyAndFill() error {
 		c.QUICConfig.KeepAlivePeriod = defaultKeepAlivePeriod
 	} else if c.QUICConfig.KeepAlivePeriod < 2*time.Second || c.QUICConfig.KeepAlivePeriod > 60*time.Second {
 		return oops.In("Hysteria2 Config Verify").With("field", "QUICConfig.KeepAlivePeriod").With("reason", "must be between 2s and 60s").New("invalid config")
+	}
+	if c.QUICConfig.HandshakeIdleTimeout == 0 {
+		c.QUICConfig.HandshakeIdleTimeout = defaultHandshakeIdleTimeout
+	} else if c.QUICConfig.HandshakeIdleTimeout < 4*time.Second || c.QUICConfig.HandshakeIdleTimeout > 30*time.Second {
+		return oops.In("Hysteria2 Config Verify").With("field", "QUICConfig.HandshakeIdleTimeout").With("reason", "must be between 4s and 30s").New("invalid config")
 	}
 	c.QUICConfig.DisablePathMTUDiscovery = c.QUICConfig.DisablePathMTUDiscovery || pmtud.DisablePathMTUDiscovery
 	c.QUICConfig.EnableDatagrams = true
