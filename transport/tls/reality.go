@@ -111,8 +111,8 @@ func NewReality(s string, d netproxy.Dialer) (*Reality, error) {
 	query := u.Query()
 	x.serverName = query.Get("sni")
 	if sidStr := query.Get("sid"); sidStr != "" {
-		n, err := hex.Decode(x.shortId[:], []byte(sidStr))
-		if err != nil || n != 8 {
+		_, err := hex.Decode(x.shortId[:], []byte(sidStr))
+		if err != nil {
 			return nil, fmt.Errorf("invalid reality sid")
 		}
 	}
