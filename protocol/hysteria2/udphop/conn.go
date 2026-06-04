@@ -3,7 +3,6 @@ package udphop
 import (
 	"context"
 	"errors"
-	"math/rand"
 	"net"
 	"sync"
 	"syscall"
@@ -23,7 +22,10 @@ const (
 type udpHopPacketConn struct {
 	HopInterval time.Duration
 
-	addrs []net.Addr
+	// addr is the source of port range and IP. Random ports are picked
+	// on demand via addr.PickRandomAddr() rather than pre-expanding into
+	// a slice — that would be ~11 KiB for "60000-65530".
+	addr *UDPHopAddr
 
 	dialFunc dialFunc
 
@@ -55,20 +57,18 @@ func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc d
 	} else if hopInterval < 5*time.Second {
 		return nil, errors.New("hop interval must be at least 5 seconds")
 	}
-	addrs, err := addr.addrs()
-	if err != nil {
-		return nil, err
+	if addr.TotalPorts() == 0 {
+		return nil, InvalidPortError{addr.PortStr}
 	}
 
-	newAddrIndex := rand.Intn(len(addrs))
-	curConn, err := dialFunc(addrs[newAddrIndex])
+	curConn, err := dialFunc(addr.PickRandomAddr())
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	hConn := &udpHopPacketConn{
 		HopInterval: hopInterval,
-		addrs:       addrs,
+		addr:        addr,
 		dialFunc:    dialFunc,
 		currentConn: curConn,
 		recvQueue:   make(chan *udpPacket, packetQueueSize),
@@ -121,8 +121,7 @@ func (u *udpHopPacketConn) hopLoop() {
 func (u *udpHopPacketConn) hop() {
 	u.connMutex.Lock()
 	defer u.connMutex.Unlock()
-	newAddrIndex := rand.Intn(len(u.addrs))
-	newConn, err := u.dialFunc(u.addrs[newAddrIndex])
+	newConn, err := u.dialFunc(u.addr.PickRandomAddr())
 	if err != nil {
 		// Could be temporary, just skip this hop
 		return

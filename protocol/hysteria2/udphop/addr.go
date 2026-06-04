@@ -2,6 +2,7 @@ package udphop
 
 import (
 	"fmt"
+	"math/rand"
 	"net"
 	"sort"
 	"strconv"
@@ -18,10 +19,14 @@ func (e InvalidPortError) Error() string {
 	return fmt.Sprintf("%s is not a valid port number or range", e.PortStr)
 }
 
-// UDPHopAddr contains an IP address and a list of ports.
+// UDPHopAddr contains an IP address and a compact list of port ranges.
+// Ranges are kept in normalized form ([Start, End] inclusive, non-overlapping,
+// sorted) so memory cost is O(ranges), not O(ports). For a single
+// "60000-65530" range that's 4 bytes (one PortRange) instead of ~11 KiB
+// (5531 uint16 entries).
 type UDPHopAddr struct {
 	IP      net.IP
-	Ports   []uint16
+	Ranges  PortUnion
 	PortStr string
 }
 
@@ -33,17 +38,37 @@ func (a *UDPHopAddr) String() string {
 	return net.JoinHostPort(a.IP.String(), a.PortStr)
 }
 
-// addrs returns a list of net.Addr's, one for each port.
-func (a *UDPHopAddr) addrs() ([]net.Addr, error) {
-	var addrs []net.Addr
-	for _, port := range a.Ports {
-		addr := &net.UDPAddr{
-			IP:   a.IP,
-			Port: int(port),
-		}
-		addrs = append(addrs, addr)
+// TotalPorts returns the number of ports covered by all ranges.
+func (a *UDPHopAddr) TotalPorts() int {
+	total := 0
+	for _, r := range a.Ranges {
+		total += int(r.End) - int(r.Start) + 1
 	}
-	return addrs, nil
+	return total
+}
+
+// PickRandomAddr returns a uniformly-random *net.UDPAddr drawn from all
+// port ranges on this address's IP. Each port maps to exactly one offset
+// in [0, TotalPorts()), so the distribution is uniform.
+func (a *UDPHopAddr) PickRandomAddr() *net.UDPAddr {
+	total := a.TotalPorts()
+	if total == 0 {
+		return nil
+	}
+	target := rand.Intn(total)
+	var port uint16
+	for _, r := range a.Ranges {
+		size := int(r.End) - int(r.Start) + 1
+		if target < size {
+			port = r.Start + uint16(target)
+			break
+		}
+		target -= size
+	}
+	return &net.UDPAddr{
+		IP:   a.IP,
+		Port: int(port),
+	}
 }
 
 func ResolveUDPHopAddr(addr string) (*UDPHopAddr, error) {
@@ -55,18 +80,18 @@ func ResolveUDPHopAddr(addr string) (*UDPHopAddr, error) {
 	if err != nil {
 		return nil, err
 	}
-	result := &UDPHopAddr{
-		IP:      ip.IP,
-		PortStr: portStr,
-	}
 
 	pu := ParsePortUnion(portStr)
 	if pu == nil {
 		return nil, InvalidPortError{portStr}
 	}
-	result.Ports = pu.Ports()
-
-	return result, nil
+	// Store the compact ranges directly — no need to expand to []uint16
+	// here. UDPHopAddr.PickRandomAddr works on the ranges.
+	return &UDPHopAddr{
+		IP:      ip.IP,
+		Ranges:  pu,
+		PortStr: portStr,
+	}, nil
 }
 
 // PortUnion is a collection of multiple port ranges.
