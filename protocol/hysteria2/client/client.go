@@ -33,10 +33,11 @@ type HandshakeInfo struct {
 type Client struct {
 	config *Config
 
-	mu      sync.Mutex
-	pktConn net.PacketConn
-	conn    quic.Connection
-	udpSM   *udpSessionManager
+	mu            sync.Mutex
+	pktConn       net.PacketConn
+	conn          quic.Connection
+	udpSM         *udpSessionManager
+	connectCancel context.CancelFunc // set during Connect, so Disconnect can abort the handshake
 }
 
 func NewClient(config *Config) (*Client, error) {
@@ -170,47 +171,77 @@ const (
 )
 
 func (c *Client) Connect() (err error) {
+	// Tear down any existing connection while holding the lock.
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	c.close()
 
-	// Outer timeout (8s) bounds the user-visible dial latency.
-	ctx, cancel := netproxy.NewDialTimeoutContext()
+	// Create a context that combines the dial timeout (8s) with
+	// cancellation by Disconnect. The timeout still bounds the
+	// handshake when Disconnect is not called.
+	ctx, cancel := context.WithTimeout(context.Background(), netproxy.DialTimeout)
+	c.connectCancel = cancel
+	c.mu.Unlock()
+
 	defer func() {
 		cancel()
+
+		// Re-acquire the lock to commit or tear down state.
+		c.mu.Lock()
 		if err != nil {
 			c.close()
 		}
+		c.connectCancel = nil
+		c.mu.Unlock()
 	}()
 
+	var pktConn net.PacketConn
+	var conn quic.EarlyConnection
 	if c.config.Addr.Network() != "udphop" {
-		return c.connectSinglePort(ctx)
+		pktConn, conn, err = c.connectSinglePort(ctx)
+	} else {
+		pktConn, conn, err = c.connectPortHopping(ctx)
 	}
-	return c.connectPortHopping(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Commit the new connection state under the lock.
+	c.mu.Lock()
+	c.pktConn = pktConn
+	c.conn = conn
+	c.mu.Unlock()
+
+	return nil
 }
 
 // connectSinglePort performs one handshake on a non-port-hopping address.
 // No retry: if the single port doesn't work, the user must fix the URL.
-func (c *Client) connectSinglePort(ctx context.Context) (err error) {
+// On success returns the live pktConn and quic connection; the caller
+// commits them under the Client lock.
+func (c *Client) connectSinglePort(ctx context.Context) (pktConn net.PacketConn, conn quic.EarlyConnection, err error) {
 	attemptCtx, attemptCancel := context.WithTimeout(ctx, handshakeAttemptTimeout)
 	defer attemptCancel()
 
-	pktConn, err := c.config.NextDialer.ListenPacket(attemptCtx, c.config.Addr.String())
+	pktConn, err = c.config.NextDialer.ListenPacket(attemptCtx, c.config.Addr.String())
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	c.pktConn = pktConn
+	// Capture pktConn in a local so the deferred cleanup is immune to
+	// named-return-value reassignment (e.g. "return nil, nil, herr"
+	// sets pktConn=nil before the defer runs).
+	cleanupPktConn := pktConn
+	defer func() {
+		if err != nil {
+			cleanupPktConn.Close()
+		}
+	}()
 
 	conn, resp, herr := c.tryHandshake(attemptCtx, pktConn, c.config.Addr)
 	if herr != nil {
-		pktConn.Close()
-		c.pktConn = nil
-		return herr
+		return nil, nil, herr
 	}
 
-	c.conn = conn
-	return c.applyPostHandshake(resp)
+	return pktConn, conn, c.applyPostHandshake(resp, conn)
 }
 
 // connectPortHopping retries the QUIC handshake up to handshakeMaxAttempts
@@ -218,10 +249,12 @@ func (c *Client) connectSinglePort(ctx context.Context) (err error) {
 // port from the range). The first attempt that completes wins; on failure
 // we close the previous pktConn (releasing its UDP socket and terminating
 // its QUIC connection) before the next attempt.
-func (c *Client) connectPortHopping(ctx context.Context) (err error) {
+// On success returns the live pktConn and quic connection; the caller
+// commits them under the Client lock.
+func (c *Client) connectPortHopping(ctx context.Context) (pktConn net.PacketConn, conn quic.EarlyConnection, err error) {
 	udpHopAddr, ok := c.config.Addr.(*udphop.UDPHopAddr)
 	if !ok {
-		return oops.In("HTTP3 Handshake").
+		return nil, nil, oops.In("HTTP3 Handshake").
 			New("hysteria2: port-hopping address has unexpected type")
 	}
 
@@ -243,15 +276,14 @@ func (c *Client) connectPortHopping(ctx context.Context) (err error) {
 		}
 
 		// Drop any previous attempt's resources before constructing a fresh one.
-		if c.pktConn != nil {
-			c.pktConn.Close()
-			c.pktConn = nil
+		if pktConn != nil {
+			pktConn.Close()
+			pktConn = nil
 		}
-		c.conn = nil
 
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, handshakeAttemptTimeout)
 
-		c.pktConn, err = udphop.NewUDPHopPacketConn(
+		pktConn, err = udphop.NewUDPHopPacketConn(
 			udpHopAddr,
 			c.config.UDPHopInterval,
 			dialFunc,
@@ -262,27 +294,26 @@ func (c *Client) connectPortHopping(ctx context.Context) (err error) {
 			continue
 		}
 
-		conn, resp, herr := c.tryHandshake(attemptCtx, c.pktConn, c.config.Addr)
+		conn, resp, herr := c.tryHandshake(attemptCtx, pktConn, c.config.Addr)
 		attemptCancel()
 		if herr != nil {
 			lastErr = herr
-			c.pktConn.Close()
-			c.pktConn = nil
+			pktConn.Close()
+			pktConn = nil
 			continue
 		}
 
 		// Handshake succeeded — commit and apply post-handshake config.
-		c.conn = conn
-		return c.applyPostHandshake(resp)
+		return pktConn, conn, c.applyPostHandshake(resp, conn)
 	}
 
 	if lastErr != nil {
-		return oops.In("HTTP3 Handshake").
+		return nil, nil, oops.In("HTTP3 Handshake").
 			With("attempts", handshakeMaxAttempts).
 			With("portHopping", true).
 			Wrap(lastErr)
 	}
-	return oops.In("HTTP3 Handshake").
+	return nil, nil, oops.In("HTTP3 Handshake").
 		With("attempts", handshakeMaxAttempts).
 		With("portHopping", true).
 		New("hysteria2: no port in range responded within dial budget")
@@ -335,14 +366,14 @@ func (c *Client) tryHandshake(ctx context.Context, pktConn net.PacketConn, remot
 
 // applyPostHandshake configures congestion control and the optional UDP
 // session manager based on the auth response. Called after a successful
-// handshake once c.conn and c.pktConn have been committed.
-func (c *Client) applyPostHandshake(resp *http.Response) error {
+// handshake before c.conn has been committed.
+func (c *Client) applyPostHandshake(resp *http.Response, conn quic.Connection) error {
 	authResp := protocol.AuthResponseFromHeader(resp.Header)
 	var actualTx uint64
 	if authResp.RxAuto {
 		// Server asks client to use bandwidth detection,
 		// ignore local bandwidth config and use BBR
-		congestion.UseBBR(c.conn)
+		congestion.UseBBR(conn)
 	} else {
 		// actualTx = min(serverRx, clientTx)
 		actualTx = authResp.Rx
@@ -351,22 +382,31 @@ func (c *Client) applyPostHandshake(resp *http.Response) error {
 			actualTx = c.config.BandwidthConfig.MaxTx
 		}
 		if actualTx > 0 {
-			congestion.UseBrutal(c.conn, actualTx)
+			congestion.UseBrutal(conn, actualTx)
 		} else {
 			// We don't know our own bandwidth either, use BBR
-			congestion.UseBBR(c.conn)
+			congestion.UseBBR(conn)
 		}
 	}
 	resp.Body.Close()
 
 	if authResp.UDPEnabled {
-		c.udpSM = newUDPSessionManager(c.conn)
+		c.udpSM = newUDPSessionManager(conn)
 	}
 
 	return nil
 }
 
 func (c *Client) Disconnect() error {
+	// If Connect() is in progress, cancel its context first so the
+	// handshake I/O returns promptly. Otherwise we would block on the
+	// mutex for up to DialTimeout (8s) waiting for Connect to give up.
+	c.mu.Lock()
+	if c.connectCancel != nil {
+		c.connectCancel()
+	}
+	c.mu.Unlock()
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.close()
