@@ -99,11 +99,15 @@ func (s *session) newPacketStream(addr, packetAddr string) (*packetStream, error
 }
 
 func (s *session) removeStream(sid uint32) {
+	// Hold streamLock across the close check + send so Close cannot
+	// observe the lock release and close the channel before we send.
+	// Close also holds streamLock while it closes closeStreamChan.
 	s.streamLock.Lock()
-	delete(s.streams, sid)
-	s.streamLock.Unlock()
+	defer s.streamLock.Unlock()
 
-	if s.Closed() {
+	delete(s.streams, sid)
+
+	if s.closed.Load() {
 		return
 	}
 	select {
@@ -222,8 +226,9 @@ func (s *session) Close() error {
 			s.streams[i].terminate()
 		}
 		s.streams = make(map[uint32]*stream)
-		// Hold streamLock while closing the channel so removeStream
-		// cannot observe closed=true and then send to a closed channel.
+		// Hold streamLock while closing the channel: removeStream
+		// holds the same lock across its closed-check + send, so this
+		// cannot interleave between its check and send.
 		close(s.closeStreamChan)
 		s.streamLock.Unlock()
 		return s.conn.Close()
