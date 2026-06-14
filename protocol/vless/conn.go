@@ -45,6 +45,12 @@ type Conn struct {
 	addonsBytes []byte
 }
 
+// Unwrap returns the underlying net.Conn, allowing transport layers
+// (e.g. mux keepalive) to traverse down to the raw TCP connection.
+func (c *Conn) Unwrap() net.Conn {
+	return c.Conn
+}
+
 func NewConn(conn net.Conn, metadata Metadata, cmdKey []byte) (c *Conn, err error) {
 
 	// DO NOT use pool here because Close() cannot interrupt the reading or writing, which will modify the value of the pool buffer.

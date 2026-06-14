@@ -25,6 +25,7 @@ type Dialer struct {
 	nextDialer   netproxy.Dialer
 	flow         string
 	xudp         bool
+	tcpMux       bool
 	key          []byte
 }
 
@@ -58,6 +59,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		nextDialer:   nextDialer,
 		flow:         flowStr,
 		xudp:         flowStr == XRV,
+		tcpMux:       header.Flags&protocol.Flags_VLess_TcpMux != 0,
 		key:          id,
 	}, nil
 }
@@ -82,7 +84,7 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 				Network:  network,
 			},
 			Flow: d.flow,
-			Mux:  network == "udp" && d.xudp,
+			Mux:  (network == "udp" && d.xudp) || (d.tcpMux && network == "tcp"),
 		}, d.key)
 		if err != nil {
 			conn.Close()

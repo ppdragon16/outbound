@@ -17,6 +17,7 @@ type Flags uint64
 
 const (
 	Flags_VMess_UsePacketAddr = 1 << iota
+	Flags_VLess_TcpMux
 )
 
 const (
