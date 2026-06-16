@@ -1,19 +1,35 @@
 package mux
 
 import (
+	"encoding/binary"
 	"io"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/daeuniverse/outbound/pool"
 )
+
+// maxStreamBuffer is the maximum number of bytes a stream's queue can hold
+// before readData blocks, providing TCP backpressure.
+const maxStreamBuffer = 256 * 1024
+
+// bufNode is a node in the stream's data queue.
+type bufNode struct {
+	buf  []byte   // pool.GetBuffer(4096), len = valid bytes in this chunk
+	off  int      // bytes already consumed by Read
+	next *bufNode
+}
 
 type stream struct {
 	session *session
 	id      uint16
 
 	readMu   sync.Mutex
-	readBuf  []byte
+	head     *bufNode // first node (Read consumes from here)
+	tail     *bufNode // last node (readData appends here)
+	queued   int      // total unread bytes across all nodes
 	readEOF  bool
 	readErr  error
 	readCond *sync.Cond
@@ -55,11 +71,66 @@ func newStream(s *session, id uint16) *stream {
 	return st
 }
 
-func (st *stream) pushData(data []byte) {
-	st.readMu.Lock()
-	st.readBuf = append(st.readBuf, data...)
-	st.readCond.Signal()
-	st.readMu.Unlock()
+// readData reads a single data frame from reader: first the 2-byte
+// length, then the payload in 4KB chunks into the queue. Each chunk
+// is a pool buffer appended to the internal linked list.
+// Blocks if queued >= maxStreamBuffer until Read() drains data
+// or the stream is closed.
+//
+// On fatal I/O error the error is returned to the caller (session.run).
+// On stream-close the remaining bytes are drained from reader and nil
+// is returned (data discarded, session stays alive).
+func (st *stream) readData(reader io.Reader) error {
+	var dataLen [2]byte
+	if _, err := io.ReadFull(reader, dataLen[:]); err != nil {
+		return err
+	}
+	remain := int(binary.BigEndian.Uint16(dataLen[:]))
+	for remain > 0 {
+		st.readMu.Lock()
+		for st.queued >= maxStreamBuffer && st.readErr == nil {
+			st.readCond.Wait()
+		}
+		if st.readErr != nil {
+			st.readMu.Unlock()
+			_, _ = io.CopyN(io.Discard, reader, int64(remain))
+			return nil
+		}
+		st.readMu.Unlock()
+
+		chunk := min(remain, 4096)
+		buf := pool.GetBuffer(4096)[:chunk]
+		if _, err := io.ReadFull(reader, buf); err != nil {
+			pool.PutBuffer(buf)
+			return err
+		}
+
+		st.readMu.Lock()
+		node := &bufNode{buf: buf}
+		if st.tail == nil {
+			st.head = node
+		} else {
+			st.tail.next = node
+		}
+		st.tail = node
+		st.queued += chunk
+		remain -= chunk
+		st.readCond.Signal()
+		st.readMu.Unlock()
+	}
+	return nil
+}
+
+// drainQueue returns all queued pool buffers and resets the queue.
+// Must be called with readMu held.
+func (st *stream) drainQueue() {
+	for st.head != nil {
+		next := st.head.next
+		pool.PutBuffer(st.head.buf)
+		st.head = next
+	}
+	st.tail = nil
+	st.queued = 0
 }
 
 func (st *stream) closeRemote() {
@@ -76,6 +147,7 @@ func (st *stream) terminate() {
 		st.readErr = net.ErrClosed
 	}
 	st.readEOF = true
+	st.drainQueue()
 	st.readCond.Broadcast()
 	st.readMu.Unlock()
 }
@@ -97,7 +169,7 @@ func (st *stream) Read(b []byte) (n int, err error) {
 	st.readMu.Lock()
 	defer st.readMu.Unlock()
 
-	for len(st.readBuf) == 0 && !st.readEOF && st.readErr == nil {
+	for st.head == nil && !st.readEOF && st.readErr == nil {
 		if dl := st.readDeadline.Load(); dl != 0 && time.Now().UnixNano() > dl {
 			return 0, &errTimeout{}
 		}
@@ -106,14 +178,32 @@ func (st *stream) Read(b []byte) (n int, err error) {
 	}
 
 	if st.readErr != nil {
+		st.drainQueue()
 		return 0, st.readErr
 	}
-	if st.readEOF && len(st.readBuf) == 0 {
+	if st.readEOF && st.head == nil {
 		return 0, io.EOF
 	}
 
-	n = copy(b, st.readBuf)
-	st.readBuf = st.readBuf[n:]
+	for st.head != nil && n < len(b) {
+		node := st.head
+		m := copy(b[n:], node.buf[node.off:])
+		n += m
+		node.off += m
+		st.queued -= m
+
+		if node.off == len(node.buf) {
+			pool.PutBuffer(node.buf)
+			st.head = node.next
+			if st.head == nil {
+				st.tail = nil
+			}
+		}
+	}
+
+	// Wake up readData — it may be blocked waiting for queue space.
+	st.readCond.Signal()
+
 	return n, nil
 }
 
@@ -144,6 +234,17 @@ func (st *stream) Close() error {
 			_ = st.session.writeEnd(st.id)
 		}
 		st.closeRemote()
+
+		// Drain queue and set readErr to wake up readData if it is
+		// blocked waiting for buffer space. closeRemote only sets
+		// readEOF, which readData does not check.
+		st.readMu.Lock()
+		if st.readErr == nil {
+			st.readErr = net.ErrClosed
+		}
+		st.drainQueue()
+		st.readCond.Broadcast()
+		st.readMu.Unlock()
 	}
 	return nil
 }

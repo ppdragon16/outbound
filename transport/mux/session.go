@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/daeuniverse/outbound/pool"
 )
 
 type session struct {
@@ -113,19 +115,22 @@ func (s *session) run() {
 			if opts != OptionData {
 				continue
 			}
-			if _, err := io.ReadFull(s.conn, dataLen[:]); err != nil {
-				return
-			}
-			dLen := int(binary.BigEndian.Uint16(dataLen[:]))
-			buf := make([]byte, dLen)
-			if _, err := io.ReadFull(s.conn, buf); err != nil {
-				return
-			}
+
 			s.streamsMu.RLock()
 			st, ok := s.streams[sid]
 			s.streamsMu.RUnlock()
 			if ok {
-				st.pushData(buf)
+				if err := st.readData(s.conn); err != nil {
+					return
+				}
+			} else {
+				if _, err := io.ReadFull(s.conn, dataLen[:]); err != nil {
+					return
+				}
+				dLen := int(binary.BigEndian.Uint16(dataLen[:]))
+				if _, err := io.CopyN(io.Discard, s.conn, int64(dLen)); err != nil {
+					return
+				}
 			}
 
 		case SessionStatusEnd:
@@ -163,7 +168,7 @@ func (s *session) openStream(network string, host string, port int) (*stream, er
 		netType = 0x02
 	}
 
-	b := make([]byte, 0, 128)
+	b := pool.GetBuffer(512)[:0]
 	b = append(b, 0, 0) // metaLen placeholder
 	b = binary.BigEndian.AppendUint16(b, id)
 	b = append(b, SessionStatusNew, OptionNone)
@@ -187,6 +192,7 @@ func (s *session) openStream(network string, host string, port int) (*stream, er
 	s.writeMu.Lock()
 	_, err := s.conn.Write(b)
 	s.writeMu.Unlock()
+	pool.PutBuffer(b)
 	if err != nil {
 		s.streamsMu.Lock()
 		delete(s.streams, id)
@@ -254,7 +260,7 @@ func (s *session) ActiveStreams() int {
 }
 
 func (s *session) writeData(id uint16, data []byte) (int, error) {
-	frame := make([]byte, 8+len(data))
+	frame := pool.GetBuffer(8 + len(data))
 	binary.BigEndian.PutUint16(frame[0:2], 4)
 	binary.BigEndian.PutUint16(frame[2:4], id)
 	frame[4] = SessionStatusKeep
@@ -265,6 +271,7 @@ func (s *session) writeData(id uint16, data []byte) (int, error) {
 	s.writeMu.Lock()
 	_, err := s.conn.Write(frame)
 	s.writeMu.Unlock()
+	pool.PutBuffer(frame)
 	if err == nil {
 		s.writeFailed.Store(false)
 	}
@@ -272,14 +279,14 @@ func (s *session) writeData(id uint16, data []byte) (int, error) {
 }
 
 func (s *session) writeEnd(id uint16) error {
-	frame := make([]byte, 6)
+	var frame [6]byte
 	binary.BigEndian.PutUint16(frame[0:2], 4)
 	binary.BigEndian.PutUint16(frame[2:4], id)
 	frame[4] = SessionStatusEnd
 	frame[5] = OptionNone
 
 	s.writeMu.Lock()
-	_, err := s.conn.Write(frame)
+	_, err := s.conn.Write(frame[:])
 	s.writeMu.Unlock()
 	if err == nil {
 		s.writeFailed.Store(false)
@@ -293,10 +300,10 @@ func (s *session) Close() error {
 		s.cancelIdleTimer()
 
 		s.streamsMu.Lock()
-		for _, st := range s.streams {
+		for id, st := range s.streams {
 			st.terminate()
+			delete(s.streams, id)
 		}
-		s.streams = make(map[uint16]*stream)
 		s.streamsMu.Unlock()
 
 		return s.conn.Close()
