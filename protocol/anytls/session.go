@@ -275,11 +275,12 @@ func (s *session) writeConn(b []byte) (n int, err error) {
 				} else if remainPayloadLen > 0 {
 					paddingLen := l - remainPayloadLen - headerOverHeadSize
 					if paddingLen > 0 {
-						padding := make([]byte, headerOverHeadSize+paddingLen)
+						padding := pool.GetBuffer(headerOverHeadSize + paddingLen)
 						padding[0] = cmdWaste
 						binary.BigEndian.PutUint32(padding[1:5], 0)
 						binary.BigEndian.PutUint16(padding[5:7], uint16(paddingLen))
 						b = slices.Concat(b, padding)
+						pool.PutBuffer(padding)
 					}
 					_, err = s.conn.Write(b)
 					if err != nil {
@@ -288,11 +289,12 @@ func (s *session) writeConn(b []byte) (n int, err error) {
 					n += remainPayloadLen
 					b = nil
 				} else {
-					padding := make([]byte, headerOverHeadSize+l)
+					padding := pool.GetBuffer(headerOverHeadSize + l)
 					padding[0] = cmdWaste
 					binary.BigEndian.PutUint32(padding[1:5], 0)
 					binary.BigEndian.PutUint16(padding[5:7], uint16(l))
 					_, err = s.conn.Write(padding)
+					pool.PutBuffer(padding)
 					if err != nil {
 						return 0, err
 					}

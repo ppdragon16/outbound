@@ -92,11 +92,13 @@ func (c *PacketConn) ReadFromAddrPort(p []byte) (n int, addr netip.AddrPort, err
 	case 0x02:
 		// Keep
 		if frameLength > 4 {
-			addrData := make([]byte, frameLength-4)
+			addrData := pool.GetBuffer(int(frameLength - 4))
 			if _, err = io.ReadFull(c.Conn, addrData); err != nil {
+				pool.PutBuffer(addrData)
 				return 0, netip.AddrPort{}, err
 			}
 			addr, err = ReadPacketAddr(addrData)
+			pool.PutBuffer(addrData)
 			if err != nil {
 				return 0, netip.AddrPort{}, err
 			}

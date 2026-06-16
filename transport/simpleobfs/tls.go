@@ -29,18 +29,18 @@ type TLSObfs struct {
 }
 
 func (to *TLSObfs) read(b []byte, discardN int) (int, error) {
-	buf := make([]byte, discardN)
-	_, err := io.ReadFull(to.Conn, buf)
+	var discardBuf [128]byte
+	_, err := io.ReadFull(to.Conn, discardBuf[:discardN])
 	if err != nil {
 		return 0, err
 	}
-	sizeBuf := make([]byte, 2)
-	_, err = io.ReadFull(to.Conn, sizeBuf)
+	var sizeBuf [2]byte
+	_, err = io.ReadFull(to.Conn, sizeBuf[:])
 	if err != nil {
 		return 0, nil
 	}
 
-	length := int(binary.BigEndian.Uint16(sizeBuf))
+	length := int(binary.BigEndian.Uint16(sizeBuf[:]))
 	if length > len(b) {
 		n, err := to.Conn.Read(b)
 		if err != nil {
