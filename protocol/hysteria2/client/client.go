@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/samber/oops"
@@ -39,20 +38,6 @@ type Client struct {
 	conn          quic.Connection
 	udpSM         *udpSessionManager
 	connectCancel context.CancelFunc // set during Connect, so Disconnect can abort the handshake
-
-	// rememberedPort is the last remote UDP port in a port-hopping
-	// range that successfully completed a handshake. When non-zero,
-	// the next Connect() against a port-hopping address pins the
-	// initial dial to this port (and disables the periodic hop loop),
-	// avoiding the random-port failure mode that hits a large hop
-	// range (e.g. 60000-65530) where most ports have no hy2 server
-	// listening. Cleared when the remembered port stops working.
-	//
-	// Only consulted when c.config.Addr is a *udphop.UDPHopAddr.
-	// Accessed via sync/atomic so readers and writers don't need to
-	// coordinate on a mutex. Stored as Uint32 because sync/atomic
-	// has no Uint16 type; only the low 16 bits are meaningful.
-	rememberedPort atomic.Uint32
 }
 
 func NewClient(config *Config) (*Client, error) {
@@ -264,14 +249,6 @@ func (c *Client) connectSinglePort(ctx context.Context) (pktConn net.PacketConn,
 // port from the range). The first attempt that completes wins; on failure
 // we close the previous pktConn (releasing its UDP socket and terminating
 // its QUIC connection) before the next attempt.
-//
-// Port memory: if a previous Connect() against this address succeeded,
-// the working port is remembered. We try that port first (no hop loop,
-// one attempt). If it fails — port may have been taken offline, or
-// the server rebound to a different port — we forget it and fall
-// through to the random-with-retries path. On a successful random
-// attempt, the working port is remembered for the next Connect().
-//
 // On success returns the live pktConn and quic connection; the caller
 // commits them under the Client lock.
 func (c *Client) connectPortHopping(ctx context.Context) (pktConn net.PacketConn, conn quic.EarlyConnection, err error) {
@@ -287,38 +264,6 @@ func (c *Client) connectPortHopping(ctx context.Context) (pktConn net.PacketConn
 	// itself is bounded by attemptCtx below.
 	dialFunc := func(addr net.Addr) (net.Conn, error) {
 		return c.config.NextDialer.DialContext(ctx, "udp", addr.String())
-	}
-
-	// Try the remembered port first. With a large hop range
-	// (e.g. 60000-65530) the probability of a random pick landing on a
-	// port the server is actually listening on is tiny; if we have a
-	// known-good port from a prior Connect(), use it.
-	remembered := c.rememberedPort.Load()
-	if remembered > 0 {
-		fixedAddr := &net.UDPAddr{IP: udpHopAddr.IP, Port: int(remembered)}
-		fixedPktConn, dialErr := udphop.NewUDPHopPacketConn(
-			udpHopAddr,
-			c.config.UDPHopInterval,
-			dialFunc,
-			fixedAddr,
-		)
-		if dialErr == nil {
-			fixedConn, resp, herr := c.tryHandshake(ctx, fixedPktConn, fixedAddr)
-			if herr == nil {
-				// Handshake succeeded on the remembered port; reaffirm
-				// the memory and apply post-handshake config.
-				c.rememberSuccessfulPort(fixedPktConn)
-				return fixedPktConn, fixedConn, c.applyPostHandshake(resp, fixedConn)
-			}
-			fixedPktConn.Close()
-		}
-		// Remembered port failed (dial or handshake). Forget it and
-		// fall through to the random-with-retries path. We don't
-		// surface this error because the user just wants the next
-		// random pick to work.
-		// CompareAndSwap avoids clobbering a value a racing
-		// successful attempt may have just stored.
-		c.rememberedPort.CompareAndSwap(remembered, 0)
 	}
 
 	var lastErr error
@@ -342,7 +287,6 @@ func (c *Client) connectPortHopping(ctx context.Context) (pktConn net.PacketConn
 			udpHopAddr,
 			c.config.UDPHopInterval,
 			dialFunc,
-			nil, // random initial port
 		)
 		if err != nil {
 			attemptCancel()
@@ -359,10 +303,7 @@ func (c *Client) connectPortHopping(ctx context.Context) (pktConn net.PacketConn
 			continue
 		}
 
-		// Handshake succeeded — remember the working port so the next
-		// Connect() can pin to it instead of re-rolling, and apply
-		// post-handshake config.
-		c.rememberSuccessfulPort(pktConn)
+		// Handshake succeeded — commit and apply post-handshake config.
 		return pktConn, conn, c.applyPostHandshake(resp, conn)
 	}
 
@@ -376,24 +317,6 @@ func (c *Client) connectPortHopping(ctx context.Context) (pktConn net.PacketConn
 		With("attempts", handshakeMaxAttempts).
 		With("portHopping", true).
 		New("hysteria2: no port in range responded within dial budget")
-}
-
-// rememberSuccessfulPort records the remote UDP port of a successful
-// handshake for use by the next Connect() call. If the port can't be
-// extracted (non-UDP conn, or already torn down), this is a no-op.
-func (c *Client) rememberSuccessfulPort(pktConn net.PacketConn) {
-	type remotePorter interface {
-		RemotePort() int
-	}
-	rp, ok := pktConn.(remotePorter)
-	if !ok {
-		return
-	}
-	port := rp.RemotePort()
-	if port <= 0 || port > 65535 {
-		return
-	}
-	c.rememberedPort.Store(uint32(port))
 }
 
 // tryHandshake performs one QUIC dial + auth HTTP roundtrip on the given
