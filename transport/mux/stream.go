@@ -158,7 +158,7 @@ func (st *stream) closeRemote() {
 }
 
 func (st *stream) terminate() {
-	st.stopReadTimer()
+	st.clearReadTimer()
 	st.readMu.Lock()
 	if st.readErr == nil {
 		st.readErr = net.ErrClosed
@@ -169,7 +169,7 @@ func (st *stream) terminate() {
 	st.readMu.Unlock()
 }
 
-func (st *stream) stopReadTimer() {
+func (st *stream) clearReadTimer() {
 	st.readTimerMu.Lock()
 	defer st.readTimerMu.Unlock()
 	if st.readTimer != nil {
@@ -245,7 +245,7 @@ func (st *stream) Write(b []byte) (n int, err error) {
 
 func (st *stream) Close() error {
 	if st.closed.CompareAndSwap(false, true) {
-		st.stopReadTimer()
+		st.clearReadTimer()
 		st.session.removeStream(st.id)
 		if st.finSent.CompareAndSwap(false, true) {
 			_ = st.session.writeEnd(st.id)
@@ -291,27 +291,40 @@ func (st *stream) SetReadDeadline(t time.Time) error {
 	st.readTimerMu.Lock()
 	defer st.readTimerMu.Unlock()
 
-	deadlineNano := deadlineNano(t)
-	st.readDeadline.Store(deadlineNano)
+	st.readDeadline.Store(deadlineNano(t))
 
 	if st.readTimer != nil {
 		st.readTimer.Stop()
-		st.readTimer = nil
 	}
 
-	if !t.IsZero() {
-		dur := time.Until(t)
-		if dur <= 0 {
-			st.readCond.Broadcast()
-		} else {
-			st.readTimer = time.AfterFunc(dur, func() {
-				st.readCond.Broadcast()
-				st.readDeadline.CompareAndSwap(deadlineNano, 0)
-			})
-		}
+	if t.IsZero() {
+		st.readTimer = nil
+		return nil
+	}
+
+	dur := time.Until(t)
+	if dur <= 0 {
+		st.readTimer = nil
+		st.readCond.Broadcast()
+		return nil
+	}
+
+	if st.readTimer == nil {
+		st.readTimer = time.AfterFunc(dur, st.readTimerCallback)
+	} else {
+		st.readTimer.Reset(dur)
 	}
 
 	return nil
+}
+
+func (st *stream) readTimerCallback() {
+	dl := st.readDeadline.Load()
+	if dl == 0 || time.Now().UnixNano() < dl {
+		return
+	}
+	st.readCond.Broadcast()
+	st.readDeadline.CompareAndSwap(dl, 0)
 }
 
 func (st *stream) SetWriteDeadline(t time.Time) error {
