@@ -192,5 +192,5 @@ func (d *directDialer) ListenPacket(ctx context.Context, _ string) (c net.Packet
 	if err != nil {
 		return nil, err
 	}
-	return &PacketConn{c, d.resolver}, nil
+	return &PacketConn{c}, nil
 }
