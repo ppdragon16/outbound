@@ -52,6 +52,30 @@ func (b *PooledBuffer) Write(p []byte) (int, error) {
 	return copy(b.buf[m:], p), nil
 }
 
+// WriteByte appends a byte to the buffer.
+func (b *PooledBuffer) WriteByte(c byte) error {
+	m, ok := b.tryGrowByReslice(1)
+	if !ok {
+		m = b.grow(1)
+	}
+	b.buf[m] = c
+	return nil
+}
+
+// WriteString appends s to the buffer.
+func (b *PooledBuffer) WriteString(s string) (int, error) {
+	m, ok := b.tryGrowByReslice(len(s))
+	if !ok {
+		m = b.grow(len(s))
+	}
+	return copy(b.buf[m:], s), nil
+}
+
+// String returns the unread portion as a string.
+func (b *PooledBuffer) String() string {
+	return string(b.buf[b.off:])
+}
+
 // ReadFrom reads data from r until EOF.
 func (b *PooledBuffer) ReadFrom(r io.Reader) (n int64, err error) {
 	for {
