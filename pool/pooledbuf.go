@@ -32,6 +32,17 @@ func (b *PooledBuffer) Next(n int) []byte {
 	return data
 }
 
+// Read reads up to len(p) bytes into p. It returns the number of bytes
+// read (0 <= n <= len(p)) and any error encountered. Implements io.Reader.
+func (b *PooledBuffer) Read(p []byte) (n int, err error) {
+	if b.off >= len(b.buf) {
+		return 0, io.EOF
+	}
+	n = copy(p, b.buf[b.off:])
+	b.off += n
+	return n, nil
+}
+
 // Write appends p to the buffer.
 func (b *PooledBuffer) Write(p []byte) (int, error) {
 	m, ok := b.tryGrowByReslice(len(p))
