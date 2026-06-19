@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/daeuniverse/outbound/pool"
 )
@@ -16,11 +17,18 @@ import (
 const maxStreamBuffer = 256 * 1024
 
 // bufNode is a node in the stream's data queue.
+// Each node is embedded at the tail of a 4096-byte pooled buffer,
+// with the buffer's data portion at the front. This avoids a separate
+// heap allocation for the node struct on the hot readData path.
 type bufNode struct {
-	buf  []byte   // pool.GetBuffer(4096), len = valid bytes in this chunk
-	off  int      // bytes already consumed by Read
+	buf  []byte // slice of the same underlying buffer, len = valid bytes
+	off  int    // bytes already consumed by Read
 	next *bufNode
 }
+
+// bufNodeSz is the platform-specific size of bufNode; the struct is
+// embedded at the end of each 4096-byte pooled buffer.
+const bufNodeSz = int(unsafe.Sizeof(bufNode{}))
 
 type stream struct {
 	session *session
@@ -98,15 +106,24 @@ func (st *stream) readData(reader io.Reader) error {
 		}
 		st.readMu.Unlock()
 
-		chunk := min(remain, 4096)
-		buf := pool.GetBuffer(4096)[:chunk]
-		if _, err := io.ReadFull(reader, buf); err != nil {
+		// Size the buffer exactly: chunk data + bufNode at the end.
+		// The pool rounds up to the next power of two, so tail
+		// chunks get proportionally smaller buffers.
+		chunk := min(remain, 4096-bufNodeSz)
+		buf := pool.GetBuffer(chunk + bufNodeSz)
+		if _, err := io.ReadFull(reader, buf[:chunk]); err != nil {
 			pool.PutBuffer(buf)
 			return err
 		}
 
+		// Embed bufNode right after the data so there is
+		// no separate heap allocation for the queue node.
+		node := (*bufNode)(unsafe.Pointer(&buf[chunk]))
+		node.buf = buf[:chunk]
+		node.off = 0
+		node.next = nil
+
 		st.readMu.Lock()
-		node := &bufNode{buf: buf}
 		if st.tail == nil {
 			st.head = node
 		} else {
@@ -193,8 +210,8 @@ func (st *stream) Read(b []byte) (n int, err error) {
 		st.queued -= m
 
 		if node.off == len(node.buf) {
-			pool.PutBuffer(node.buf)
 			st.head = node.next
+			pool.PutBuffer(node.buf)
 			if st.head == nil {
 				st.tail = nil
 			}

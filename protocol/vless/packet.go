@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/netip"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 )
 
@@ -38,14 +37,14 @@ func (c *Conn) ReadFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error
 
 	bLen := pool.GetBuffer(2)
 	defer pool.PutBuffer(bLen)
-	if _, err = io.ReadFull(&netproxy.ReadWrapper{ReadFunc: c.read}, bLen); err != nil {
+	if _, err = io.ReadFull(&c.readWrapper, bLen); err != nil {
 		return 0, netip.AddrPort{}, err
 	}
 	length := int(binary.BigEndian.Uint16(bLen))
 	if len(p) < length {
 		return 0, netip.AddrPort{}, fmt.Errorf("buf size is not enough")
 	}
-	n, err = io.ReadFull(&netproxy.ReadWrapper{ReadFunc: c.read}, p[:length])
+	n, err = io.ReadFull(&c.readWrapper, p[:length])
 	return n, addr, err
 }
 

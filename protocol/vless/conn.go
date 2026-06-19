@@ -42,7 +42,8 @@ type Conn struct {
 	onceWrite  bool
 	onceRead   sync.Once
 
-	addonsBytes []byte
+	addonsBytes  []byte
+	readWrapper  netproxy.ReadWrapper
 }
 
 // Unwrap returns the underlying net.Conn, allowing transport layers
@@ -61,6 +62,7 @@ func NewConn(conn net.Conn, metadata Metadata, cmdKey []byte) (c *Conn, err erro
 		metadata: metadata,
 		cmdKey:   key,
 	}
+	c.readWrapper = netproxy.ReadWrapper{ReadFunc: c.read}
 	if metadata.Network == "udp" {
 		proxyAddrIp, err := common.ResolveUDPAddr(net.JoinHostPort(c.metadata.Hostname, strconv.Itoa(int(c.metadata.Port))))
 		if err != nil {
@@ -166,7 +168,7 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 		// }()
 		bLen := pool.GetBuffer(2)
 		defer pool.PutBuffer(bLen)
-		if _, err = io.ReadFull(&netproxy.ReadWrapper{ReadFunc: c.read}, bLen); err != nil {
+		if _, err = io.ReadFull(&c.readWrapper, bLen); err != nil {
 			return 0, err
 		}
 		length := int(binary.BigEndian.Uint16(bLen))
