@@ -177,7 +177,8 @@ func (vc *Conn) read(b []byte) (int, error) {
 			}
 			var header []byte
 			if need := headerUUIDLen + PaddingHeaderLen - len(uuid.Nil); len(b) < need {
-				header = make([]byte, need)
+				header = pool.GetBuffer(need)
+				defer pool.PutBuffer(header)
 			} else {
 				header = b[:need]
 			}

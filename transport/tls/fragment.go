@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/daeuniverse/outbound/common"
+	"github.com/daeuniverse/outbound/pool"
 )
 
 func parseRange(str string) (min, max int64, err error) {
@@ -57,7 +58,8 @@ func (f *FragmentConn) Write(b []byte) (n int, err error) {
 		return f.Conn.Write(b)
 	}
 	data := b[5:recordLen]
-	buf := make([]byte, 1024)
+	buf := pool.GetBuffer(1024)
+	defer pool.PutBuffer(buf)
 	var hello []byte
 	for from := 0; ; {
 		to := common.Min(len(data), from+int(randBetween(f.minLength, f.maxLength)))

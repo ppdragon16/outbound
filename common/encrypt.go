@@ -4,6 +4,8 @@ import (
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/sha1"
+
+	"github.com/daeuniverse/outbound/pool"
 )
 
 func HmacMD5(key []byte, data []byte) []byte {
@@ -39,7 +41,8 @@ func EVPBytesToKey(password string, keyLen int) (key []byte) {
 
 	// Repeatedly call md5 until bytes generated is enough.
 	// Each call to md5 uses data: prev md5 sum + password.
-	d := make([]byte, md5Len+len(password))
+	d := pool.GetBuffer(md5Len + len(password))
+	defer pool.PutBuffer(d)
 	start := 0
 	for i := 1; i < cnt; i++ {
 		start += md5Len

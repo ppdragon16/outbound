@@ -154,7 +154,7 @@ func StringToUUID5(str string) string {
 	u := h.Sum(nil)[:16]
 	u[6] = (u[6] & 0x0f) | (5 << 4)
 	u[8] = u[8]&(0xff>>2) | (0x02 << 6)
-	buf := make([]byte, 36)
+	var buf [36]byte
 	hex.Encode(buf[0:8], u[0:4])
 	buf[8] = '-'
 	hex.Encode(buf[9:13], u[4:6])
@@ -164,7 +164,7 @@ func StringToUUID5(str string) string {
 	hex.Encode(buf[19:23], u[8:10])
 	buf[23] = '-'
 	hex.Encode(buf[24:], u[10:])
-	return string(buf)
+	return string(buf[:])
 }
 
 func StringsHas(strs []string, str string) bool {
