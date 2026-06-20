@@ -98,8 +98,8 @@ func (t *clientImpl) sendAuthentication(quicConn quic.Connection) (err error) {
 	if err != nil {
 		return err
 	}
-	buf := pool.GetBuffer()
-	defer pool.PutBuffer(buf)
+	buf := pool.GetBytesBuffer()
+	defer pool.PutBytesBuffer(buf)
 	token, err := GenToken(quicConn.ConnectionState(), t.Uuid, t.Password)
 	if err != nil {
 		return err
@@ -272,7 +272,7 @@ func (t *clientImpl) Close() error {
 	return nil
 }
 
-func (t *clientImpl) DialContextWithDialer(ctx context.Context, metadata *protocol.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (netproxy.Conn, error) {
+func (t *clientImpl) DialContextWithDialer(ctx context.Context, metadata *protocol.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (net.Conn, error) {
 	if t.closed {
 		return nil, common.ErrClientClosed
 	}
@@ -285,8 +285,8 @@ func (t *clientImpl) DialContextWithDialer(ctx context.Context, metadata *protoc
 			t.deferQuicConn(quicConn, err)
 		}()
 		connect := NewConnect(NewAddress(metadata), Ver5)
-		buf := pool.Get(connect.BytesLen())
-		defer buf.Put()
+		buf := pool.GetBuffer(connect.BytesLen())
+		defer pool.PutBuffer(buf)
 		n := connect.WriteToBytes(buf)
 		if n != len(buf) {
 			return nil, fmt.Errorf("n != len(buf)")

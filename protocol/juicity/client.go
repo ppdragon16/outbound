@@ -13,7 +13,6 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
-	"github.com/daeuniverse/outbound/protocol/trojanc"
 	"github.com/daeuniverse/outbound/protocol/tuic"
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
 	"github.com/daeuniverse/quic-go"
@@ -29,18 +28,18 @@ const (
 
 func init() {
 	if CipherConf.SaltLen != UnderlaySaltLen {
-		panic("CipherConf.SaltLen != IvSize")
+		panic("CipherConf.SaltLen != UnderlaySaltLen")
 	}
 }
 
 type UnderlayAuth struct {
 	IV       []byte
 	Psk      []byte
-	Metadata *trojanc.Metadata
+	Metadata *Metadata
 }
 
-func (a *UnderlayAuth) PackFromPool() (buf pool.PB) {
-	buf = pool.Get(a.Metadata.Len() + len(a.IV) + len(a.Psk))
+func (a *UnderlayAuth) PackFromPool() []byte {
+	buf := pool.GetBuffer(a.Metadata.Len() + len(a.IV) + len(a.Psk))
 	copy(buf, a.IV)
 	copy(buf[len(a.IV):], a.Psk)
 	a.Metadata.PackTo(buf[len(a.IV)+len(a.Psk):])
@@ -59,7 +58,7 @@ func (a *UnderlayAuth) Unpack(r io.Reader) (n int, err error) {
 		return 0, err
 	}
 	n += _n
-	a.Metadata = &trojanc.Metadata{}
+	a.Metadata = &Metadata{}
 	if _n, err = a.Metadata.Unpack(r); err != nil {
 		return 0, err
 	}
@@ -124,8 +123,8 @@ func (t *clientImpl) sendAuthentication(quicConn quic.Connection) (err error) {
 	if err != nil {
 		return err
 	}
-	buf := pool.GetBuffer()
-	defer pool.PutBuffer(buf)
+	buf := pool.GetBytesBuffer()
+	defer pool.PutBytesBuffer(buf)
 	token, err := tuic.GenToken(quicConn.ConnectionState(), t.Uuid, t.Password)
 	if err != nil {
 		return err
@@ -148,7 +147,7 @@ func (t *clientImpl) sendAuthentication(quicConn quic.Connection) (err error) {
 		}
 		buf := auth.PackFromPool()
 		_, err = uniStream.Write(buf)
-		buf.Put()
+		pool.PutBuffer(buf)
 		if err != nil {
 			t.Close()
 			return err
@@ -186,7 +185,7 @@ func (t *clientImpl) Close() (err error) {
 	return err
 }
 
-func (t *clientImpl) DialContext(ctx context.Context, metadata *trojanc.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (*Conn, error) {
+func (t *clientImpl) DialContext(ctx context.Context, metadata *Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (*Conn, error) {
 	select {
 	case <-t.Ctx.Done():
 		return nil, common.ErrClientClosed
@@ -213,10 +212,13 @@ func (t *clientImpl) DialContext(ctx context.Context, metadata *trojanc.Metadata
 		quicStream,
 		metadata,
 		nil,
+		quicConn.LocalAddr(),
+		quicConn.RemoteAddr(),
 	)
 	return stream, nil
 }
-func (t *clientImpl) DialAuth(ctx context.Context, metadata *trojanc.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (iv []byte, psk []byte, err error) {
+
+func (t *clientImpl) DialAuth(ctx context.Context, metadata *Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (iv []byte, psk []byte, err error) {
 	select {
 	case <-t.Ctx.Done():
 		return nil, nil, common.ErrClientClosed

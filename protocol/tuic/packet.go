@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
@@ -127,8 +126,8 @@ func (q *quicStreamPacketConn) close() (err error) {
 	if q.incomingPackets != nil {
 		q.incomingPackets = nil
 
-		buf := pool.GetBuffer()
-		defer pool.PutBuffer(buf)
+		buf := pool.GetBytesBuffer()
+		defer pool.PutBytesBuffer(buf)
 		err = NewDissociate(q.connId, Ver5).WriteTo(buf)
 		if err != nil {
 			return
@@ -177,7 +176,7 @@ func (q *quicStreamPacketConn) SetWriteDeadline(t time.Time) error {
 	return q.SetDeadline(t)
 }
 
-func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, err error) {
+func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.incomingPackets != nil {
@@ -192,7 +191,9 @@ func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, e
 			var assembled bool
 			// Feed packet into this deFragger.
 			// Return if this PKT_ID is ready and assembled.
-			if n, addr, assembled = d.Feed(packet, p); assembled {
+			var ap netip.AddrPort
+			if n, ap, assembled = d.Feed(packet, p); assembled {
+				addr = net.UDPAddrFromAddrPort(ap)
 				q.deFraggers.Delete(packet.PKT_ID)
 				return
 			} else {
@@ -205,7 +206,7 @@ func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr netip.AddrPort, e
 	return
 }
 
-func (q *quicStreamPacketConn) WriteTo(p []byte, addr string) (n int, err error) {
+func (q *quicStreamPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	if len(p) > 0xffff { // uint16 max
 		return 0, &quic.DatagramTooLargeError{MaxDataLen: 0xffff}
 	}
@@ -217,9 +218,9 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr string) (n int, err error)
 			q.deferQuicConnFn(q.quicConn, err)
 		}()
 	}
-	buf := pool.GetBuffer()
-	defer pool.PutBuffer(buf)
-	mdata, err := protocol.ParseMetadata(addr)
+	buf := pool.GetBytesBuffer()
+	defer pool.PutBytesBuffer(buf)
+	mdata, err := protocol.ParseMetadata(addr.String())
 	if err != nil {
 		return 0, err
 	}
@@ -279,7 +280,15 @@ func (conn *quicStreamPacketConn) Read(b []byte) (n int, err error) {
 }
 
 func (conn *quicStreamPacketConn) Write(b []byte) (n int, err error) {
-	return conn.WriteTo(b, conn.target)
+	host, portStr, err := net.SplitHostPort(conn.target)
+	if err != nil {
+		return 0, err
+	}
+	port, err := net.LookupPort("udp", portStr)
+	if err != nil {
+		return 0, err
+	}
+	return conn.WriteTo(b, &net.UDPAddr{IP: net.ParseIP(host), Port: port})
 }
 
-var _ netproxy.PacketConn = (*quicStreamPacketConn)(nil)
+var _ net.PacketConn = (*quicStreamPacketConn)(nil)

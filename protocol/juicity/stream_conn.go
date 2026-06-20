@@ -3,18 +3,17 @@ package juicity
 import (
 	"fmt"
 	"io"
+	"net"
 	"sync"
 	"time"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
-	"github.com/daeuniverse/outbound/protocol/trojanc"
 	"github.com/daeuniverse/quic-go"
 )
 
 type Conn struct {
 	quic.Stream
-	Metadata *trojanc.Metadata
+	Metadata *Metadata
 
 	writeMutex sync.Mutex
 	onceWrite  bool
@@ -24,24 +23,27 @@ type Conn struct {
 
 	closeOnce sync.Once
 	closeErr  error
+
+	localAddr  net.Addr
+	remoteAddr net.Addr
 }
 
 func (c *Conn) reqHeaderFromPool(payload []byte) (buf []byte) {
 	addrLen := c.Metadata.Len()
-	buf = pool.Get(1 + addrLen + len(payload))
-	buf[0] = trojanc.NetworkToByte(c.Metadata.Network)
+	buf = pool.GetBuffer(1 + addrLen + len(payload))
+	buf[0] = NetworkToByte(c.Metadata.Network)
 	c.Metadata.PackTo(buf[1:])
 	copy(buf[1+addrLen:], payload)
 	return buf
 }
 
 func (c *Conn) readReqHeader() (err error) {
-	buf := pool.Get(1)
-	defer buf.Put()
+	buf := pool.GetBuffer(1)
+	defer pool.PutBuffer(buf)
 	if _, err = io.ReadFull(c.Stream, buf[:1]); err != nil {
 		return err
 	}
-	c.Metadata.Network = trojanc.ParseNetwork(buf[0])
+	c.Metadata.Network = ParseNetwork(buf[0])
 	n := c.Metadata.Len()
 	if n < 2 {
 		return fmt.Errorf("invalid juicity header")
@@ -58,7 +60,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	if !c.onceWrite {
 		if c.Metadata.IsClient {
 			buf := c.reqHeaderFromPool(b)
-			defer pool.Put(buf)
+			defer pool.PutBuffer(buf)
 			if _, err = c.Stream.Write(buf); err != nil {
 				return 0, fmt.Errorf("write header: %w", err)
 			}
@@ -78,6 +80,16 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 		}
 	})
 	return c.Stream.Read(b)
+}
+
+// LocalAddr implements net.Conn.
+func (c *Conn) LocalAddr() net.Addr {
+	return c.localAddr
+}
+
+// RemoteAddr implements net.Conn.
+func (c *Conn) RemoteAddr() net.Addr {
+	return c.remoteAddr
 }
 
 func (c *Conn) Close() error {
@@ -117,15 +129,17 @@ func (c *Conn) close() error {
 	return c.Stream.Close()
 }
 
-var _ netproxy.Conn = &Conn{}
+var _ net.Conn = &Conn{}
 
-func NewConn(stream quic.Stream, mdata *trojanc.Metadata, closeDeferFn func()) *Conn {
+func NewConn(stream quic.Stream, mdata *Metadata, closeDeferFn func(), localAddr, remoteAddr net.Addr) *Conn {
 	if mdata == nil {
-		mdata = &trojanc.Metadata{}
+		mdata = &Metadata{}
 	}
 	return &Conn{
 		Stream:       stream,
 		Metadata:     mdata,
 		closeDeferFn: closeDeferFn,
+		localAddr:    localAddr,
+		remoteAddr:   remoteAddr,
 	}
 }

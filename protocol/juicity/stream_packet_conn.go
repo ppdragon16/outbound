@@ -6,12 +6,11 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"strconv"
 	"sync"
+	"time"
 
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
-	"github.com/daeuniverse/outbound/protocol/trojanc"
 )
 
 type PacketConn struct {
@@ -20,7 +19,15 @@ type PacketConn struct {
 }
 
 func (c *PacketConn) Write(b []byte) (int, error) {
-	return c.WriteTo(b, net.JoinHostPort(c.Conn.Metadata.Hostname, strconv.Itoa(int(c.Conn.Metadata.Port))))
+	ip, err := netip.ParseAddr(c.Conn.Metadata.Hostname)
+	if err != nil {
+		// Fallback for domain names: use WriteTo with string addr
+		return c.WriteTo(b, &net.UDPAddr{
+			IP:   net.ParseIP(c.Conn.Metadata.Hostname),
+			Port: int(c.Conn.Metadata.Port),
+		})
+	}
+	return c.WriteToAddrPort(b, netip.AddrPortFrom(ip, c.Conn.Metadata.Port))
 }
 
 func (c *PacketConn) Read(b []byte) (n int, err error) {
@@ -28,17 +35,37 @@ func (c *PacketConn) Read(b []byte) (n int, err error) {
 	return n, err
 }
 
-func (c *PacketConn) ReadFrom(p []byte) (n int, addrPort netip.AddrPort, err error) {
-	m := trojanc.Metadata{}
+// ReadFrom implements net.PacketConn. Thin wrapper around ReadFromAddrPort.
+func (c *PacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	n, ap, err := c.ReadFromAddrPort(p)
+	if err != nil {
+		return 0, nil, err
+	}
+	return n, net.UDPAddrFromAddrPort(ap), nil
+}
+
+// WriteTo implements net.PacketConn. Thin wrapper around WriteToAddrPort.
+func (c *PacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
+	ap, err := ToAddrPort(addr)
+	if err != nil {
+		return 0, err
+	}
+	return c.WriteToAddrPort(p, ap)
+}
+
+// ReadFromAddrPort reads a packet and returns the source address as netip.AddrPort.
+func (c *PacketConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err error) {
+	m := Metadata{}
 	if _, err = m.Unpack(c.Conn); err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	if addrPort, err = m.DomainIpMapping(&c.domainIpMapping); err != nil {
+	ap, err = m.DomainIpMapping(&c.domainIpMapping)
+	if err != nil {
 		return 0, netip.AddrPort{}, fmt.Errorf("ReadFrom AddrPort: %w", err)
 	}
 
-	buf := pool.Get(2)
-	defer buf.Put()
+	buf := pool.GetBuffer(2)
+	defer pool.PutBuffer(buf)
 	if _, err = io.ReadFull(c.Conn, buf[:2]); err != nil {
 		return 0, netip.AddrPort{}, err
 	}
@@ -47,27 +74,32 @@ func (c *PacketConn) ReadFrom(p []byte) (n int, addrPort netip.AddrPort, err err
 		if n, err = io.ReadFull(c.Conn, p[:length]); err != nil {
 			return 0, netip.AddrPort{}, err
 		}
-		return n, addrPort, nil
+		return n, ap, nil
 	} else {
 		if n, err = io.ReadFull(c.Conn, p); err != nil {
 			return 0, netip.AddrPort{}, err
 		}
 		_, _ = io.CopyN(io.Discard, c.Conn, int64(length-len(p)))
-		return n, addrPort, nil
+		return n, ap, nil
 	}
 }
 
-func (c *PacketConn) WriteTo(p []byte, addr string) (n int, err error) {
-	_metadata, err := protocol.ParseMetadata(addr)
-	if err != nil {
-		return 0, err
+// WriteToAddrPort writes a packet to the given netip.AddrPort.
+func (c *PacketConn) WriteToAddrPort(p []byte, ap netip.AddrPort) (n int, err error) {
+	metadata := Metadata{
+		Metadata: protocol.Metadata{
+			Type:     protocol.MetadataTypeIPv4,
+			Hostname: ap.Addr().String(),
+			Port:     ap.Port(),
+			IsClient: true,
+		},
+		Network: "udp",
 	}
-	metadata := trojanc.Metadata{
-		Metadata: _metadata,
-		Network:  "udp",
+	if ap.Addr().Is6() {
+		metadata.Type = protocol.MetadataTypeIPv6
 	}
-	buf := pool.Get(metadata.Len() + 2 + len(p))
-	defer pool.Put(buf)
+	buf := pool.GetBuffer(metadata.Len() + 2 + len(p))
+	defer pool.PutBuffer(buf)
 	SealUDP(metadata, buf, p)
 	_, err = c.Conn.Write(buf)
 	if err != nil {
@@ -80,7 +112,27 @@ func (c *PacketConn) Close() error {
 	return c.Conn.Close()
 }
 
-func SealUDP(metadata trojanc.Metadata, dst []byte, data []byte) []byte {
+// LocalAddr implements net.PacketConn.
+func (c *PacketConn) LocalAddr() net.Addr {
+	return c.Conn.LocalAddr()
+}
+
+// SetDeadline implements net.PacketConn.
+func (c *PacketConn) SetDeadline(t time.Time) error {
+	return c.Conn.SetDeadline(t)
+}
+
+// SetReadDeadline implements net.PacketConn.
+func (c *PacketConn) SetReadDeadline(t time.Time) error {
+	return c.Conn.SetReadDeadline(t)
+}
+
+// SetWriteDeadline implements net.PacketConn.
+func (c *PacketConn) SetWriteDeadline(t time.Time) error {
+	return c.Conn.SetWriteDeadline(t)
+}
+
+func SealUDP(metadata Metadata, dst []byte, data []byte) []byte {
 	n := metadata.Len()
 	// copy first to allow overlap
 	copy(dst[n+2:], data)

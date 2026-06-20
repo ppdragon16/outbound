@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/direct"
 )
@@ -28,24 +27,18 @@ func TestTcp(t *testing.T) {
 		Cipher:       "",
 		User:         "00000000-0000-0000-0000-000000000000",
 		Password:     "mypassword",
-		IsClient:     true,
-		Flags:        0,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	c := http.Client{
-		Transport: &http.Transport{Dial: func(network string, addr string) (net.Conn, error) {
+		Transport: &http.Transport{DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
 			t.Log("target", addr)
-			c, err := d.DialContext(context.Background(), "tcp", addr)
+			c, err := d.DialContext(ctx, "tcp", addr)
 			if err != nil {
 				return nil, err
 			}
-			return &netproxy.FakeNetConn{
-				Conn:  c,
-				LAddr: nil,
-				RAddr: nil,
-			}, nil
+			return c, nil
 		}},
 	}
 	resp, err := c.Get("https://ipinfo.io")
@@ -67,8 +60,6 @@ func TestUdp(t *testing.T) {
 		Cipher:       "",
 		User:         "00000000-0000-0000-0000-000000000000",
 		Password:     "mypassword",
-		IsClient:     true,
-		Flags:        0,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -84,11 +75,7 @@ func TestUdp(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			return netproxy.NewFakeNetPacketConn(
-				c.(netproxy.PacketConn),
-				nil,
-				nil,
-			), nil
+			return c, nil
 		},
 	}
 	ips, err := resolver.LookupNetIP(context.TODO(), "ip", "www.baidu.com")

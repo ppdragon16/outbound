@@ -34,18 +34,22 @@ type Juicity struct {
 	Protocol              string
 }
 
-func NewJuicity(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
+func NewJuicity(link string) (dialer.Dialer, *dialer.Property, error) {
 	s, err := ParseJuicityURL(link)
 	if err != nil {
 		return nil, nil, err
 	}
-	return s.Dialer(option, nextDialer)
+	return s, &dialer.Property{
+		Name:     s.Name,
+		Address:  net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
+		Protocol: s.Protocol,
+		Link:     s.ExportToURL(),
+	}, nil
 }
 
-func (s *Juicity) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, *dialer.Property, error) {
-	d := nextDialer
+func (s *Juicity) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) (netproxy.Dialer, error) {
+	d := parentDialer
 	var err error
-	var flags protocol.Flags
 	tlsConfig := &tls.Config{
 		NextProtos:         []string{"h3"},
 		MinVersion:         tls.VersionTLS13,
@@ -59,7 +63,7 @@ func (s *Juicity) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer)
 			if err != nil {
 				pinnedHash, err = hex.DecodeString(s.PinnedCertchainSha256)
 				if err != nil {
-					return nil, nil, fmt.Errorf("failed to decode PinnedCertchainSha256")
+					return nil, fmt.Errorf("failed to decode PinnedCertchainSha256")
 				}
 			}
 		}
@@ -77,17 +81,10 @@ func (s *Juicity) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer)
 		TlsConfig:    tlsConfig,
 		User:         s.User,
 		Password:     s.Password,
-		IsClient:     true,
-		Flags:        flags,
 	}); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return d, &dialer.Property{
-		Name:     s.Name,
-		Address:  net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
-		Protocol: s.Protocol,
-		Link:     s.ExportToURL(),
-	}, nil
+	return d, nil
 }
 
 func ParseJuicityURL(u string) (data *Juicity, err error) {

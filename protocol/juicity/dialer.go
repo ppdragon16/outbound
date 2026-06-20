@@ -11,8 +11,6 @@ import (
 	C "github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
-	"github.com/daeuniverse/outbound/protocol/shadowsocks"
-	"github.com/daeuniverse/outbound/protocol/trojanc"
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
 	"github.com/daeuniverse/quic-go"
 	"github.com/google/uuid"
@@ -77,39 +75,20 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	}, nil
 }
 
-func (d *Dialer) DialTcp(ctx context.Context, addr string) (c netproxy.Conn, err error) {
-	return d.DialContext(ctx, "tcp", addr)
-}
-
-func (d *Dialer) DialUdp(ctx context.Context, addr string) (c netproxy.PacketConn, err error) {
-	pktConn, err := d.DialContext(ctx, "udp", addr)
-	if err != nil {
-		return nil, err
-	}
-	return pktConn.(netproxy.PacketConn), nil
-}
-
-func (d *Dialer) dialFuncFactory(udpNetwork string, rAddr net.Addr) common.DialFunc {
+func (d *Dialer) dialFuncFactory(rAddr net.Addr) common.DialFunc {
 	return func(ctx context.Context, dialer netproxy.Dialer) (transport *quic.Transport, addr net.Addr, err error) {
-		conn, err := dialer.DialContext(ctx, udpNetwork, d.proxyAddress)
+		pc, err := dialer.ListenPacket(ctx, d.proxyAddress)
 		if err != nil {
 			return nil, nil, err
 		}
-		pc := netproxy.NewFakeNetPacketConn(
-			conn.(netproxy.PacketConn),
-			net.UDPAddrFromAddrPort(common.GetUniqueFakeAddrPort()),
-			rAddr)
 		transport = &quic.Transport{Conn: pc}
 		return transport, rAddr, nil
 	}
 }
 
-func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (c netproxy.Conn, err error) {
-	magicNetwork, err := netproxy.ParseMagicNetwork(network)
-	if err != nil {
-		return nil, err
-	}
-	switch magicNetwork.Network {
+// DialContext implements netproxy.Dialer.
+func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (c net.Conn, err error) {
+	switch network {
 	case "tcp", "udp":
 		mdata, err := protocol.ParseMetadata(addr)
 		if err != nil {
@@ -120,25 +99,13 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 		if err != nil {
 			return nil, err
 		}
-		udpNetwork := network
-		if magicNetwork.Network == "tcp" {
-			udpNetwork = netproxy.MagicNetwork{
-				Network: "udp",
-				Mark:    magicNetwork.Mark,
-			}.Encode()
-		}
-		if magicNetwork.Network == "udp" {
+		if network == "udp" {
 			switch mdata.Port {
-			// case 443, 8443, 5201:
 			case 0:
-				iv, psk, err := d.clientRing.DialAuth(ctx, &trojanc.Metadata{
+				iv, psk, err := d.clientRing.DialAuth(ctx, &Metadata{
 					Metadata: mdata,
-					Network:  magicNetwork.Network,
-				}, d.nextDialer, d.dialFuncFactory(udpNetwork, proxyAddr))
-				if err != nil {
-					return nil, err
-				}
-				key, err := underlayKey(psk)
+					Network:  network,
+				}, d.nextDialer, d.dialFuncFactory(proxyAddr))
 				if err != nil {
 					return nil, err
 				}
@@ -146,29 +113,33 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 				if err != nil {
 					return nil, err
 				}
-				transport, _, err := d.dialFuncFactory(udpNetwork, proxyAddr)(context.TODO(), d.nextDialer)
+				transport, _, err := d.dialFuncFactory(proxyAddr)(context.TODO(), d.nextDialer)
 				if err != nil {
 					return nil, err
 				}
-				return &TransportPacketConn{
+				pktConn := &TransportPacketConn{
 					Transport: transport,
 					proxyAddr: proxyAddr,
 					tgt:       innerAddr.AddrPort(),
-					key:       key,
+					masterKey: psk,
 					firstIv:   iv,
+				}
+				return &netproxy.BindPacketConn{
+					PacketConn: pktConn,
+					Address:    netproxy.NewAddr("udp", addr),
 				}, nil
 			}
 		}
-		conn, err := d.clientRing.DialContext(ctx, &trojanc.Metadata{
+		conn, err := d.clientRing.DialContext(ctx, &Metadata{
 			Metadata: mdata,
-			Network:  magicNetwork.Network,
+			Network:  network,
 		}, d.nextDialer,
-			d.dialFuncFactory(udpNetwork, proxyAddr),
+			d.dialFuncFactory(proxyAddr),
 		)
 		if err != nil {
 			return nil, err
 		}
-		if magicNetwork.Network == "tcp" {
+		if network == "tcp" {
 			time.AfterFunc(100*time.Millisecond, func() {
 				// avoid the situation where the server sends messages first
 				if _, err = conn.Write(nil); err != nil {
@@ -177,39 +148,73 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 			})
 			return conn, nil
 		} else {
-			return &PacketConn{
-				Conn: conn,
+			// UDP packet conn wrapping a QUIC stream
+			return &netproxy.BindPacketConn{
+				PacketConn: &PacketConn{Conn: conn},
+				Address:    netproxy.NewAddr("udp", addr),
 			}, nil
 		}
 
 	default:
-		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, magicNetwork.Network)
+		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
 }
 
-func underlayKey(psk []byte) (key *shadowsocks.Key, err error) {
-	return &shadowsocks.Key{
-		CipherConf: CipherConf,
-		MasterKey:  psk,
-	}, nil
-}
-
-func (d *Dialer) DialCmdMsg(ctx context.Context, cmd protocol.MetadataCmd) (c netproxy.Conn, err error) {
+// ListenPacket implements netproxy.Dialer.
+func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
+	// For juicity, we use a QUIC stream as the UDP transport.
+	mdata, err := protocol.ParseMetadata(addr)
+	if err != nil {
+		return nil, err
+	}
+	mdata.IsClient = true
 	proxyAddr, err := C.ResolveUDPAddr(d.proxyAddress)
 	if err != nil {
 		return nil, err
 	}
-	conn, err := d.clientRing.DialContext(ctx, &trojanc.Metadata{
+	conn, err := d.clientRing.DialContext(ctx, &Metadata{
+		Metadata: mdata,
+		Network:  "udp",
+	}, d.nextDialer,
+		d.dialFuncFactory(proxyAddr),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &PacketConn{Conn: conn}, nil
+}
+
+func (d *Dialer) DialCmdMsg(ctx context.Context, cmd protocol.MetadataCmd) (c net.Conn, err error) {
+	proxyAddr, err := C.ResolveUDPAddr(d.proxyAddress)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := d.clientRing.DialContext(ctx, &Metadata{
 		Metadata: protocol.Metadata{
 			Type:     protocol.MetadataTypeMsg,
 			Cmd:      cmd,
 			IsClient: true,
 		},
 	}, d.nextDialer,
-		d.dialFuncFactory("udp", proxyAddr),
+		d.dialFuncFactory(proxyAddr),
 	)
 	if err != nil {
 		return nil, err
 	}
 	return conn, nil
+}
+
+// Connect implements netproxy.Dialer.
+func (d *Dialer) Connect() error {
+	return d.nextDialer.Connect()
+}
+
+// Disconnect implements netproxy.Dialer.
+func (d *Dialer) Disconnect() error {
+	return d.nextDialer.Disconnect()
+}
+
+// Alive implements netproxy.Dialer.
+func (d *Dialer) Alive() bool {
+	return d.nextDialer.Alive()
 }

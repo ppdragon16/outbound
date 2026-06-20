@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/daeuniverse/outbound/netproxy"
-	"github.com/daeuniverse/outbound/protocol/trojanc"
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
 )
 
@@ -37,7 +36,7 @@ func newClientRing(newClient func(capabilityCallback func(n int64)) *clientImpl,
 	}
 }
 
-func (r *clientRing) DialContext(ctx context.Context, metadata *trojanc.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (conn *Conn, err error) {
+func (r *clientRing) DialContext(ctx context.Context, metadata *Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (conn *Conn, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	newCurrent := r.current
@@ -53,7 +52,7 @@ func (r *clientRing) DialContext(ctx context.Context, metadata *trojanc.Metadata
 	return conn, err
 }
 
-func (r *clientRing) DialAuth(ctx context.Context, metadata *trojanc.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (iv []byte, psk []byte, err error) {
+func (r *clientRing) DialAuth(ctx context.Context, metadata *Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (iv []byte, psk []byte, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	newCurrent := r.current

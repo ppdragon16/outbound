@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"context"
 	"errors"
+	"net"
 	"strings"
 	"sync"
 
@@ -37,7 +38,7 @@ func newClientRing(newClient func(capabilityCallback func(n int64)) *clientImpl,
 	}
 }
 
-func (r *clientRing) DialContextWithDialer(ctx context.Context, metadata *protocol.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (conn netproxy.Conn, err error) {
+func (r *clientRing) DialContextWithDialer(ctx context.Context, metadata *protocol.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (conn net.Conn, err error) {
 	defer func() {
 		r.ring.Len()
 	}()
@@ -55,7 +56,7 @@ func (r *clientRing) DialContextWithDialer(ctx context.Context, metadata *protoc
 	return conn, err
 }
 
-func (r *clientRing) ListenPacketWithDialer(ctx context.Context, metadata *protocol.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (conn netproxy.PacketConn, err error) {
+func (r *clientRing) ListenPacketWithDialer(ctx context.Context, metadata *protocol.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (conn net.PacketConn, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	newCurrent := r.current
