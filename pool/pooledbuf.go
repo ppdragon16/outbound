@@ -105,6 +105,16 @@ func (b *PooledBuffer) Grow(n int) {
 	b.buf = b.buf[:m]
 }
 
+// Detach extracts the backing array and transfers ownership to the caller.
+// The buffer is left empty and ready for reuse. Unlike Reset, the backing
+// array is NOT returned to the pool — the caller is responsible for it.
+func (b *PooledBuffer) Detach() []byte {
+	data := b.buf[b.off:]
+	b.buf = nil
+	b.off = 0
+	return data
+}
+
 // Reset discards all data.
 func (b *PooledBuffer) Reset() {
 	if cap(b.buf) > 0 {
