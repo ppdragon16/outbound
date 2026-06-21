@@ -86,6 +86,11 @@ type clientImpl struct {
 	connMutex sync.Mutex
 
 	detachCallback func()
+
+	// Shared transport support: when non-nil, points to Dialer.sharedTransport.
+	// clientImpls share one UDP socket + Transport instead of creating one each.
+	sharedTransportPtr **quic.Transport
+	sharedProxyAddr    *net.UDPAddr
 }
 
 func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, dialFn common.DialFunc) (quic.Connection, error) {
@@ -94,18 +99,38 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 	if t.quicConn != nil {
 		return t.quicConn, nil
 	}
-	transport, addr, err := dialFn(ctx, dialer)
-	if err != nil {
-		return nil, err
+	// Try the shared transport first (nil means this clientImpl manages its own).
+	var transport *quic.Transport
+	var addr net.Addr
+	var err error
+	if t.sharedTransportPtr != nil {
+		if st := *t.sharedTransportPtr; st != nil {
+			transport = st
+			addr = t.sharedProxyAddr
+		}
+	}
+	if transport == nil {
+		transport, addr, err = dialFn(ctx, dialer)
+		if err != nil {
+			return nil, err
+		}
 	}
 	quicConn, err := transport.Dial(ctx, addr, t.TlsConfig, t.QuicConfig)
 	if err != nil {
-		transport.Close()
-		transport.Conn.Close()
+		// Only close the transport if we own it (not shared).
+		if t.sharedTransportPtr == nil {
+			transport.Close()
+			transport.Conn.Close()
+		}
 		return nil, err
 	}
 
-	common.SetCongestionController(quicConn, t.CongestionController, t.CWND)
+	// BBR congestion controller is already set via QuicConfig.InitialCongestionControl.
+	// No need to call SetCongestionController again — doing so would create a second
+	// BBR sender and immediately GC the first.
+	if t.QuicConfig.InitialCongestionControl == nil {
+		common.SetCongestionController(quicConn, t.CongestionController, t.CWND)
+	}
 
 	go func() {
 		if err := t.sendAuthentication(quicConn); err != nil {
@@ -113,7 +138,10 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 		}
 	}()
 
-	t.underConn = transport.Conn
+	// Track underConn only for non-shared transports, so Close() skips shared ones.
+	if t.sharedTransportPtr == nil {
+		t.underConn = transport.Conn
+	}
 	t.quicConn = quicConn
 	return quicConn, nil
 }
