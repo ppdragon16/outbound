@@ -3,16 +3,17 @@ package tuic
 import (
 	"context"
 	"fmt"
+	"math"
 	"net"
+	"sync"
 	"time"
 
+	C "github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
 	"github.com/daeuniverse/quic-go"
 	"github.com/google/uuid"
-
-	C "github.com/daeuniverse/outbound/common"
 )
 
 func init() {
@@ -23,7 +24,13 @@ type Dialer struct {
 	clientRing *clientRing
 
 	proxyAddress string
-	nextDialer   netproxy.Dialer
+	proxyAddr    *net.UDPAddr // cached resolved proxy address
+	dialFn       common.DialFunc
+	// sharedTransport is the single QUIC transport shared across all clientImpls.
+	// Created lazily on first use; all subsequent calls reuse it.
+	sharedTransport *quic.Transport
+	transportMu     sync.Mutex // protects sharedTransport
+	nextDialer      netproxy.Dialer
 }
 
 func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
@@ -32,55 +39,79 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		return nil, fmt.Errorf("parse UUID: %w", err)
 	}
 	// ensure server's incoming stream can handle correctly, increase to 1.1x
+	maxOpenIncomingStreams := int64(100)
+	quicMaxOpenIncomingStreams := int64(maxOpenIncomingStreams)
+	quicMaxOpenIncomingStreams = quicMaxOpenIncomingStreams + int64(math.Ceil(float64(quicMaxOpenIncomingStreams)/10.0))
+	reservedStreamsCapability := maxOpenIncomingStreams / 5
+	if reservedStreamsCapability < 1 {
+		reservedStreamsCapability = 1
+	}
+	if reservedStreamsCapability > 5 {
+		reservedStreamsCapability = 5
+	}
 	maxDatagramFrameSize := 1400
 	udpRelayMode := common.NATIVE
 	if header.Flags&protocol.Flags_Tuic_UdpRelayModeQuic > 0 {
 		// FIXME: QUIC has severe performance problems.
 		// udpRelayMode = common.QUIC
 	}
-	return &Dialer{
-		clientRing: newClientRing(func(capabilityCallback func(n int64)) *clientImpl {
-			return &clientImpl{
-				ClientOption: &ClientOption{
-					TlsConfig: header.TlsConfig,
-					QuicConfig: &quic.Config{
-						InitialStreamReceiveWindow:     common.InitialStreamReceiveWindow,
-						MaxStreamReceiveWindow:         common.MaxStreamReceiveWindow,
-						InitialConnectionReceiveWindow: common.InitialConnectionReceiveWindow,
-						MaxConnectionReceiveWindow:     common.MaxConnectionReceiveWindow,
-						KeepAlivePeriod:                3 * time.Second,
-						DisablePathMTUDiscovery:        false,
-						EnableDatagrams:                true,
-						HandshakeIdleTimeout:           8 * time.Second,
-						CapabilityCallback:             capabilityCallback,
-					},
-					Uuid:                  id,
-					Password:              header.Password,
-					UdpRelayMode:          udpRelayMode,
-					CongestionController:  header.Feature1.(string),
-					ReduceRtt:             false,
-					CWND:                  10,
-					MaxUdpRelayPacketSize: maxDatagramFrameSize,
-				},
-				udp: true,
-			}
-		}, 10),
-		proxyAddress: header.ProxyAddress,
-		nextDialer:   nextDialer,
-	}, nil
-}
-
-func (d *Dialer) dialFuncFactory(rAddr net.Addr) common.DialFunc {
-	return func(ctx context.Context, dialer netproxy.Dialer) (transport *quic.Transport, addr net.Addr, err error) {
-		pc, err := dialer.ListenPacket(ctx, d.proxyAddress)
-		if err != nil {
-			return nil, nil, err
-		}
-		transport = &quic.Transport{Conn: pc}
-		return transport, rAddr, nil
+	// Pre-resolve proxy address to avoid per-call DNS lookups.
+	proxyAddr, err := C.ResolveUDPAddr(header.ProxyAddress)
+	if err != nil {
+		return nil, fmt.Errorf("resolve proxy address: %w", err)
 	}
+	d := &Dialer{
+		proxyAddress: header.ProxyAddress,
+		proxyAddr:    proxyAddr,
+		nextDialer:   nextDialer,
+	}
+	// Pre-create the dial function to avoid per-call closure allocation.
+	// The first call creates a UDP socket + Transport; subsequent calls return the
+	// cached transport, so all clientImpls share one UDP socket and Transport.
+	d.dialFn = func(ctx context.Context, dialer netproxy.Dialer) (transport *quic.Transport, addr net.Addr, err error) {
+		d.transportMu.Lock()
+		defer d.transportMu.Unlock()
+		if d.sharedTransport == nil {
+			pc, err := dialer.ListenPacket(ctx, d.proxyAddress)
+			if err != nil {
+				return nil, nil, err
+			}
+			d.sharedTransport = &quic.Transport{Conn: pc}
+		}
+		return d.sharedTransport, d.proxyAddr, nil
+	}
+	d.clientRing = newClientRing(func(capabilityCallback func(n int64)) *clientImpl {
+		return &clientImpl{
+			ClientOption: &ClientOption{
+				TlsConfig: header.TlsConfig,
+				QuicConfig: &quic.Config{
+					InitialStreamReceiveWindow:     common.InitialStreamReceiveWindow,
+					MaxStreamReceiveWindow:         common.MaxStreamReceiveWindow,
+					InitialConnectionReceiveWindow: common.InitialConnectionReceiveWindow,
+					MaxConnectionReceiveWindow:     common.MaxConnectionReceiveWindow,
+					KeepAlivePeriod:                3 * time.Second,
+					DisablePathMTUDiscovery:        false,
+					EnableDatagrams:                true,
+					HandshakeIdleTimeout:           8 * time.Second,
+					CapabilityCallback:             capabilityCallback,
+				},
+				Uuid:                  id,
+				Password:              header.Password,
+				UdpRelayMode:          udpRelayMode,
+				CongestionController:  header.Feature1.(string),
+				ReduceRtt:             false,
+				CWND:                  10,
+				MaxUdpRelayPacketSize: maxDatagramFrameSize,
+			},
+			udp:                true,
+			sharedTransportPtr: &d.sharedTransport,
+			sharedProxyAddr:    d.proxyAddr,
+		}
+	}, reservedStreamsCapability)
+	return d, nil
 }
 
+// DialContext implements netproxy.Dialer.
 func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (c net.Conn, err error) {
 	switch network {
 	case "tcp", "udp":
@@ -89,13 +120,9 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 			return nil, err
 		}
 		mdata.IsClient = true
-		proxyAddr, err := C.ResolveUDPAddr(d.proxyAddress)
-		if err != nil {
-			return nil, err
-		}
 		if network == "tcp" {
 			tcpConn, err := d.clientRing.DialContextWithDialer(ctx, &mdata, d.nextDialer,
-				d.dialFuncFactory(proxyAddr),
+				d.dialFn,
 			)
 			if err != nil {
 				return nil, err
@@ -103,7 +130,7 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 			return tcpConn, nil
 		} else {
 			udpConn, err := d.clientRing.ListenPacketWithDialer(ctx, &mdata, d.nextDialer,
-				d.dialFuncFactory(proxyAddr),
+				d.dialFn,
 			)
 			if err != nil {
 				return nil, err
@@ -119,18 +146,15 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 	}
 }
 
+// ListenPacket implements netproxy.Dialer.
 func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
 	mdata, err := protocol.ParseMetadata(addr)
 	if err != nil {
 		return nil, err
 	}
 	mdata.IsClient = true
-	proxyAddr, err := C.ResolveUDPAddr(d.proxyAddress)
-	if err != nil {
-		return nil, err
-	}
 	return d.clientRing.ListenPacketWithDialer(ctx, &mdata, d.nextDialer,
-		d.dialFuncFactory(proxyAddr),
+		d.dialFn,
 	)
 }
 

@@ -4,8 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"crypto/tls"
-	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -46,6 +46,11 @@ type clientImpl struct {
 	udpIncomingPacketsMap sync.Map
 
 	onClose func()
+
+	// Shared transport support: when non-nil, points to Dialer.sharedTransport.
+	// All clientImpls share one UDP socket + Transport instead of creating one each.
+	sharedTransportPtr **quic.Transport
+	sharedProxyAddr    *net.UDPAddr
 }
 
 func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, dialFn common.DialFunc) (quic.Connection, error) {
@@ -54,9 +59,21 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 	if t.quicConn != nil {
 		return t.quicConn, nil
 	}
-	transport, addr, err := dialFn(ctx, dialer)
-	if err != nil {
-		return nil, err
+	// Try the shared transport first (nil means this clientImpl manages its own).
+	var transport *quic.Transport
+	var addr net.Addr
+	var err error
+	if t.sharedTransportPtr != nil {
+		if st := *t.sharedTransportPtr; st != nil {
+			transport = st
+			addr = t.sharedProxyAddr
+		}
+	}
+	if transport == nil {
+		transport, addr, err = dialFn(ctx, dialer)
+		if err != nil {
+			return nil, err
+		}
 	}
 	var quicConn quic.Connection
 	if t.ReduceRtt {
@@ -65,8 +82,11 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 		quicConn, err = transport.Dial(ctx, addr, t.TlsConfig, t.QuicConfig)
 	}
 	if err != nil {
-		transport.Close()
-		transport.Conn.Close()
+		// Only close the transport if we own it (not shared).
+		if t.sharedTransportPtr == nil {
+			transport.Close()
+			transport.Conn.Close()
+		}
 		return nil, err
 	}
 
@@ -85,7 +105,10 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 		_ = t.handleMessage(quicConn) // always handleMessage because tuicV5 using datagram to send the Heartbeat
 	}()
 
-	t.underConn = transport.Conn
+	// Track underConn only for non-shared transports, so Close() skips shared ones.
+	if t.sharedTransportPtr == nil {
+		t.underConn = transport.Conn
+	}
 	t.quicConn = quicConn
 	return quicConn, nil
 }
@@ -284,13 +307,8 @@ func (t *clientImpl) DialContextWithDialer(ctx context.Context, metadata *protoc
 		defer func() {
 			t.deferQuicConn(quicConn, err)
 		}()
-		connect := NewConnect(NewAddress(metadata), Ver5)
-		buf := pool.GetBuffer(connect.BytesLen())
+		buf := writeConnectBuf(metadata)
 		defer pool.PutBuffer(buf)
-		n := connect.WriteToBytes(buf)
-		if n != len(buf) {
-			return nil, fmt.Errorf("n != len(buf)")
-		}
 		quicStream, err := quicConn.OpenStream()
 		if err != nil {
 			return nil, err
@@ -312,6 +330,50 @@ func (t *clientImpl) DialContextWithDialer(ctx context.Context, metadata *protoc
 	}
 
 	return stream, nil
+}
+
+// writeConnectBuf writes the tuic connect command directly into a pooled buffer,
+// avoiding intermediate NewAddress/NewConnect heap allocations.
+// Wire format: [VER(1)] [TYPE(1)] [addr_type(1)] [addr(variable)] [port(2)]
+func writeConnectBuf(metadata *protocol.Metadata) []byte {
+	var addrLen int
+	var addrType byte
+	var addrBytes []byte
+
+	switch metadata.Type {
+	case protocol.MetadataTypeIPv4:
+		addrType = AtypIPv4
+		addrLen = net.IPv4len
+		addrBytes = net.ParseIP(metadata.Hostname).To4()
+	case protocol.MetadataTypeIPv6:
+		addrType = AtypIPv6
+		addrLen = net.IPv6len
+		addrBytes = net.ParseIP(metadata.Hostname).To16()
+	case protocol.MetadataTypeDomain:
+		addrType = AtypDomainName
+		addrLen = 1 + len(metadata.Hostname)
+		// addrBytes will be assembled directly into buf below
+	default:
+		addrType = AtypIPv4
+		addrLen = net.IPv4len
+		addrBytes = net.ParseIP(metadata.Hostname).To4()
+	}
+
+	// Total: 2 (VER+TYPE) + 1 (addrType) + addrLen + 2 (port)
+	totalLen := 2 + 1 + addrLen + 2
+	buf := pool.GetBuffer(totalLen)
+	buf[0] = Ver5
+	buf[1] = byte(ConnectType)
+	buf[2] = addrType
+	switch metadata.Type {
+	case protocol.MetadataTypeDomain:
+		buf[3] = byte(len(metadata.Hostname))
+		copy(buf[4:], metadata.Hostname)
+	case protocol.MetadataTypeIPv4, protocol.MetadataTypeIPv6:
+		copy(buf[3:], addrBytes)
+	}
+	binary.BigEndian.PutUint16(buf[3+addrLen:], metadata.Port)
+	return buf
 }
 
 func (t *clientImpl) ListenPacketWithDialer(ctx context.Context, metadata *protocol.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (*quicStreamPacketConn, error) {

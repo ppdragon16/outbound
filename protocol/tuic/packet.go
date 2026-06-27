@@ -11,7 +11,6 @@ import (
 
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
-	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
 	"github.com/daeuniverse/quic-go"
 )
@@ -176,7 +175,38 @@ func (q *quicStreamPacketConn) SetWriteDeadline(t time.Time) error {
 	return q.SetDeadline(t)
 }
 
+// ToAddrPort converts a net.Addr to netip.AddrPort, preferring the AddrPort()
+// method (zero-allocation for net.UDPAddr), falling back to parsing the string form.
+func ToAddrPort(addr net.Addr) (netip.AddrPort, error) {
+	if addr, ok := addr.(interface{ AddrPort() netip.AddrPort }); ok {
+		if ap := addr.AddrPort(); ap.IsValid() {
+			return ap, nil
+		}
+	}
+	addrStr := addr.String()
+	return netip.ParseAddrPort(addrStr)
+}
+
+// ReadFrom implements net.PacketConn. Thin wrapper around ReadFromAddrPort.
 func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
+	n, ap, err := q.ReadFromAddrPort(p)
+	if err != nil {
+		return 0, nil, err
+	}
+	return n, net.UDPAddrFromAddrPort(ap), nil
+}
+
+// WriteTo implements net.PacketConn. Thin wrapper around WriteToAddrPort.
+func (q *quicStreamPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
+	ap, err := ToAddrPort(addr)
+	if err != nil {
+		return 0, err
+	}
+	return q.WriteToAddrPort(p, ap)
+}
+
+// ReadFromAddrPort reads a packet and returns the source as netip.AddrPort.
+func (q *quicStreamPacketConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.incomingPackets != nil {
@@ -189,16 +219,11 @@ func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err err
 			_d, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, &deFragger{})
 			d := _d.(*deFragger)
 			var assembled bool
-			// Feed packet into this deFragger.
-			// Return if this PKT_ID is ready and assembled.
-			var ap netip.AddrPort
 			if n, ap, assembled = d.Feed(packet, p); assembled {
-				addr = net.UDPAddrFromAddrPort(ap)
 				q.deFraggers.Delete(packet.PKT_ID)
 				return
-			} else {
-				// FIXME: Timeout to clean deFraggers.
 			}
+			// FIXME: Timeout to clean deFraggers.
 		}
 	} else {
 		err = net.ErrClosed
@@ -206,7 +231,8 @@ func (q *quicStreamPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err err
 	return
 }
 
-func (q *quicStreamPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
+// WriteToAddrPort writes a packet to the given netip.AddrPort.
+func (q *quicStreamPacketConn) WriteToAddrPort(p []byte, ap netip.AddrPort) (n int, err error) {
 	if len(p) > 0xffff { // uint16 max
 		return 0, &quic.DatagramTooLargeError{MaxDataLen: 0xffff}
 	}
@@ -218,51 +244,37 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err erro
 			q.deferQuicConnFn(q.quicConn, err)
 		}()
 	}
-	buf := pool.GetBytesBuffer()
-	defer pool.PutBytesBuffer(buf)
-	mdata, err := protocol.ParseMetadata(addr.String())
-	if err != nil {
-		return 0, err
-	}
-	address := NewAddress(&mdata)
 	pktId := uint16(fastrand.Uint32())
-	packet := NewPacket(q.connId, pktId, 1, 0, uint16(len(p)), address, p, Ver5)
 	switch q.udpRelayMode {
 	case common.QUIC:
-		err = packet.WriteTo(buf)
+		buf := buildPacketBuf(q.connId, pktId, 1, 0, p, ap)
+		defer pool.PutBuffer(buf)
+		stream, err := q.quicConn.OpenUniStream()
 		if err != nil {
-			return
-		}
-		var stream quic.SendStream
-		stream, err = q.quicConn.OpenUniStream()
-		if err != nil {
-			return
+			return 0, err
 		}
 		defer stream.Close()
-		_, err = buf.WriteTo(stream)
+		_, err = stream.Write(buf)
 		if err != nil {
-			return
+			return 0, err
 		}
 	default: // native
 		if len(p) > q.maxUdpRelayPacketSize {
-			err = fragWriteNative(q.quicConn, packet, buf, q.maxUdpRelayPacketSize)
+			err = fragWriteNative(q.quicConn, q.connId, pktId, ap, p, q.maxUdpRelayPacketSize)
 			if err != nil {
-				return
+				return 0, err
 			}
 		} else {
-			err = packet.WriteTo(buf)
-			if err != nil {
-				return
+			buf := buildPacketBuf(q.connId, pktId, 1, 0, p, ap)
+			err = q.quicConn.SendDatagram(buf)
+			pool.PutBuffer(buf)
+			var tooLarge *quic.DatagramTooLargeError
+			if errors.As(err, &tooLarge) {
+				err = fragWriteNative(q.quicConn, q.connId, pktId, ap, p, int(tooLarge.MaxDataLen)-PacketOverHead)
 			}
-			data := buf.Bytes()
-			err = q.quicConn.SendDatagram(data)
-		}
-		var tooLarge *quic.DatagramTooLargeError
-		if errors.As(err, &tooLarge) {
-			err = fragWriteNative(q.quicConn, packet, buf, int(tooLarge.MaxDataLen)-PacketOverHead)
-		}
-		if err != nil {
-			return
+			if err != nil {
+				return 0, err
+			}
 		}
 	}
 	n = len(p)
@@ -275,20 +287,16 @@ func (q *quicStreamPacketConn) LocalAddr() net.Addr {
 }
 
 func (conn *quicStreamPacketConn) Read(b []byte) (n int, err error) {
-	n, _, err = conn.ReadFrom(b)
+	n, _, err = conn.ReadFromAddrPort(b)
 	return n, err
 }
 
 func (conn *quicStreamPacketConn) Write(b []byte) (n int, err error) {
-	host, portStr, err := net.SplitHostPort(conn.target)
+	ap, err := netip.ParseAddrPort(conn.target)
 	if err != nil {
 		return 0, err
 	}
-	port, err := net.LookupPort("udp", portStr)
-	if err != nil {
-		return 0, err
-	}
-	return conn.WriteTo(b, &net.UDPAddr{IP: net.ParseIP(host), Port: port})
+	return conn.WriteToAddrPort(b, ap)
 }
 
 var _ net.PacketConn = (*quicStreamPacketConn)(nil)

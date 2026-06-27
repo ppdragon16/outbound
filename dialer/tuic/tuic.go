@@ -33,16 +33,21 @@ type Tuic struct {
 	UdpRelayMode      string
 }
 
-func NewTuic(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
+func NewTuic(link string) (dialer.Dialer, *dialer.Property, error) {
 	s, err := ParseTuicURL(link)
 	if err != nil {
 		return nil, nil, err
 	}
-	return s.Dialer(option, nextDialer)
+	return s, &dialer.Property{
+		Name:     s.Name,
+		Address:  net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
+		Protocol: s.Protocol,
+		Link:     s.ExportToURL(),
+	}, nil
 }
 
-func (s *Tuic) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, *dialer.Property, error) {
-	d := nextDialer
+func (s *Tuic) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) (netproxy.Dialer, error) {
+	d := parentDialer
 	var err error
 	var flags protocol.Flags
 	if s.UdpRelayMode == "quic" {
@@ -59,17 +64,11 @@ func (s *Tuic) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (n
 		},
 		User:     s.User,
 		Password: s.Password,
-		IsClient: true,
 		Flags:    flags,
 	}); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return d, &dialer.Property{
-		Name:     s.Name,
-		Address:  net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
-		Protocol: s.Protocol,
-		Link:     s.ExportToURL(),
-	}, nil
+	return d, nil
 }
 
 func ParseTuicURL(u string) (data *Tuic, err error) {
