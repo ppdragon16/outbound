@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks_stream"
@@ -20,7 +19,7 @@ import (
 func TestTcp(t *testing.T) {
 	// https://github.com/winterssy/SSR-Docker
 	// Remember to set protocol_param to 3000# (max_client)
-	d := direct.SymmetricDirect
+	d := direct.NewDirectDialer(direct.Option{})
 	obfsDialer, err := obfs.NewDialer(d, &obfs.ObfsParam{
 		ObfsHost:  "",
 		ObfsPort:  0,
@@ -35,7 +34,6 @@ func TestTcp(t *testing.T) {
 		ProxyAddress: "127.0.0.1:8989",
 		Cipher:       "aes-256-cfb",
 		Password:     "p@ssw0rd",
-		IsClient:     true,
 		Flags:        0,
 	})
 	if err != nil {
@@ -50,15 +48,7 @@ func TestTcp(t *testing.T) {
 
 	c := http.Client{
 		Transport: &http.Transport{Dial: func(network string, addr string) (net.Conn, error) {
-			c, err := d.DialContext(context.Background(), "tcp", addr)
-			if err != nil {
-				return nil, err
-			}
-			return &netproxy.FakeNetConn{
-				Conn:  c,
-				LAddr: nil,
-				RAddr: nil,
-			}, nil
+			return d.DialContext(context.Background(), "tcp", addr)
 		}},
 	}
 	resp, err := c.Get("https://www.7k7k.com")
@@ -74,12 +64,11 @@ func TestTcp(t *testing.T) {
 func TestUdp(t *testing.T) {
 	// https://github.com/winterssy/SSR-Docker
 	// Remember to set protocol_param to 3000# (max_client)
-	d := direct.SymmetricDirect
+	d := direct.NewDirectDialer(direct.Option{})
 	d, err := shadowsocks_stream.NewDialer(d, protocol.Header{
 		ProxyAddress: "127.0.0.1:8989",
 		Cipher:       "aes-256-cfb",
 		Password:     "p@ssw0rd",
-		IsClient:     true,
 		Flags:        0,
 	})
 	if err != nil {
@@ -103,11 +92,7 @@ func TestUdp(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			return netproxy.NewFakeNetPacketConn(
-				c.(netproxy.PacketConn),
-				nil,
-				nil,
-			), nil
+			return c.(net.Conn), nil
 		},
 	}
 	ips, err := resolver.LookupNetIP(context.TODO(), "ip", "www.baidu.com")

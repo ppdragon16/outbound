@@ -4,15 +4,15 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks_stream"
 )
 
 type Conn struct {
-	netproxy.Conn
+	net.Conn
 	Protocol            IProtocol
 	underPostdecryptBuf *bytes.Buffer
 	readLater           io.Reader
@@ -21,7 +21,7 @@ type Conn struct {
 	readMu  sync.Mutex
 }
 
-func NewConn(c netproxy.Conn, proto IProtocol) (*Conn, error) {
+func NewConn(c net.Conn, proto IProtocol) (*Conn, error) {
 	switch c.(type) {
 	case *shadowsocks_stream.TcpConn:
 	default:
@@ -46,8 +46,8 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 		c.readLater = nil
 	}
 readAgain:
-	buf := pool.Get(2048)
-	defer pool.Put(buf)
+	buf := pool.GetBuffer(2048)
+	defer pool.PutBuffer(buf)
 	n, err = c.Conn.Read(buf)
 	if err != nil {
 		return 0, err

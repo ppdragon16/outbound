@@ -4,10 +4,10 @@ import (
 	"encoding/binary"
 	"time"
 
+	"bytes"
+
 	"github.com/daeuniverse/outbound/common"
 	rand "github.com/daeuniverse/outbound/pkg/fastrand"
-	"github.com/daeuniverse/outbound/pool"
-	"github.com/daeuniverse/outbound/pool/bytes"
 	"github.com/daeuniverse/outbound/transport/shadowsocksr/internal/crypto"
 )
 
@@ -153,8 +153,8 @@ func (a *authSHA1v4) EncodePkt(buf *bytes.Buffer) (err error) {
 	return nil
 }
 
-func (a *authSHA1v4) DecodePkt(in []byte) (out pool.Bytes, err error) {
-	return pool.B(in), nil
+func (a *authSHA1v4) DecodePkt(in []byte) (out []byte, err error) {
+	return in, nil
 }
 
 func (a *authSHA1v4) Encode(plainData []byte) (outData []byte, err error) {

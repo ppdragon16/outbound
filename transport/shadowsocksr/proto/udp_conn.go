@@ -1,29 +1,38 @@
 package proto
 
 import (
+	"bytes"
 	"fmt"
+	"net"
 	"net/netip"
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
-	"github.com/daeuniverse/outbound/pool/bytes"
 	"github.com/daeuniverse/outbound/protocol/infra/socks"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks_stream"
 )
 
 type PacketConn struct {
-	netproxy.PacketConn
+	shadowsocks_stream.PacketConn
 	Protocol IProtocol
 	tgt      string
 }
 
-func NewPacketConn(c netproxy.PacketConn, proto IProtocol, tgt string) (*PacketConn, error) {
+func NewPacketConn(c shadowsocks_stream.PacketConn, proto IProtocol, tgt string) (*PacketConn, error) {
 	return &PacketConn{
 		PacketConn: c,
 		Protocol:   proto,
 		tgt:        tgt,
 	}, nil
+}
+
+func (c *PacketConn) LocalAddr() net.Addr {
+	return netproxy.NewAddr("udp", c.tgt)
+}
+
+func (c *PacketConn) RemoteAddr() net.Addr {
+	return netproxy.NewAddr("udp", c.tgt)
 }
 
 func (c *PacketConn) InnerCipher() *ciphers.StreamCipher {
@@ -53,9 +62,8 @@ func (c *PacketConn) ReadFrom(b []byte) (n int, from netip.AddrPort, err error) 
 	if err != nil {
 		return n, netip.AddrPort{}, err
 	}
-	defer decoded.Put()
 
-	addr := socks.SplitAddr(decoded.Bytes())
+	addr := socks.SplitAddr(decoded)
 	if addr == nil {
 		return 0, netip.AddrPort{}, fmt.Errorf("no addr present")
 	}
@@ -65,10 +73,7 @@ func (c *PacketConn) ReadFrom(b []byte) (n int, from netip.AddrPort, err error) 
 		return 0, netip.AddrPort{}, fmt.Errorf("bad addr: %w", err)
 	}
 
-	//if len(b) < len(decoded.Bytes())-len(addr) {
-	//	return 0, netip.AddrPort{}, fmt.Errorf("buffer is not enough to read")
-	//}
-	n = copy(b, decoded.Bytes()[len(addr):])
+	n = copy(b, decoded[len(addr):])
 	return n, from, nil
 }
 
@@ -77,7 +82,7 @@ func (c *PacketConn) WriteTo(b []byte, to string) (n int, err error) {
 	if err != nil {
 		return 0, err
 	}
-	pb := pool.GetMustBigger(len(addr) + len(b))
+	pb := pool.GetBuffer(len(addr) + len(b))
 	copy(pb, addr)
 	copy(pb[len(addr):], b)
 	buf := bytes.NewBuffer(pb)

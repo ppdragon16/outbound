@@ -107,13 +107,6 @@ func (c *stream) terminate() {
 	c.readMu.Unlock()
 }
 
-func (c *stream) pushEOF() {
-	c.readMu.Lock()
-	c.readEOF = true
-	c.readCond.Broadcast()
-	c.readMu.Unlock()
-}
-
 // closeRead drains unread chunks and marks EOF. Used when the stream is
 // closed locally or remotely — any buffered data is discarded since the
 // caller has no way to read it anymore.
@@ -121,15 +114,6 @@ func (c *stream) closeRead() {
 	c.readMu.Lock()
 	c.drainChunks()
 	c.readEOF = true
-	c.readCond.Broadcast()
-	c.readMu.Unlock()
-}
-
-func (c *stream) pushError(err error) {
-	c.readMu.Lock()
-	if c.readErr == nil {
-		c.readErr = err
-	}
 	c.readCond.Broadcast()
 	c.readMu.Unlock()
 }

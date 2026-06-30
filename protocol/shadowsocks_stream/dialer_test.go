@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/direct"
 )
@@ -25,7 +24,7 @@ func TestNewSSStream(t *testing.T) {
 		Address: "localhost",
 		Port:    "8989",
 	}
-	dialer, err := NewDialer(direct.SymmetricDirect, protocol.Header{
+	dialer, err := NewDialer(direct.NewDirectDialer(direct.Option{}), protocol.Header{
 		Cipher:       params.Method,
 		Password:     params.Passwd,
 		ProxyAddress: net.JoinHostPort(params.Address, params.Port),
@@ -35,15 +34,7 @@ func TestNewSSStream(t *testing.T) {
 	}
 	c := http.Client{
 		Transport: &http.Transport{Dial: func(network string, addr string) (net.Conn, error) {
-			c, err := dialer.DialContext(context.Background(), "tcp", addr)
-			if err != nil {
-				return nil, err
-			}
-			return &netproxy.FakeNetConn{
-				Conn:  c,
-				LAddr: nil,
-				RAddr: nil,
-			}, nil
+			return dialer.DialContext(context.Background(), "tcp", addr)
 		}},
 	}
 	resp, err := c.Get("https://www.baidu.com")

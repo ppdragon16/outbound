@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks_stream"
@@ -18,7 +17,7 @@ import (
 func BenchmarkSSR(b *testing.B) {
 	b.N = 5000
 	for i := 0; i < b.N; i++ {
-		d := direct.SymmetricDirect
+		d := direct.NewDirectDialer(direct.Option{})
 		obfsDialer, err := obfs.NewDialer(d, &obfs.ObfsParam{
 			ObfsHost:  "",
 			ObfsPort:  0,
@@ -33,7 +32,6 @@ func BenchmarkSSR(b *testing.B) {
 			ProxyAddress: "127.0.0.1:8989",
 			Cipher:       "aes-256-cfb",
 			Password:     "p@ssw0rd",
-			IsClient:     true,
 			Flags:        0,
 		})
 		if err != nil {
@@ -48,24 +46,16 @@ func BenchmarkSSR(b *testing.B) {
 
 		c := http.Client{
 			Transport: &http.Transport{Dial: func(network string, addr string) (net.Conn, error) {
-				c, err := d.DialContext(context.Background(), "tcp", addr)
-				if err != nil {
-					return nil, err
-				}
-				return &netproxy.FakeNetConn{
-					Conn:  c,
-					LAddr: nil,
-					RAddr: nil,
-				}, nil
+				return d.DialContext(context.Background(), "tcp", addr)
 			}},
 		}
-		resp, err := c.Get("http://192.168.1.6:2017")
+		resp, err := c.Get("https://httpbin.org/ip")
 		if err != nil {
 			b.Fatal(err)
 		}
 		buf := new(bytes.Buffer)
 		buf.ReadFrom(resp.Body)
-		//b.Log(buf.String())
-		resp.Body.Close()
+		defer resp.Body.Close()
+		b.Log(buf.String())
 	}
 }

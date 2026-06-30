@@ -3,21 +3,21 @@ package shadowsocks_stream
 import (
 	"fmt"
 	"io"
+	"net"
 
 	"github.com/daeuniverse/outbound/ciphers"
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 )
 
-// TcpConn the struct that override the netproxy.Conn methods
+// TcpConn the struct that override the net.Conn methods
 type TcpConn struct {
-	netproxy.Conn
+	net.Conn
 	cipher *ciphers.StreamCipher
 
 	init bool
 }
 
-func NewTcpConn(c netproxy.Conn, cipher *ciphers.StreamCipher) *TcpConn {
+func NewTcpConn(c net.Conn, cipher *ciphers.StreamCipher) *TcpConn {
 	return &TcpConn{
 		Conn:   c,
 		cipher: cipher,
@@ -28,8 +28,8 @@ func (c *TcpConn) Read(b []byte) (n int, err error) {
 	if !c.cipher.DecryptInited() {
 		buf := b
 		if len(buf) < c.cipher.InfoIVLen() {
-			buf = pool.Get(c.cipher.InfoIVLen() + len(b))
-			defer pool.Put(buf)
+			buf = pool.GetBuffer(c.cipher.InfoIVLen() + len(b))
+			defer pool.PutBuffer(buf)
 		}
 		n, err = io.ReadAtLeast(c.Conn, buf, c.cipher.InfoIVLen())
 		if err != nil {
@@ -74,8 +74,8 @@ func (c *TcpConn) Write(b []byte) (n int, err error) {
 	if !c.init {
 		c.init = true
 		iv := c.cipher.IV()
-		buf := pool.Get(len(b) + len(iv))
-		defer pool.Put(buf)
+		buf := pool.GetBuffer(len(b) + len(iv))
+		defer pool.PutBuffer(buf)
 		ivLen = len(iv)
 		copy(buf, iv)
 		copy(buf[ivLen:], b)

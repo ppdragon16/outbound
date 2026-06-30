@@ -17,7 +17,6 @@ import (
 	"github.com/daeuniverse/outbound/common"
 	rand "github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
-	swBytes "github.com/daeuniverse/outbound/pool/bytes"
 	"github.com/daeuniverse/outbound/transport/shadowsocksr/internal/crypto"
 )
 
@@ -57,7 +56,7 @@ func NewAuthChainA() IProtocol {
 		rndPkt:     authChainAPktGetRandLen,
 		recvInfo: recvInfo{
 			recvID: 1,
-			buffer: new(swBytes.Buffer),
+			buffer: &bytes.Buffer{},
 		},
 	}
 	return a
@@ -252,9 +251,9 @@ func authChainAPktGetRandLen(ctx *crypto.Shift128plusContext, lastHash []byte) i
 	return int(ctx.Next() % 127)
 }
 
-func (a *authChainA) EncodePkt(buf *swBytes.Buffer) (err error) {
-	authData := pool.Get(3)
-	defer pool.Put(authData)
+func (a *authChainA) EncodePkt(buf *bytes.Buffer) (err error) {
+	authData := pool.GetBuffer(3)
+	defer pool.PutBuffer(authData)
 	rand.Read(authData)
 
 	md5Data := a.hmac(a.Key, authData)
@@ -268,15 +267,16 @@ func (a *authChainA) EncodePkt(buf *swBytes.Buffer) (err error) {
 	}
 	rc4Cipher.XORKeyStream(buf.Bytes(), buf.Bytes())
 
-	buf.Extend(randDataLength)
-	rand.Read(buf.Bytes()[buf.Len()-randDataLength:])
+	extendBuf := make([]byte, randDataLength)
+	rand.Read(extendBuf)
+	buf.Write(extendBuf)
 	buf.Write(authData)
 	binary.Write(buf, binary.LittleEndian, binary.LittleEndian.Uint32(a.uid[:])^binary.LittleEndian.Uint32(md5Data[:4]))
 	buf.Write(a.hmac(a.userKey, buf.Bytes())[:1])
 	return nil
 }
 
-func (a *authChainA) DecodePkt(in []byte) (out pool.Bytes, err error) {
+func (a *authChainA) DecodePkt(in []byte) (out []byte, err error) {
 	if len(in) < 9 {
 		return nil, ErrAuthChainDataLengthError
 	}
@@ -294,7 +294,7 @@ func (a *authChainA) DecodePkt(in []byte) (out pool.Bytes, err error) {
 	}
 	data := in[:len(in)-8-randDataLength]
 	rc4Cipher.XORKeyStream(data, data)
-	return pool.B(data), nil
+	return data, nil
 }
 
 func (a *authChainA) Encode(plainData []byte) (outData []byte, err error) {

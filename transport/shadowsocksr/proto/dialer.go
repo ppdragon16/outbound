@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/netproxy"
@@ -19,7 +20,23 @@ type Dialer struct {
 	protocolData  interface{}
 }
 
-func (d *Dialer) protocolFromInnerConn(conn netproxy.Conn, addr socks.Addr) (proto IProtocol, err error) {
+func (d *Dialer) Alive() bool {
+	return d.NextDialer.Alive()
+}
+
+func (d *Dialer) Connect() error {
+	return d.NextDialer.Connect()
+}
+
+func (d *Dialer) Disconnect() error {
+	return d.NextDialer.Disconnect()
+}
+
+func (d *Dialer) ListenPacket(ctx context.Context, address string) (net.PacketConn, error) {
+	return d.NextDialer.ListenPacket(ctx, address)
+}
+
+func (d *Dialer) protocolFromInnerConn(conn interface{}, addr socks.Addr) (proto IProtocol, err error) {
 	proto = NewProtocol(d.Protocol)
 	if proto == nil {
 		return nil, errors.New("unsupported protocol type: " + d.Protocol)
@@ -49,8 +66,8 @@ func (d *Dialer) protocolFromInnerConn(conn netproxy.Conn, addr socks.Addr) (pro
 	}
 }
 
-func (d *Dialer) DialContext(ctx context.Context, network, address string) (netproxy.Conn, error) {
-	magicNetwork, err := netproxy.ParseMagicNetwork(network)
+func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	magicNetwork, err := shadowsocks_stream.ParseMagicNetwork(network)
 	if err != nil {
 		return nil, err
 	}

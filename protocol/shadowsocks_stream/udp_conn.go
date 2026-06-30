@@ -2,6 +2,7 @@ package shadowsocks_stream
 
 import (
 	"fmt"
+	"net"
 	"net/netip"
 
 	"github.com/daeuniverse/outbound/ciphers"
@@ -12,13 +13,13 @@ import (
 
 // UdpConn the struct that override the netproxy.Conn methods
 type UdpConn struct {
-	netproxy.PacketConn
+	PacketConn
 	cipher      *ciphers.StreamCipher
 	defaultAddr socks.Addr
 	proxyAddr   string
 }
 
-func NewUdpConn(c netproxy.PacketConn, cipher *ciphers.StreamCipher, defaultAddr socks.Addr, proxyAddr string) *UdpConn {
+func NewUdpConn(c PacketConn, cipher *ciphers.StreamCipher, defaultAddr socks.Addr, proxyAddr string) *UdpConn {
 	return &UdpConn{
 		PacketConn:  c,
 		cipher:      cipher,
@@ -29,6 +30,14 @@ func NewUdpConn(c netproxy.PacketConn, cipher *ciphers.StreamCipher, defaultAddr
 
 func (c *UdpConn) Cipher() *ciphers.StreamCipher {
 	return c.cipher
+}
+
+func (c *UdpConn) LocalAddr() net.Addr {
+	return netproxy.NewAddr("udp", c.proxyAddr)
+}
+
+func (c *UdpConn) RemoteAddr() net.Addr {
+	return netproxy.NewAddr("udp", c.proxyAddr)
 }
 
 func (c *UdpConn) ReadFrom(b []byte) (n int, from netip.AddrPort, err error) {
@@ -64,8 +73,8 @@ func (c *UdpConn) ReadFrom(b []byte) (n int, from netip.AddrPort, err error) {
 
 func (c *UdpConn) writeTo(p []byte, addr socks.Addr) (n int, err error) {
 	infoIvLen := c.cipher.InfoIVLen()
-	buf := pool.Get(infoIvLen + len(addr) + len(p))
-	defer pool.Put(buf)
+	buf := pool.GetBuffer(infoIvLen + len(addr) + len(p))
+	defer pool.PutBuffer(buf)
 	enc, err := c.cipher.NewEncryptor(buf)
 	if err != nil {
 		return 0, err
@@ -93,8 +102,8 @@ func (c *UdpConn) Write(b []byte) (n int, err error) {
 
 func (c *UdpConn) WriteTransport(p []byte) (n int, err error) {
 	infoIvLen := c.cipher.InfoIVLen()
-	buf := pool.Get(infoIvLen + len(p))
-	defer pool.Put(buf)
+	buf := pool.GetBuffer(infoIvLen + len(p))
+	defer pool.PutBuffer(buf)
 	enc, err := c.cipher.NewEncryptor(buf)
 	if err != nil {
 		return 0, err

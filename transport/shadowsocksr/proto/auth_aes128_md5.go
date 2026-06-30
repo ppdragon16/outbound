@@ -12,8 +12,6 @@ import (
 
 	"github.com/daeuniverse/outbound/common"
 	rand "github.com/daeuniverse/outbound/pkg/fastrand"
-	"github.com/daeuniverse/outbound/pool"
-	swBytes "github.com/daeuniverse/outbound/pool/bytes"
 )
 
 func init() {
@@ -28,7 +26,7 @@ func NewAuthAES128MD5() IProtocol {
 		packID:     1,
 		recvInfo: recvInfo{
 			recvID: 1,
-			buffer: new(swBytes.Buffer),
+			buffer: &bytes.Buffer{},
 		},
 	}
 	return a
@@ -36,7 +34,7 @@ func NewAuthAES128MD5() IProtocol {
 
 type recvInfo struct {
 	recvID uint32
-	buffer *swBytes.Buffer
+	buffer *bytes.Buffer
 }
 
 type authAES128 struct {
@@ -199,20 +197,20 @@ func (a *authAES128) packAuthData(data []byte) (outData []byte) {
 	return
 }
 
-func (a *authAES128) EncodePkt(buf *swBytes.Buffer) (err error) {
+func (a *authAES128) EncodePkt(buf *bytes.Buffer) (err error) {
 	buf.Write(a.uid[:])
 	buf.Write(a.hmac(a.userKey, buf.Bytes())[:4])
 	return nil
 }
 
-func (a *authAES128) DecodePkt(in []byte) (out pool.Bytes, err error) {
+func (a *authAES128) DecodePkt(in []byte) (out []byte, err error) {
 	if len(in) < 4 {
 		return nil, ErrAuthAES128DataLengthError
 	}
 	if !bytes.Equal(a.hmac(a.Key, in[:len(in)-4])[:4], in[len(in)-4:]) {
 		return nil, ErrAuthAES128IncorrectChecksum
 	}
-	return pool.B(in[:len(in)-4]), nil
+	return in[:len(in)-4], nil
 }
 
 func (a *authAES128) Encode(plainData []byte) (outData []byte, err error) {

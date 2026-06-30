@@ -34,16 +34,21 @@ type ShadowsocksR struct {
 	Protocol   string `json:"protocol"`
 }
 
-func NewShadowsocksR(option *dialer.ExtraOption, nextDialer netproxy.Dialer, link string) (netproxy.Dialer, *dialer.Property, error) {
+func NewShadowsocksR(link string) (dialer.Dialer, *dialer.Property, error) {
 	s, err := ParseSSRURL(link)
 	if err != nil {
 		return nil, nil, err
 	}
-	return s.Dialer(option, nextDialer)
+	return s, &dialer.Property{
+		Name:     s.Name,
+		Address:  net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
+		Protocol: s.Protocol,
+		Link:     s.ExportToURL(),
+	}, nil
 }
 
-func (s *ShadowsocksR) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (netproxy.Dialer, *dialer.Property, error) {
-	d := nextDialer
+func (s *ShadowsocksR) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) (netproxy.Dialer, error) {
+	d := parentDialer
 	obfsDialer, err := obfs.NewDialer(d, &obfs.ObfsParam{
 		ObfsHost:  s.Server,
 		ObfsPort:  uint16(s.Port),
@@ -51,17 +56,16 @@ func (s *ShadowsocksR) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Di
 		ObfsParam: s.ObfsParam,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	d = obfsDialer
 	d, err = protocol.NewDialer("shadowsocks_stream", d, protocol.Header{
 		ProxyAddress: net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
 		Cipher:       s.Cipher,
 		Password:     s.Password,
-		IsClient:     true,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	d = &proto.Dialer{
 		NextDialer:    d,
@@ -70,12 +74,7 @@ func (s *ShadowsocksR) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Di
 		ObfsOverhead:  obfsDialer.ObfsOverhead(),
 	}
 
-	return d, &dialer.Property{
-		Name:     s.Name,
-		Address:  net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
-		Protocol: s.Protocol,
-		Link:     s.ExportToURL(),
-	}, nil
+	return d, nil
 }
 
 func ParseSSRURL(u string) (data *ShadowsocksR, err error) {

@@ -82,8 +82,8 @@ func (t *httpSimplePost) GetData() interface{} {
 var base62table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 func (t *httpSimplePost) boundary() (ret string) {
-	b := pool.Get(32)
-	defer pool.Put(b)
+	b := pool.GetBuffer(32)
+	defer pool.PutBuffer(b)
 	rand.Read(b)
 	for i := 0; i < 32; i++ {
 		b[i] = base62table[b[i]%62]
@@ -94,8 +94,8 @@ func (t *httpSimplePost) boundary() (ret string) {
 const hextable = "0123456789abcdef"
 
 func (t *httpSimplePost) data2URLEncode(data []byte) (ret string) {
-	dst := pool.Get(len(data) * 3)
-	defer pool.Put(dst)
+	dst := pool.GetBuffer(len(data) * 3)
+	defer pool.PutBuffer(dst)
 	for i, j := 0, 0; i < len(data); i, j = i+1, j+3 {
 		dst[j] = '%'
 		dst[j+1] = hextable[data[i]>>4]

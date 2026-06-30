@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/protocol/shadowsocks_stream"
 )
 
 type Dialer struct {
@@ -40,8 +42,24 @@ func (d *Dialer) ObfsOverhead() int {
 	return d.constructor.Overhead
 }
 
-func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netproxy.Conn, error) {
-	magicNetwork, err := netproxy.ParseMagicNetwork(network)
+func (d *Dialer) Alive() bool {
+	return d.NextDialer.Alive()
+}
+
+func (d *Dialer) Connect() error {
+	return d.NextDialer.Connect()
+}
+
+func (d *Dialer) Disconnect() error {
+	return d.NextDialer.Disconnect()
+}
+
+func (d *Dialer) ListenPacket(ctx context.Context, address string) (net.PacketConn, error) {
+	return d.NextDialer.ListenPacket(ctx, address)
+}
+
+func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	magicNetwork, err := shadowsocks_stream.ParseMagicNetwork(network)
 	if err != nil {
 		return nil, err
 	}

@@ -335,9 +335,8 @@ func (h *http2Conn) Close() error {
 }
 
 type h2Conn struct {
-	lastAccess time.Time
-	rawConn    net.Conn
-	h2Conn     *http2.ClientConn
+	rawConn net.Conn
+	h2Conn  *http2.ClientConn
 }
 
 type lockedList struct {

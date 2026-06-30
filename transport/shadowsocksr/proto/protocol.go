@@ -1,10 +1,9 @@
 package proto
 
 import (
+	"bytes"
 	"strings"
 
-	"github.com/daeuniverse/outbound/pool"
-	"github.com/daeuniverse/outbound/pool/bytes"
 	"github.com/daeuniverse/outbound/transport/shadowsocksr/internal/crypto"
 )
 
@@ -24,7 +23,7 @@ type IProtocol interface {
 	Encode(data []byte) ([]byte, error)
 	Decode(data []byte) ([]byte, int, error)
 	EncodePkt(buf *bytes.Buffer) error
-	DecodePkt(data []byte) (pool.Bytes, error)
+	DecodePkt(data []byte) ([]byte, error)
 	SetData(data interface{})
 	GetData() interface{}
 	GetOverhead() int

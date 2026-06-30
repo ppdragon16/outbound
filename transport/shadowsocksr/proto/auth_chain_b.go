@@ -3,8 +3,9 @@ package proto
 import (
 	"sort"
 
+	"bytes"
+
 	"github.com/daeuniverse/outbound/common"
-	"github.com/daeuniverse/outbound/pool/bytes"
 	"github.com/daeuniverse/outbound/transport/shadowsocksr/internal/crypto"
 )
 
@@ -21,7 +22,7 @@ func NewAuthChainB() IProtocol {
 		rndPkt:     authChainAPktGetRandLen,
 		recvInfo: recvInfo{
 			recvID: 1,
-			buffer: new(bytes.Buffer),
+			buffer: &bytes.Buffer{},
 		},
 	}
 	return a

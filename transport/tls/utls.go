@@ -1,18 +1,10 @@
 package tls
 
 import (
-	"crypto/tls"
 	"fmt"
 
 	utls "github.com/refraction-networking/utls"
 )
-
-func uTLSConfigFromTLSConfig(config *tls.Config) *utls.Config {
-	return &utls.Config{
-		ServerName:         config.ServerName,
-		InsecureSkipVerify: config.InsecureSkipVerify,
-	}
-}
 
 var clientHelloIDMap = map[string]*utls.ClientHelloID{
 	"random":            &utls.HelloRandomized,

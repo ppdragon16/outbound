@@ -3,6 +3,7 @@ package shadowsocks_stream
 import (
 	"context"
 	"fmt"
+	"net"
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/netproxy"
@@ -19,8 +20,8 @@ const (
 )
 
 type Dialer struct {
-	nextDialer netproxy.Dialer
-	addr       string
+	protocol.StatelessDialer
+	addr string
 
 	EncryptMethod   string
 	EncryptPassword string
@@ -28,7 +29,9 @@ type Dialer struct {
 
 func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
 	return &Dialer{
-		nextDialer:      nextDialer,
+		StatelessDialer: protocol.StatelessDialer{
+			ParentDialer: nextDialer,
+		},
 		addr:            header.ProxyAddress,
 		EncryptMethod:   header.Cipher,
 		EncryptPassword: header.Password,
@@ -40,8 +43,8 @@ func (d *Dialer) Addr() string {
 	return d.addr
 }
 
-func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netproxy.Conn, error) {
-	magicNetwork, err := netproxy.ParseMagicNetwork(network)
+func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	magicNetwork, err := ParseMagicNetwork(network)
 	if err != nil {
 		return nil, err
 	}
@@ -76,23 +79,23 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (netprox
 			return nil, err
 		}
 
-		c, err := d.nextDialer.DialContext(ctx, network, d.addr)
+		c, err := d.ParentDialer.DialContext(ctx, network, d.addr)
 		if err != nil {
 			return nil, fmt.Errorf("dial to %v error: %w", d.addr, err)
 		}
-		return NewUdpConn(c.(netproxy.PacketConn), ciph, target, d.addr), nil
+		return NewUdpConn(c.(PacketConn), ciph, target, d.addr), nil
 	default:
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
 }
 
-func (d *Dialer) DialTcpTransport(ctx context.Context, magicNetwork string) (netproxy.Conn, error) {
+func (d *Dialer) DialTcpTransport(ctx context.Context, magicNetwork string) (net.Conn, error) {
 	ciph, err := ciphers.NewStreamCipher(d.EncryptMethod, d.EncryptPassword)
 	if err != nil {
 		return nil, err
 	}
 
-	c, err := d.nextDialer.DialContext(ctx, magicNetwork, d.addr)
+	c, err := d.ParentDialer.DialContext(ctx, magicNetwork, d.addr)
 	if err != nil {
 		return nil, fmt.Errorf("dial to %v error: %w", d.addr, err)
 	}
@@ -102,10 +105,18 @@ func (d *Dialer) DialTcpTransport(ctx context.Context, magicNetwork string) (net
 	return conn, err
 }
 
-func (d *Dialer) DialUdpTransport(ctx context.Context, magicNetwork string) (netproxy.PacketConn, error) {
+func (d *Dialer) DialUdpTransport(ctx context.Context, magicNetwork string) (PacketConn, error) {
 	conn, err := d.DialContext(ctx, magicNetwork, TransportMagicAddr)
 	if err != nil {
 		return nil, err
 	}
-	return &UdpTransportConn{UdpConn: conn.(*UdpConn)}, nil
+	udpConn, ok := conn.(*UdpConn)
+	if !ok {
+		return nil, fmt.Errorf("dialed conn is not *UdpConn")
+	}
+	return &UdpTransportConn{UdpConn: udpConn}, nil
+}
+
+func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
+	return d.ParentDialer.ListenPacket(ctx, addr)
 }

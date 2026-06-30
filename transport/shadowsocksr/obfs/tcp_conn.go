@@ -4,14 +4,14 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"net"
 	"sync"
 
 	"github.com/daeuniverse/outbound/ciphers"
-	"github.com/daeuniverse/outbound/netproxy"
 )
 
 type Conn struct {
-	netproxy.Conn
+	net.Conn
 	Obfs                IObfs
 	underPostdecryptBuf *bytes.Buffer
 	readLater           io.Reader
@@ -24,7 +24,7 @@ type Conn struct {
 	writeMu sync.Mutex
 }
 
-func NewConn(c netproxy.Conn, obfs IObfs) (*Conn, error) {
+func NewConn(c net.Conn, obfs IObfs) (*Conn, error) {
 	return &Conn{
 		Conn:                c,
 		Obfs:                obfs,
