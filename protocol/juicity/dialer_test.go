@@ -19,7 +19,7 @@ type Params struct {
 }
 
 func TestTcp(t *testing.T) {
-	d, err := NewDialer(direct.SymmetricDirect, protocol.Header{
+	d, err := NewDialer(direct.Direct, protocol.Header{
 		ProxyAddress: "example.com:50001",
 		SNI:          "",
 		Feature1:     "bbr",
@@ -52,7 +52,7 @@ func TestTcp(t *testing.T) {
 }
 
 func TestUdp(t *testing.T) {
-	d, err := NewDialer(direct.SymmetricDirect, protocol.Header{
+	d, err := NewDialer(direct.Direct, protocol.Header{
 		ProxyAddress: "example.com:50001",
 		SNI:          "",
 		Feature1:     "bbr",

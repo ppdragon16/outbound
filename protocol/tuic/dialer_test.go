@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/direct"
 )
@@ -20,7 +19,7 @@ type Params struct {
 }
 
 func TestTcp(t *testing.T) {
-	d, err := NewDialer(direct.SymmetricDirect, protocol.Header{
+	d, err := NewDialer(direct.Direct, protocol.Header{
 		ProxyAddress: "example.com:10383",
 		SNI:          "",
 		Feature1:     "bbr",
@@ -28,7 +27,6 @@ func TestTcp(t *testing.T) {
 		Cipher:       "",
 		User:         "00000000-0000-0000-0000-000000000000",
 		Password:     "password",
-		IsClient:     true,
 		Flags:        0,
 	})
 	if err != nil {
@@ -41,11 +39,7 @@ func TestTcp(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			return &netproxy.FakeNetConn{
-				Conn:  c,
-				LAddr: nil,
-				RAddr: nil,
-			}, nil
+			return c, nil
 		}},
 	}
 	resp, err := c.Get("https://ipinfo.io")
@@ -59,7 +53,7 @@ func TestTcp(t *testing.T) {
 }
 
 func TestUdp(t *testing.T) {
-	d, err := NewDialer(direct.SymmetricDirect, protocol.Header{
+	d, err := NewDialer(direct.Direct, protocol.Header{
 		ProxyAddress: "example.com:10383",
 		SNI:          "",
 		Feature1:     "bbr",
@@ -67,7 +61,6 @@ func TestUdp(t *testing.T) {
 		Cipher:       "",
 		User:         "00000000-0000-0000-0000-000000000000",
 		Password:     "password",
-		IsClient:     true,
 		Flags:        0,
 	})
 	if err != nil {
@@ -84,11 +77,7 @@ func TestUdp(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			return netproxy.NewFakeNetPacketConn(
-				c.(netproxy.PacketConn),
-				nil,
-				nil,
-			), nil
+			return c, nil
 		},
 	}
 	ips, err := resolver.LookupNetIP(context.TODO(), "ip", "www.baidu.com")
