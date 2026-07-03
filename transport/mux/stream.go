@@ -324,7 +324,6 @@ func (st *stream) readTimerCallback() {
 		return
 	}
 	st.readCond.Broadcast()
-	st.readDeadline.CompareAndSwap(dl, 0)
 }
 
 func (st *stream) SetWriteDeadline(t time.Time) error {
