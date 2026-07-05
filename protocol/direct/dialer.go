@@ -2,6 +2,7 @@ package direct
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -32,12 +33,19 @@ type directDialer struct {
 	fallbackResolver *net.Resolver
 	dialer           *net.Dialer
 	option           Option
-	dnsCache         map[string]*dnsCacheEntry
+	dnsCache         map[string]*dnsCacheEntry // keyed by "host:port"
 	dnsCacheMu       sync.RWMutex
 }
 
+const (
+	// perIpDialTimeout is the timeout for each fallback IP dial attempt.
+	// The first (cached) IP uses the full context deadline; subsequent
+	// fallback attempts use this shorter timeout to fail fast on blocked IPs.
+	perIpDialTimeout = 3 * time.Second
+)
+
 type dnsCacheEntry struct {
-	ip       string
+	ips      []string // remaining "ip:port" addrs to try; ips[0] is next
 	expireAt time.Time
 }
 
@@ -104,75 +112,156 @@ func (d *directDialer) Disconnect() error {
 	return nil
 }
 
+// DialContext dials a network address. If the address is a domain name, it
+// resolves all IPs and tries them sequentially until one succeeds. The first
+// working IP is cached so that subsequent calls use the same IP (important for
+// mux and for consistency with connectivity checks).
 func (d *directDialer) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
 	if network != "tcp" && network != "udp" {
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
 	}
-	addr, err = d.resolveAddr(ctx, addr)
+
+	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
+	}
+
+	// If the host is already an IP, dial directly — no DNS needed.
+	if _, err := netip.ParseAddr(host); err == nil {
+		return d.dialer.DialContext(ctx, network, addr)
+	}
+
+	return d.dialDomain(ctx, network, addr)
+}
+
+// dialDomain tries to dial addr (a "host:port" string). Phase 1 attempts
+// cached IPs; if they all fail the cache is invalidated and Phase 2
+// re-resolves DNS.
+func (d *directDialer) dialDomain(ctx context.Context, network, addr string) (net.Conn, error) {
+	d.dnsCacheMu.RLock()
+	entry, ok := d.dnsCache[addr]
+	d.dnsCacheMu.RUnlock()
+
+	if ok {
+		if time.Now().Before(entry.expireAt) {
+			if conn, err := d.tryCachedIPs(ctx, network, entry); err == nil {
+				return conn, nil
+			}
+		}
+		d.invalidateCache(addr)
+	}
+	return d.resolveAndDial(ctx, network, addr)
+}
+
+// dialContextWithTimeout dials with an optional per-attempt timeout. When
+// timeout would extend beyond the existing context deadline it is ignored,
+// so the caller's deadline is always respected.
+func (d *directDialer) dialContextWithTimeout(ctx context.Context, network, addr string, timeout time.Duration) (net.Conn, error) {
+	existingDeadline, _ := ctx.Deadline()
+	if timeout > 0 && time.Now().Add(timeout).Before(existingDeadline) {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
 	return d.dialer.DialContext(ctx, network, addr)
 }
 
-func (d *directDialer) resolveAddr(ctx context.Context, addr string) (string, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "", err
-	}
-
-	// Check if host is already an IP address
-	if _, err := netip.ParseAddr(host); err == nil {
-		// host is IP, return as-is
-		return addr, nil
-	}
-
-	// Host is a domain, check cache
-	d.dnsCacheMu.RLock()
-	entry, ok := d.dnsCache[host]
-	d.dnsCacheMu.RUnlock()
-
-	if ok && time.Now().Before(entry.expireAt) {
-		// Cache hit
-		return net.JoinHostPort(entry.ip, port), nil
-	}
-
-	// Cache miss or expired, resolve the domain
-	// Try to resolve using the resolver
-	addrs, err := d.resolver.LookupIP(ctx, "ip", host)
-	if err != nil {
-		// Try fallback resolver if main resolver fails
-		addrs, err = d.fallbackResolver.LookupIP(ctx, "ip", host)
-	}
-	if err != nil {
-		return "", err
-	}
-
-	if len(addrs) == 0 {
-		return "", fmt.Errorf("no IP found for domain: %s", host)
-	}
-
-	// Use the first IP (prefer IPv4 if available)
-	var resolvedIP string
-	for _, ip := range addrs {
-		if ip4 := ip.To4(); ip4 != nil {
-			resolvedIP = ip4.String()
+// tryCachedIPs tries each ip:port in the cached entry sequentially.
+func (d *directDialer) tryCachedIPs(ctx context.Context, network string, entry *dnsCacheEntry) (conn net.Conn, err error) {
+	var netErr net.Error
+	for i, ipAddr := range entry.ips {
+		if i == 0 {
+			conn, err = d.dialer.DialContext(ctx, network, ipAddr)
+		} else {
+			conn, err = d.dialContextWithTimeout(ctx, network, ipAddr, perIpDialTimeout)
+		}
+		if err == nil {
+			// Trim failed addrs; ips[0] is now the working addr.
+			d.dnsCacheMu.Lock()
+			entry.ips = entry.ips[i:]
+			entry.expireAt = time.Now().Add(d.option.CacheTTL)
+			d.dnsCacheMu.Unlock()
+			break
+		} else if !errors.As(err, &netErr) {
 			break
 		}
 	}
-	if resolvedIP == "" {
-		resolvedIP = addrs[0].String()
+	return conn, err
+}
+
+// resolveAndDial resolves the host in addr to all IPs and tries each
+// ip:port sequentially.
+func (d *directDialer) resolveAndDial(ctx context.Context, network, addr string) (conn net.Conn, err error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
 	}
 
-	// Store in cache
+	ips, err := d.resolveAllIPs(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	for i, ip := range ips {
+		ips[i] = net.JoinHostPort(ip, port)
+	}
+
+	for i, ipAddr := range ips {
+		if i == 0 {
+			conn, err = d.dialer.DialContext(ctx, network, ipAddr)
+		} else {
+			conn, err = d.dialContextWithTimeout(ctx, network, ipAddr, perIpDialTimeout)
+		}
+		if err == nil {
+			d.dnsCacheMu.Lock()
+			d.dnsCache[addr] = &dnsCacheEntry{
+				ips:      ips[i:], // working addr + remaining untried
+				expireAt: time.Now().Add(d.option.CacheTTL),
+			}
+			d.dnsCacheMu.Unlock()
+			break
+		}
+	}
+	return conn, err
+}
+
+// resolveAllIPs resolves host to all IP addresses, preferring IPv4 first.
+func (d *directDialer) resolveAllIPs(ctx context.Context, host string) ([]string, error) {
+	resolver := d.resolver
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
+	addrs, err := resolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		if d.fallbackResolver != nil {
+			addrs, err = d.fallbackResolver.LookupIP(ctx, "ip", host)
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("no IP found for domain: %s", host)
+	}
+
+	var ips []string
+	for _, ip := range addrs {
+		if ip.To4() != nil {
+			ips = append(ips, ip.String())
+		}
+	}
+	for _, ip := range addrs {
+		if ip.To4() == nil {
+			ips = append(ips, ip.String())
+		}
+	}
+	return ips, nil
+}
+
+// invalidateCache removes the cached entry for addr.
+func (d *directDialer) invalidateCache(addr string) {
 	d.dnsCacheMu.Lock()
-	d.dnsCache[host] = &dnsCacheEntry{
-		ip:       resolvedIP,
-		expireAt: time.Now().Add(d.option.CacheTTL),
-	}
+	delete(d.dnsCache, addr)
 	d.dnsCacheMu.Unlock()
-
-	return net.JoinHostPort(resolvedIP, port), nil
 }
 
 // TODO: Resolver fallback
