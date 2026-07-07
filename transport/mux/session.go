@@ -269,7 +269,10 @@ func (s *session) writeData(id uint16, data []byte) (int, error) {
 	copy(frame[8:], data)
 
 	s.writeMu.Lock()
+	// Set a write deadline to avoid blocking indefinitely on a dead connection.
+	s.conn.SetWriteDeadline(time.Now().Add(8 * time.Second))
 	_, err := s.conn.Write(frame)
+	s.conn.SetWriteDeadline(time.Time{})
 	s.writeMu.Unlock()
 	pool.PutBuffer(frame)
 	if err == nil {
@@ -286,7 +289,12 @@ func (s *session) writeEnd(id uint16) error {
 	frame[5] = OptionNone
 
 	s.writeMu.Lock()
+	// Set a write deadline to avoid blocking indefinitely on a dead
+	// connection (e.g., when AbortConns triggers stream.Close which
+	// calls writeEnd on a session whose remote peer has disappeared).
+	s.conn.SetWriteDeadline(time.Now().Add(8 * time.Second))
 	_, err := s.conn.Write(frame[:])
+	s.conn.SetWriteDeadline(time.Time{})
 	s.writeMu.Unlock()
 	if err == nil {
 		s.writeFailed.Store(false)
