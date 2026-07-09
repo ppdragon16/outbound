@@ -260,9 +260,19 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 		if s.Flow != "" {
 			return nil, fmt.Errorf("smux is incompatible with flow: %s", s.Flow)
 		}
+		concurrency := s.MuxConcurrency
+		if concurrency <= 0 {
+			concurrency = 8
+		}
+		idleTimeout := s.MuxIdleTimeout
+		if idleTimeout <= 0 {
+			idleTimeout = 300
+		}
 		return &smux.Smux{
 			Dialer:         d,
 			PassthroughUdp: true,
+			Concurrency:    concurrency,
+			IdleTimeout:    time.Duration(idleTimeout) * time.Second,
 		}, nil
 	}
 	if s.Mux {

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/dialer"
@@ -30,12 +32,27 @@ const (
 	statusError   = 1
 )
 
+// smuxSession wraps a smux.Session with pool metadata.
+type smuxSession struct {
+	*smux.Session
+
+	writeFailed atomic.Bool
+	conn        net.Conn // the underlying TCP connection
+}
+
 type Smux struct {
 	Dialer         netproxy.Dialer
 	PassthroughUdp bool
 
-	mu      sync.Mutex
-	session *smux.Session
+	// Concurrency is the max number of streams per session. 0 means unlimited.
+	Concurrency int
+
+	// IdleTimeout is the duration a session stays alive after its last stream
+	// closes. 0 means sessions live forever.
+	IdleTimeout time.Duration
+
+	mu       sync.Mutex
+	sessions []*smuxSession
 }
 
 type SmuxConfig struct {
@@ -50,71 +67,96 @@ func (s *SmuxConfig) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dial
 }
 
 func (s *Smux) Connect() (err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.session != nil {
-		s.session.Close()
-		s.session = nil
-	}
-
-	ctx, cancel := netproxy.NewDialTimeoutContext()
-	defer cancel()
-	conn, err := s.Dialer.DialContext(ctx, "tcp", "sp.mux.sing-box.arpa:444")
-	if err != nil {
-		return err
-	}
-	_, err = common.Invoke(ctx, func() (any, error) {
-		return conn.Write([]byte{Version0, ProtocolSmux})
-	}, func() {
-		conn.Close()
-	})
-	if err != nil {
-		return
-	}
-	s.session, _ = smux.Client(conn, nil)
-	return
+	// Lazy initialization: the first DialContext will create a session.
+	return nil
 }
 
 func (s *Smux) Disconnect() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.session != nil {
-		err := s.session.Close()
-		s.session = nil
-		return err
+	for _, sess := range s.sessions {
+		sess.Close()
 	}
+	s.sessions = nil
 	return nil
 }
 
 func (s *Smux) Alive() bool {
-	if !s.Dialer.Alive() {
-		return false
-	}
+	return s.Dialer.Alive()
+}
+
+// getSession returns an available session from the pool, or creates a new one.
+func (s *Smux) getSession(ctx context.Context) (*smuxSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.session == nil {
-		return false
+
+	// Prune dead sessions and find a healthy, non-full one.
+	var alive []*smuxSession
+	for _, sess := range s.sessions {
+		if sess.IsClosed() || sess.writeFailed.Load() {
+			continue
+		}
+		alive = append(alive, sess)
+		if s.Concurrency <= 0 || sess.NumStreams() < s.Concurrency {
+			s.sessions = alive
+			return sess, nil
+		}
 	}
-	if s.session.IsClosed() {
-		return false
+	s.sessions = alive
+
+	// No available session — create a new one.
+	dialCtx, cancel := netproxy.NewDialTimeoutContextFrom(ctx)
+	defer cancel()
+	conn, err := s.Dialer.DialContext(dialCtx, "tcp", "sp.mux.sing-box.arpa:444")
+	if err != nil {
+		return nil, err
 	}
-	return true
+
+	_, err = common.Invoke(dialCtx, func() (any, error) {
+		return conn.Write([]byte{Version0, ProtocolSmux})
+	}, func() {
+		conn.Close()
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	session, err := smux.Client(conn, nil)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	ss := &smuxSession{
+		Session: session,
+		conn:    conn,
+	}
+	s.sessions = append(s.sessions, ss)
+	return ss, nil
 }
 
 func (s *Smux) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
 	switch network {
 	case "tcp":
-		s.mu.Lock()
-		session := s.session
-		s.mu.Unlock()
-		if session == nil {
-			return nil, net.ErrClosed
-		}
-		stream, err := session.OpenStream()
+		sess, err := s.getSession(ctx)
 		if err != nil {
 			return nil, err
+		}
+		stream, err := sess.OpenStream()
+		if err != nil {
+			sess.writeFailed.Store(true)
+			// Retry once with a new session.
+			sess2, err2 := s.getSession(ctx)
+			if err2 != nil {
+				return nil, err
+			}
+			stream, err = sess2.OpenStream()
+			if err != nil {
+				sess2.writeFailed.Store(true)
+				return nil, err
+			}
+			return &Conn{Conn: stream, addr: addr}, nil
 		}
 		return &Conn{Conn: stream, addr: addr}, nil
 	case "udp":
@@ -132,14 +174,13 @@ func (s *Smux) DialContext(ctx context.Context, network, addr string) (c net.Con
 }
 
 func (s *Smux) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
-	s.mu.Lock()
-	session := s.session
-	s.mu.Unlock()
-	if session == nil {
-		return nil, net.ErrClosed
-	}
-	stream, err := session.OpenStream()
+	sess, err := s.getSession(ctx)
 	if err != nil {
+		return nil, err
+	}
+	stream, err := sess.OpenStream()
+	if err != nil {
+		sess.writeFailed.Store(true)
 		return nil, err
 	}
 	return &UDPConn{Conn: Conn{Conn: stream, addr: addr, udp: true, packetAddr: true}}, nil
