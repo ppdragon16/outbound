@@ -18,7 +18,6 @@ require (
 	github.com/samber/oops v1.19.4
 	github.com/seiflotfy/cuckoofilter v0.0.0-20240715131351-a2f2c23f1771
 	github.com/sirupsen/logrus v1.9.3
-	github.com/xtaci/smux v1.5.44
 	gitlab.com/yawning/chacha20.git v0.0.0-20230427033715-7877545b1b37
 	golang.org/x/crypto v0.45.0
 	golang.org/x/exp v0.0.0-20251125195548-87e1e737ad39

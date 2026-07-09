@@ -11,7 +11,7 @@ import (
 	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
-	"github.com/xtaci/smux"
+	smuxcore "github.com/daeuniverse/outbound/transport/smux/smux"
 )
 
 const (
@@ -32,9 +32,9 @@ const (
 	statusError   = 1
 )
 
-// smuxSession wraps a smux.Session with pool metadata.
+// smuxSession wraps a smuxcore.Session with pool metadata.
 type smuxSession struct {
-	*smux.Session
+	*smuxcore.Session
 
 	writeFailed atomic.Bool
 	conn        net.Conn // the underlying TCP connection
@@ -122,7 +122,7 @@ func (s *Smux) getSession(ctx context.Context) (*smuxSession, error) {
 		return nil, err
 	}
 
-	session, err := smux.Client(conn, nil)
+	session, err := smuxcore.Client(conn, nil)
 	if err != nil {
 		conn.Close()
 		return nil, err
