@@ -19,6 +19,7 @@ import (
 	"github.com/daeuniverse/outbound/transport/httpupgrade"
 	"github.com/daeuniverse/outbound/transport/meek"
 	"github.com/daeuniverse/outbound/transport/mux"
+	"github.com/daeuniverse/outbound/transport/smux"
 	"github.com/daeuniverse/outbound/transport/tls"
 	"github.com/daeuniverse/outbound/transport/ws"
 	jsoniter "github.com/json-iterator/go"
@@ -53,6 +54,7 @@ type V2Ray struct {
 	Mux            bool   `json:"mux,omitempty"`
 	MuxConcurrency int    `json:"muxConcurrency,omitempty"`
 	MuxIdleTimeout int    `json:"muxIdleTimeout,omitempty"`
+	Smux           bool   `json:"smux,omitempty"`
 }
 
 func NewV2Ray(link string) (dialer.Dialer, *dialer.Property, error) {
@@ -245,7 +247,7 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 		Password:     s.ID,
 		Feature1:     s.Flow,
 		Flags: func() protocol.Flags {
-			if s.Mux {
+			if s.Mux && !s.Smux {
 				return protocol.Flags_VLess_TcpMux
 			}
 			return 0
@@ -253,6 +255,15 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 		//Flags:        protocol.Flags_VMess_UsePacketAddr,
 	}); err != nil {
 		return nil, err
+	}
+	if s.Smux {
+		if s.Flow != "" {
+			return nil, fmt.Errorf("smux is incompatible with flow: %s", s.Flow)
+		}
+		return &smux.Smux{
+			Dialer:         d,
+			PassthroughUdp: true,
+		}, nil
 	}
 	if s.Mux {
 		if s.Flow != "" {
@@ -307,6 +318,7 @@ func ParseVlessURL(vless string) (data *V2Ray, err error) {
 	if !data.Mux {
 		data.Mux, _ = strconv.ParseBool(u.Query().Get("multiplex"))
 	}
+	data.Smux, _ = strconv.ParseBool(u.Query().Get("smux"))
 	data.MuxConcurrency, _ = strconv.Atoi(u.Query().Get("mux_concurrency"))
 	data.MuxIdleTimeout, _ = strconv.Atoi(u.Query().Get("mux_idle_timeout"))
 	if data.Net == "" {
@@ -392,6 +404,7 @@ func ParseVmessURL(vmess string) (data *V2Ray, err error) {
 		if !info.Mux {
 			info.Mux, _ = strconv.ParseBool(q.Get("multiplex"))
 		}
+		info.Smux, _ = strconv.ParseBool(q.Get("smux"))
 		info.MuxConcurrency, _ = strconv.Atoi(q.Get("mux_concurrency"))
 		info.MuxIdleTimeout, _ = strconv.Atoi(q.Get("mux_idle_timeout"))
 		if info.Net == "websocket" {
@@ -465,7 +478,7 @@ func (s *V2Ray) ExportToURL() string {
 			if s.AllowInsecure {
 				common.SetValue(&query, "allowInsecure", "1")
 			}
-			if s.Mux {
+			if s.Mux && !s.Smux {
 				common.SetValue(&query, "mux", "1")
 				if s.MuxConcurrency > 0 {
 					common.SetValue(&query, "mux_concurrency", strconv.Itoa(s.MuxConcurrency))
@@ -476,6 +489,9 @@ func (s *V2Ray) ExportToURL() string {
 			}
 		}
 
+		if s.Smux {
+			common.SetValue(&query, "smux", "1")
+		}
 		U := url.URL{
 			Scheme:   "vless",
 			User:     url.User(s.ID),
