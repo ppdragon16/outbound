@@ -31,6 +31,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/daeuniverse/outbound/pool"
 )
 
 const (
@@ -618,7 +620,6 @@ func (s *Session) notifyShaperConsumed() {
 
 // sendLoop sends frames over the underlying connection
 func (s *Session) sendLoop() {
-	var buf []byte
 	var n int
 	var err error
 	var vec [][]byte // vector for writeBuffers
@@ -626,12 +627,17 @@ func (s *Session) sendLoop() {
 	bw, ok := s.conn.(interface {
 		WriteBuffers(v [][]byte) (n int, err error)
 	})
-
 	if ok {
-		buf = make([]byte, headerSize)
 		vec = make([][]byte, 2)
-	} else {
-		buf = make([]byte, (1<<16)+headerSize)
+	}
+
+	getBufferWithRequestHeader := func(dataSize int, request writeRequest) []byte {
+		buf := pool.GetBuffer(dataSize + headerSize)
+		buf[0] = request.frame.ver
+		buf[1] = request.frame.cmd
+		binary.LittleEndian.PutUint16(buf[2:], uint16(len(request.frame.data)))
+		binary.LittleEndian.PutUint32(buf[4:], request.frame.sid)
+		return buf
 	}
 
 EVENT_LOOP:
@@ -648,20 +654,19 @@ EVENT_LOOP:
 					goto EVENT_LOOP
 				}
 
-				buf[0] = request.frame.ver
-				buf[1] = request.frame.cmd
-				binary.LittleEndian.PutUint16(buf[2:], uint16(len(request.frame.data)))
-				binary.LittleEndian.PutUint32(buf[4:], request.frame.sid)
-
+				var buf []byte
 				// support for scatter-gather I/O
 				if len(vec) > 0 {
+					buf = getBufferWithRequestHeader(0, request)
 					vec[0] = buf[:headerSize]
 					vec[1] = request.frame.data
 					n, err = bw.WriteBuffers(vec)
 				} else {
+					buf = getBufferWithRequestHeader(len(request.frame.data), request)
 					copy(buf[headerSize:], request.frame.data)
-					n, err = s.conn.Write(buf[:headerSize+len(request.frame.data)])
+					n, err = s.conn.Write(buf)
 				}
+				pool.PutBuffer(buf)
 
 				n -= headerSize
 				if n < 0 {
