@@ -66,6 +66,12 @@ type stream struct {
 	readDeadline  atomic.Value
 	writeDeadline atomic.Value
 
+	// reusable timers to avoid per-call heap allocation from time.NewTimer.
+	// Each timer is used exclusively by one goroutine: readTimer by the
+	// Read path (waitRead/sendWindowUpdate), writeTimer by the Write path.
+	readTimer  *time.Timer
+	writeTimer *time.Timer
+
 	// v2 stream fields(flow control)
 	numRead    uint32 // count num of bytes read
 	numWritten uint32 // count num of bytes written
@@ -408,14 +414,29 @@ func (s *stream) writeToV2(w io.Writer) (n int64, err error) {
 	}
 }
 
+// resetTimer safely stops and resets t, draining its channel if needed.
+// If t is nil it is created; otherwise it is reused.
+func resetTimer(t **time.Timer, d time.Duration) *time.Timer {
+	if *t == nil {
+		*t = time.NewTimer(d)
+		return *t
+	}
+	if !(*t).Stop() {
+		select {
+		case <-(*t).C:
+		default:
+		}
+	}
+	(*t).Reset(d)
+	return *t
+}
+
 // sendWindowUpdate sends a window update command to the peer.
 func (s *stream) sendWindowUpdate(consumed uint32) error {
-	var timer *time.Timer
 	var deadline <-chan time.Time
 	if d, ok := s.readDeadline.Load().(time.Time); ok && !d.IsZero() {
-		timer = time.NewTimer(time.Until(d))
-		defer timer.Stop()
-		deadline = timer.C
+		deadline = resetTimer(&s.readTimer, time.Until(d)).C
+		defer s.readTimer.Stop()
 	}
 
 	frame := newFrame(byte(s.sess.config.Version), cmdUPD, s.id)
@@ -429,12 +450,10 @@ func (s *stream) sendWindowUpdate(consumed uint32) error {
 
 // waitRead blocks until a read event occurs or a deadline is reached.
 func (s *stream) waitRead() error {
-	var timer *time.Timer
 	var deadline <-chan time.Time
 	if d, ok := s.readDeadline.Load().(time.Time); ok && !d.IsZero() {
-		timer = time.NewTimer(time.Until(d))
-		defer timer.Stop()
-		deadline = timer.C
+		deadline = resetTimer(&s.readTimer, time.Until(d)).C
+		defer s.readTimer.Stop()
 	}
 
 	select {
@@ -501,9 +520,8 @@ func (s *stream) writeV1(b []byte) (n int, err error) {
 	// create write deadline timer
 	var deadline <-chan time.Time
 	if d, ok := s.writeDeadline.Load().(time.Time); ok && !d.IsZero() {
-		timer := time.NewTimer(time.Until(d))
-		defer timer.Stop()
-		deadline = timer.C
+		deadline = resetTimer(&s.writeTimer, time.Until(d)).C
+		defer s.writeTimer.Stop()
 	}
 
 	// frame split and transmit

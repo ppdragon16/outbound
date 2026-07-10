@@ -139,26 +139,27 @@ type Session struct {
 }
 
 func newSession(config *Config, conn io.ReadWriteCloser, client bool) *Session {
-	s := new(Session)
-	s.die = make(chan struct{})
-	s.conn = conn
-	s.config = config
-	s.streams = make(map[uint32]*stream)
-	s.chAccepts = make(chan *stream, defaultAcceptBacklog)
-	s.bucket = int32(config.MaxReceiveBuffer)
-	s.bucketNotify = make(chan struct{}, 1)
-	s.shaper = make(chan writeRequest, maxShaperSize)
-	s.chSocketReadError = make(chan struct{})
-	s.chSocketWriteError = make(chan struct{})
-	s.chProtoError = make(chan struct{})
-	s.chShaperPending = make(chan struct{}, 1)
-	s.chShaperConsumed = make(chan struct{}, 1)
-	s.sq = NewShaperQueue()
-
+	nextStreamID := uint32(0)
 	if client {
-		s.nextStreamID = 1
-	} else {
-		s.nextStreamID = 0
+		nextStreamID = 1
+	}
+
+	s := &Session{
+		conn:               conn,
+		config:             config,
+		nextStreamID:       nextStreamID,
+		streams:            make(map[uint32]*stream),
+		chAccepts:          make(chan *stream, defaultAcceptBacklog),
+		bucket:             int32(config.MaxReceiveBuffer),
+		bucketNotify:       make(chan struct{}, 1),
+		shaper:             make(chan writeRequest, maxShaperSize),
+		chSocketReadError:  make(chan struct{}),
+		chSocketWriteError: make(chan struct{}),
+		chProtoError:       make(chan struct{}),
+		chShaperPending:    make(chan struct{}, 1),
+		chShaperConsumed:   make(chan struct{}, 1),
+		sq:                 NewShaperQueue(),
+		die:                make(chan struct{}),
 	}
 
 	go s.shaperLoop()

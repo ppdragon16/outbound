@@ -58,16 +58,14 @@ type Config struct {
 	MaxStreamBuffer int
 }
 
-// DefaultConfig is used to return a default configuration
-func DefaultConfig() *Config {
-	return &Config{
-		Version:           1,
-		KeepAliveInterval: 10 * time.Second,
-		KeepAliveTimeout:  30 * time.Second,
-		MaxFrameSize:      32768,
-		MaxReceiveBuffer:  4194304,
-		MaxStreamBuffer:   65536,
-	}
+// DefaultConfig is the default configuration for SMux sessions.
+var DefaultConfig = &Config{
+	Version:           1,
+	KeepAliveInterval: 10 * time.Second,
+	KeepAliveTimeout:  30 * time.Second,
+	MaxFrameSize:      32768,
+	MaxReceiveBuffer:  4194304,
+	MaxStreamBuffer:   65536,
 }
 
 // VerifyConfig is used to verify the sanity of configuration
@@ -110,7 +108,7 @@ func VerifyConfig(config *Config) error {
 // Server is used to initialize a new server-side connection.
 func Server(conn io.ReadWriteCloser, config *Config) (*Session, error) {
 	if config == nil {
-		config = DefaultConfig()
+		config = DefaultConfig
 	}
 	if err := VerifyConfig(config); err != nil {
 		return nil, err
@@ -121,7 +119,7 @@ func Server(conn io.ReadWriteCloser, config *Config) (*Session, error) {
 // Client is used to initialize a new client-side connection.
 func Client(conn io.ReadWriteCloser, config *Config) (*Session, error) {
 	if config == nil {
-		config = DefaultConfig()
+		config = DefaultConfig
 	}
 
 	if err := VerifyConfig(config); err != nil {
