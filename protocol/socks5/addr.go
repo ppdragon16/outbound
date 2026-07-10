@@ -202,6 +202,26 @@ func AddressFromString(addr string) (*AddressInfo, error) {
 	return info, nil
 }
 
+// PutAddrPortLen encodes ATYP + IP + PORT + payload length into buf.
+// For IPv4: writes 9 bytes (1+4+2+2). For IPv6: writes 21 bytes (1+16+2+2).
+// It panics if buf is too small.
+func PutAddrPortLen(buf []byte, ap netip.AddrPort, payloadLen uint16) int {
+	addr := ap.Addr()
+	port := ap.Port()
+	if addr.Is4() {
+		buf[0] = byte(AddressTypeIPv4)
+		copy(buf[1:5], addr.AsSlice())
+		binary.BigEndian.PutUint16(buf[5:7], port)
+		binary.BigEndian.PutUint16(buf[7:9], payloadLen)
+		return 9
+	}
+	buf[0] = byte(AddressTypeIPv6)
+	copy(buf[1:17], addr.AsSlice())
+	binary.BigEndian.PutUint16(buf[17:19], port)
+	binary.BigEndian.PutUint16(buf[19:21], payloadLen)
+	return 21
+}
+
 func WriteAddrPort(ap netip.AddrPort, w io.Writer) error {
 	addr := ap.Addr()
 	port := ap.Port()

@@ -3,9 +3,10 @@ package smux
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"net"
+	"net/netip"
 
-	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/socks5"
 )
 
@@ -14,33 +15,56 @@ type UDPConn struct {
 }
 
 func (c *UDPConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
-	addr, err = socks5.ReadAddr(&c.Conn)
+	n, ap, err := c.ReadFromAddrPort(b)
 	if err != nil {
 		return 0, nil, err
 	}
-	var length uint16
-	err = binary.Read(&c.Conn, binary.BigEndian, &length)
-	if err != nil {
-		return 0, nil, err
-	}
-	n, err = c.Conn.Read(b)
-	if n != int(length) {
-		return 0, nil, fmt.Errorf("read length mismatch: %d != %d", n, length)
-	}
-	return n, addr, err
+	return n, net.UDPAddrFromAddrPort(ap), nil
 }
 
 func (c *UDPConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
-	buf := pool.GetBytesBuffer()
-	defer pool.PutBytesBuffer(buf)
-	if len(b) > 0 {
-		err = socks5.WriteAddr(addr.String(), buf)
-		if err != nil {
-			return 0, err
-		}
-		binary.Write(buf, binary.BigEndian, uint16(len(b)))
-		buf.Write(b)
+	ap, err := socks5.ToAddrPort(addr)
+	if err != nil {
+		return 0, err
 	}
-	_, err = c.Conn.Write(buf.Bytes())
-	return len(b), err
+	return c.WriteToAddrPort(b, ap)
+}
+
+func (c *UDPConn) ReadFromAddrPort(b []byte) (n int, addr netip.AddrPort, err error) {
+	addr, err = socks5.ReadAddrPort(&c.Conn)
+	if err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+	var lengthBuf [2]byte
+	if _, err = io.ReadFull(&c.Conn, lengthBuf[:]); err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+	length := binary.BigEndian.Uint16(lengthBuf[:])
+	if int(length) > len(b) {
+		return 0, netip.AddrPort{}, fmt.Errorf("buffer too small: %d < %d", len(b), length)
+	}
+	n, err = io.ReadFull(&c.Conn, b[:length])
+	if err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+	return n, addr, nil
+}
+
+func (c *UDPConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (n int, err error) {
+	if len(b) == 0 {
+		_, err = c.Conn.Write(nil)
+		return 0, err
+	}
+	// Stack-allocated header: ATYP(1) + IP(4/16) + PORT(2) + LENGTH(2).
+	// Two writes are safe because smux is a stream — the receiver reads
+	// addr, length, then payload sequentially via ReadFromAddrPort.
+	var header [21]byte
+	headerLen := socks5.PutAddrPortLen(header[:], ap, uint16(len(b)))
+	if _, err = c.Conn.Write(header[:headerLen]); err != nil {
+		return 0, err
+	}
+	if _, err = c.Conn.Write(b); err != nil {
+		return 0, err
+	}
+	return len(b), nil
 }
