@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/outbound/common"
@@ -32,14 +31,6 @@ const (
 	statusError   = 1
 )
 
-// smuxSession wraps a smuxcore.Session with pool metadata.
-type smuxSession struct {
-	*smuxcore.Session
-
-	writeFailed atomic.Bool
-	conn        net.Conn // the underlying TCP connection
-}
-
 type Smux struct {
 	Dialer         netproxy.Dialer
 	PassthroughUdp bool
@@ -52,7 +43,7 @@ type Smux struct {
 	IdleTimeout time.Duration
 
 	mu       sync.Mutex
-	sessions []*smuxSession
+	sessions []*smuxcore.Session
 }
 
 type SmuxConfig struct {
@@ -87,14 +78,14 @@ func (s *Smux) Alive() bool {
 }
 
 // getSession returns an available session from the pool, or creates a new one.
-func (s *Smux) getSession(ctx context.Context) (*smuxSession, error) {
+func (s *Smux) getSession(ctx context.Context) (*smuxcore.Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Prune dead sessions and find a healthy, non-full one.
-	var alive []*smuxSession
+	// Prune dead/full sessions and find a healthy, non-full one.
+	var alive []*smuxcore.Session
 	for _, sess := range s.sessions {
-		if sess.IsClosed() || sess.writeFailed.Load() {
+		if sess.IsClosed() || sess.IsStreamIDFull() {
 			continue
 		}
 		alive = append(alive, sess)
@@ -128,12 +119,21 @@ func (s *Smux) getSession(ctx context.Context) (*smuxSession, error) {
 		return nil, err
 	}
 
-	ss := &smuxSession{
-		Session: session,
-		conn:    conn,
+	s.sessions = append(s.sessions, session)
+	return session, nil
+}
+
+// closeAndRemoveSession closes a session and removes it from the active pool.
+func (s *Smux) closeAndRemoveSession(sess *smuxcore.Session) {
+	s.mu.Lock()
+	for i, se := range s.sessions {
+		if se == sess {
+			s.sessions = append(s.sessions[:i], s.sessions[i+1:]...)
+			break
+		}
 	}
-	s.sessions = append(s.sessions, ss)
-	return ss, nil
+	s.mu.Unlock()
+	sess.Close()
 }
 
 func (s *Smux) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
@@ -145,18 +145,8 @@ func (s *Smux) DialContext(ctx context.Context, network, addr string) (c net.Con
 		}
 		stream, err := sess.OpenStream()
 		if err != nil {
-			sess.writeFailed.Store(true)
-			// Retry once with a new session.
-			sess2, err2 := s.getSession(ctx)
-			if err2 != nil {
-				return nil, err
-			}
-			stream, err = sess2.OpenStream()
-			if err != nil {
-				sess2.writeFailed.Store(true)
-				return nil, err
-			}
-			return &Conn{Conn: stream, addr: addr}, nil
+			s.closeAndRemoveSession(sess)
+			return nil, err
 		}
 		return &Conn{Conn: stream, addr: addr}, nil
 	case "udp":
@@ -180,7 +170,7 @@ func (s *Smux) ListenPacket(ctx context.Context, addr string) (net.PacketConn, e
 	}
 	stream, err := sess.OpenStream()
 	if err != nil {
-		sess.writeFailed.Store(true)
+		s.closeAndRemoveSession(sess)
 		return nil, err
 	}
 	return &UDPConn{Conn: Conn{Conn: stream, addr: addr, udp: true, packetAddr: true}}, nil

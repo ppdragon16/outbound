@@ -317,6 +317,20 @@ func (s *Session) IsClosed() bool {
 	return atomic.LoadInt32(&s.closed) != 0
 }
 
+// IsStreamIDFull returns true if the session cannot create new streams due to
+// stream ID exhaustion or overflow.
+func (s *Session) IsStreamIDFull() bool {
+	s.nextStreamIDLock.Lock()
+	defer s.nextStreamIDLock.Unlock()
+	if s.goAway > 0 {
+		return true
+	}
+	if s.nextStreamID+2 < s.nextStreamID {
+		return true
+	}
+	return false
+}
+
 // NumStreams returns the number of currently open streams
 func (s *Session) NumStreams() int {
 	if s.IsClosed() {
