@@ -85,7 +85,7 @@ func (alloc *Allocator) get(bits byte, size int) *[]byte {
 		*p = (*p)[:size]
 		return p
 	default:
-		b := make([]byte, 1<<bits)
+		b := pool.GetBuffer(1 << bits)
 		p := &b
 		*p = b[:size]
 		return p
