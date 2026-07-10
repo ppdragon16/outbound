@@ -135,7 +135,9 @@ func (b *PooledBuffer) tryGrowByReslice(n int) (int, bool) {
 func (b *PooledBuffer) grow(n int) int {
 	m := b.Len()
 	if m == 0 && b.off != 0 {
-		b.Reset()
+		// Soft reset: reuse the backing array.
+		b.buf = b.buf[:0]
+		b.off = 0
 	}
 	if i, ok := b.tryGrowByReslice(n); ok {
 		return i
