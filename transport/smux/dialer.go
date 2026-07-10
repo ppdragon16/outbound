@@ -44,6 +44,8 @@ type Smux struct {
 
 	mu       sync.Mutex
 	sessions []*smuxcore.Session
+
+	idleTimers sync.Map // *smuxcore.Session → *time.Timer
 }
 
 type SmuxConfig struct {
@@ -119,6 +121,20 @@ func (s *Smux) getSession(ctx context.Context) (*smuxcore.Session, error) {
 		return nil, err
 	}
 
+	if s.IdleTimeout > 0 {
+		session.OnIdle = func() {
+			timer := time.AfterFunc(s.IdleTimeout, func() {
+				s.idleTimers.Delete(session)
+				if session.IsClosed() || session.NumStreams() > 0 {
+					return
+				}
+				s.removeSession(session)
+				session.Close()
+			})
+			s.idleTimers.Store(session, timer)
+		}
+	}
+
 	s.sessions = append(s.sessions, session)
 	return session, nil
 }
@@ -136,6 +152,13 @@ func (s *Smux) removeSession(sess *smuxcore.Session) {
 	s.mu.Unlock()
 }
 
+// cancelIdleTimer stops the pending idle timeout for a session, if any.
+func (s *Smux) cancelIdleTimer(sess *smuxcore.Session) {
+	if timer, ok := s.idleTimers.LoadAndDelete(sess); ok {
+		timer.(*time.Timer).Stop()
+	}
+}
+
 func (s *Smux) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
 	switch network {
 	case "tcp":
@@ -143,6 +166,7 @@ func (s *Smux) DialContext(ctx context.Context, network, addr string) (c net.Con
 		if err != nil {
 			return nil, err
 		}
+		s.cancelIdleTimer(sess)
 		stream, err := sess.OpenStream()
 		if err != nil {
 			s.removeSession(sess)
@@ -168,6 +192,7 @@ func (s *Smux) ListenPacket(ctx context.Context, addr string) (net.PacketConn, e
 	if err != nil {
 		return nil, err
 	}
+	s.cancelIdleTimer(sess)
 	stream, err := sess.OpenStream()
 	if err != nil {
 		s.removeSession(sess)

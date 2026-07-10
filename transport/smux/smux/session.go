@@ -125,6 +125,10 @@ type Session struct {
 	sessionIsActive int32        // flag session is active
 	acceptDeadline  atomic.Value // deadline for Accept()
 
+	// OnIdle is called when the last stream closes and the session has no
+	// active streams. It is invoked while streamLock is held.
+	OnIdle func()
+
 	requestID        uint32            // Monotonic increasing write request ID
 	shaper           chan writeRequest // a shaper for writing
 	sq               *shaperQueue
@@ -387,6 +391,10 @@ func (s *Session) streamClosed(sid uint32) {
 		}
 	}
 	delete(s.streams, sid)
+
+	if len(s.streams) == 0 && s.OnIdle != nil {
+		s.OnIdle()
+	}
 }
 
 // returnTokens is called by stream to return token after read
