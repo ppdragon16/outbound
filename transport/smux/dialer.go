@@ -123,8 +123,9 @@ func (s *Smux) getSession(ctx context.Context) (*smuxcore.Session, error) {
 	return session, nil
 }
 
-// closeAndRemoveSession closes a session and removes it from the active pool.
-func (s *Smux) closeAndRemoveSession(sess *smuxcore.Session) {
+// removeSession removes a session from the active pool.
+// The session is expected to close itself via notifyReadError/notifyWriteError.
+func (s *Smux) removeSession(sess *smuxcore.Session) {
 	s.mu.Lock()
 	for i, se := range s.sessions {
 		if se == sess {
@@ -133,7 +134,6 @@ func (s *Smux) closeAndRemoveSession(sess *smuxcore.Session) {
 		}
 	}
 	s.mu.Unlock()
-	sess.Close()
 }
 
 func (s *Smux) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
@@ -145,7 +145,7 @@ func (s *Smux) DialContext(ctx context.Context, network, addr string) (c net.Con
 		}
 		stream, err := sess.OpenStream()
 		if err != nil {
-			s.closeAndRemoveSession(sess)
+			s.removeSession(sess)
 			return nil, err
 		}
 		return &Conn{Conn: stream, addr: addr}, nil
@@ -170,7 +170,7 @@ func (s *Smux) ListenPacket(ctx context.Context, addr string) (net.PacketConn, e
 	}
 	stream, err := sess.OpenStream()
 	if err != nil {
-		s.closeAndRemoveSession(sess)
+		s.removeSession(sess)
 		return nil, err
 	}
 	return &UDPConn{Conn: Conn{Conn: stream, addr: addr, udp: true, packetAddr: true}}, nil
