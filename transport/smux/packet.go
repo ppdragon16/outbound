@@ -12,6 +12,16 @@ import (
 
 type UDPConn struct {
 	Conn
+	// Pre-allocated header buffers for ReadFromAddrPort and WriteToAddrPort.
+	// They live on the struct instead of the stack so that passing slices of
+	// them to io.ReadFull / io.Writer.Write (both interface methods) does NOT
+	// cause a heap allocation — the backing arrays are already on the heap
+	// because UDPConn itself is always heap-allocated.
+	//
+	// Separate buffers avoid a data race when a read and write happen
+	// concurrently on the same connection (smux streams are bidirectional).
+	rdBuf [21]byte
+	wrBuf [21]byte
 }
 
 func (c *UDPConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
@@ -31,15 +41,21 @@ func (c *UDPConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
 }
 
 func (c *UDPConn) ReadFromAddrPort(b []byte) (n int, addr netip.AddrPort, err error) {
-	addr, err = socks5.ReadAddrPort(&c.Conn)
+	buf := c.rdBuf[:]
+
+	// 1. Read SOCKS5 address (ATYP + IP + PORT) into buf.
+	addr, addrBytes, err := socks5.ReadAddrPortBuf(&c.Conn, buf)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	var lengthBuf [2]byte
-	if _, err = io.ReadFull(&c.Conn, lengthBuf[:]); err != nil {
+
+	// 2. Read the 2-byte data length that follows the address.
+	if _, err = io.ReadFull(&c.Conn, buf[addrBytes:addrBytes+2]); err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	length := binary.BigEndian.Uint16(lengthBuf[:])
+	length := binary.BigEndian.Uint16(buf[addrBytes:])
+
+	// 3. Read the payload.
 	if int(length) > len(b) {
 		return 0, netip.AddrPort{}, fmt.Errorf("buffer too small: %d < %d", len(b), length)
 	}
@@ -55,12 +71,8 @@ func (c *UDPConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (n int, err error
 		_, err = c.Conn.Write(nil)
 		return 0, err
 	}
-	// Stack-allocated header: ATYP(1) + IP(4/16) + PORT(2) + LENGTH(2).
-	// Two writes are safe because smux is a stream — the receiver reads
-	// addr, length, then payload sequentially via ReadFromAddrPort.
-	var header [21]byte
-	headerLen := socks5.PutAddrPortLen(header[:], ap, uint16(len(b)))
-	if _, err = c.Conn.Write(header[:headerLen]); err != nil {
+	headerLen := socks5.PutAddrPortLen(c.wrBuf[:], ap, uint16(len(b)))
+	if _, err = c.Conn.Write(c.wrBuf[:headerLen]); err != nil {
 		return 0, err
 	}
 	if _, err = c.Conn.Write(b); err != nil {

@@ -246,25 +246,39 @@ func WriteAddrPort(ap netip.AddrPort, w io.Writer) error {
 }
 
 func ReadAddrPort(r io.Reader) (netip.AddrPort, error) {
-	var atyp [1]byte
-	if _, err := r.Read(atyp[:]); err != nil {
-		return netip.AddrPort{}, err
+	var buf [19]byte
+	ap, _, err := ReadAddrPortBuf(r, buf[:])
+	return ap, err
+}
+
+// ReadAddrPortBuf reads a SOCKS5 address (ATYP + IP + PORT) from r, using buf
+// as scratch space. buf must have len >= 19. Returns the parsed address and
+// n, the number of bytes read into buf (7 for IPv4, 19 for IPv6).
+//
+// The caller owns buf; when buf is backed by heap memory (a struct field or
+// pooled buffer) this call causes zero heap allocations.
+func ReadAddrPortBuf(r io.Reader, buf []byte) (ap netip.AddrPort, n int, err error) {
+	if len(buf) < 19 {
+		return netip.AddrPort{}, 0, fmt.Errorf("buffer too small: %d < 19", len(buf))
+	}
+	if _, err = io.ReadFull(r, buf[:1]); err != nil {
+		return netip.AddrPort{}, 0, err
 	}
 
-	switch AddressType(atyp[0]) {
+	switch AddressType(buf[0]) {
 	case AddressTypeIPv4:
-		var buf [6]byte // IP(4) + PORT(2)
-		if _, err := io.ReadFull(r, buf[:]); err != nil {
-			return netip.AddrPort{}, err
+		if _, err = io.ReadFull(r, buf[1:7]); err != nil { // IP(4) + PORT(2)
+			return netip.AddrPort{}, 0, err
 		}
-		return netip.AddrPortFrom(netip.AddrFrom4([4]byte(buf[:4])), binary.BigEndian.Uint16(buf[4:6])), nil
+		ap = netip.AddrPortFrom(netip.AddrFrom4([4]byte(buf[1:5])), binary.BigEndian.Uint16(buf[5:7]))
+		return ap, 7, nil
 	case AddressTypeIPv6:
-		var buf [18]byte // IP(16) + PORT(2)
-		if _, err := io.ReadFull(r, buf[:]); err != nil {
-			return netip.AddrPort{}, err
+		if _, err = io.ReadFull(r, buf[1:19]); err != nil { // IP(16) + PORT(2)
+			return netip.AddrPort{}, 0, err
 		}
-		return netip.AddrPortFrom(netip.AddrFrom16([16]byte(buf[:16])), binary.BigEndian.Uint16(buf[16:18])), nil
+		ap = netip.AddrPortFrom(netip.AddrFrom16([16]byte(buf[1:17])), binary.BigEndian.Uint16(buf[17:19]))
+		return ap, 19, nil
 	default:
-		return netip.AddrPort{}, fmt.Errorf("unsupported atyp: %v", atyp[0])
+		return netip.AddrPort{}, 0, fmt.Errorf("unsupported atyp: %v", buf[0])
 	}
 }

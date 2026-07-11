@@ -23,66 +23,80 @@
 package smux
 
 import (
-	"container/heap"
 	"container/list"
 	"sync"
 	"sync/atomic"
 )
 
-// _itimediff returns the time difference between two uint32 values.
-// The result is a signed 32-bit integer representing the difference between 'later' and 'earlier'.
-func _itimediff(later, earlier uint32) int32 {
-	return (int32)(later - earlier)
+// streamQueue is a FIFO queue for writeRequests belonging to a single stream.
+// It maintains two sub-queues: one for CLSCTRL (priority) and one for CLSDATA.
+// Within each class, requests naturally arrive in FIFO order (seq is
+// monotonically increasing), so a full heap is unnecessary — two slices suffice.
+type streamQueue struct {
+	ctrl    []writeRequest
+	ctrlOff int
+	data    []writeRequest
+	dataOff int
 }
 
-// shaperHeap is a min-heap of writeRequest.
-// It orders writeRequests by class first, then by sequence number within the same class.
-type shaperHeap []writeRequest
-
-func (h shaperHeap) Len() int { return len(h) }
-
-// Less determines the ordering of elements in the heap.
-// Requests are ordered by their class first. If two requests have the same class,
-// they are ordered by their sequence numbers.
-func (h shaperHeap) Less(i, j int) bool {
-	if h[i].class != h[j].class {
-		return h[i].class < h[j].class
+func (q *streamQueue) push(req writeRequest) {
+	if req.class == CLSCTRL {
+		q.ctrl = append(q.ctrl, req)
+	} else {
+		q.data = append(q.data, req)
 	}
-	return _itimediff(h[j].seq, h[i].seq) > 0
 }
 
-func (h shaperHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
-func (h *shaperHeap) Push(x any)   { *h = append(*h, x.(writeRequest)) }
+func (q *streamQueue) pop() (writeRequest, bool) {
+	if q.ctrlOff < len(q.ctrl) {
+		req := q.ctrl[q.ctrlOff]
+		q.ctrl[q.ctrlOff] = writeRequest{}
+		q.ctrlOff++
+		return req, true
+	}
+	if q.dataOff < len(q.data) {
+		req := q.data[q.dataOff]
+		q.data[q.dataOff] = writeRequest{}
+		q.dataOff++
+		return req, true
+	}
+	return writeRequest{}, false
+}
 
-func (h *shaperHeap) Pop() any {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	old[n-1] = writeRequest{} // avoid memory leak
-	*h = old[0 : n-1]
-	return x
+func (q *streamQueue) empty() bool {
+	return q.ctrlOff >= len(q.ctrl) && q.dataOff >= len(q.data)
+}
+
+// reset reuses the backing arrays of the queue after it has been fully drained.
+func (q *streamQueue) reset() {
+	q.ctrl = q.ctrl[:0]
+	q.ctrlOff = 0
+	q.data = q.data[:0]
+	q.dataOff = 0
+}
+
+// streamQueuePool reduces allocations of streamQueue objects.
+var streamQueuePool = sync.Pool{
+	New: func() any {
+		return &streamQueue{
+			ctrl: make([]writeRequest, 0, 2),
+			data: make([]writeRequest, 0, 16),
+		}
+	},
 }
 
 // shaperQueue manages multiple streams of writeRequests using a round-robin scheduling algorithm.
 type shaperQueue struct {
 	count   int64 // atomic counter for fast Len() and IsEmpty()
-	streams map[uint32]*shaperHeap
+	streams map[uint32]*streamQueue
 	rrList  *list.List    // list of sid (RR queue)
 	next    *list.Element // next node to pop
 	mu      sync.Mutex
 }
 
-// shaperHeapPool reduces allocation of shaperHeap objects
-var shaperHeapPool = sync.Pool{
-	New: func() any {
-		h := make(shaperHeap, 0, 16) // pre-allocate capacity
-		return &h
-	},
-}
-
 func NewShaperQueue() *shaperQueue {
 	return &shaperQueue{
-		streams: make(map[uint32]*shaperHeap),
+		streams: make(map[uint32]*streamQueue),
 		rrList:  list.New(),
 	}
 }
@@ -92,22 +106,18 @@ func (sq *shaperQueue) Push(req writeRequest) {
 	sq.mu.Lock()
 	defer sq.mu.Unlock()
 
-	// create heap for the stream if not exists.
 	sid := req.frame.sid
 	if _, ok := sq.streams[sid]; !ok {
-		// get heap from pool
-		h := shaperHeapPool.Get().(*shaperHeap)
-		*h = (*h)[:0] // reset while keeping capacity
-		sq.streams[sid] = h
+		q := streamQueuePool.Get().(*streamQueue)
+		q.reset()
+		sq.streams[sid] = q
 		elem := sq.rrList.PushBack(sid)
 		if sq.next == nil {
 			sq.next = elem
 		}
 	}
 
-	// push the request into the corresponding stream heap.
-	h := sq.streams[sid]
-	heap.Push(h, req)
+	sq.streams[sid].push(req)
 	atomic.AddInt64(&sq.count, 1)
 }
 
@@ -116,40 +126,33 @@ func (sq *shaperQueue) Pop() (req writeRequest, ok bool) {
 	sq.mu.Lock()
 	defer sq.mu.Unlock()
 
-	// if there are no streams, return false
 	if sq.next == nil || atomic.LoadInt64(&sq.count) == 0 {
 		return writeRequest{}, false
 	}
 
-	// get the starting index for round-robin.
 	start := sq.next
 	current := start
 
-	// loop through all streams in a round-robin manner
 	for {
 		sid := current.Value.(uint32)
-		h := sq.streams[sid]
+		q := sq.streams[sid]
 
-		if h.Len() > 0 {
-			// pop the top request from the heap
-			req := heap.Pop(h).(writeRequest)
+		if !q.empty() {
+			req, _ := q.pop()
 			atomic.AddInt64(&sq.count, -1)
 
-			// update next pointer for round-robin
+			// advance round-robin cursor
 			next := current.Next()
 			if next == nil {
 				next = sq.rrList.Front()
 			}
 			sq.next = next
 
-			// If the heap is empty after popping, delete it.
-			if h.Len() == 0 {
+			if q.empty() {
 				delete(sq.streams, sid)
 				sq.rrList.Remove(current)
-				// return heap to pool
-				shaperHeapPool.Put(h)
-				// if a list has only one element, then current->next will point to itself,
-				// so after removing current, we need to set next to nil.
+				q.reset()
+				streamQueuePool.Put(q)
 				if sq.rrList.Len() == 0 {
 					sq.next = nil
 				}
@@ -157,17 +160,15 @@ func (sq *shaperQueue) Pop() (req writeRequest, ok bool) {
 			return req, true
 		}
 
-		// move to next
 		current = current.Next()
 		if current == nil {
 			current = sq.rrList.Front()
 		}
-		if current == start { // full loop: no packets
+		if current == start {
 			break
 		}
 	}
 
-	// no requests found in any stream
 	return writeRequest{}, false
 }
 
