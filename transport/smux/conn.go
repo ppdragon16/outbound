@@ -33,6 +33,16 @@ func ReadResponse(conn net.Conn) error {
 		if err != nil {
 			return err
 		}
+		// Sanitize: remote server may include protocol-internal bytes
+		// (e.g. flags, invalid UTF-8) in the error message. Strip them
+		// to avoid garbled log output and downstream parsing issues.
+		message = bytes.ToValidUTF8(message, nil)
+		message = bytes.Map(func(r rune) rune {
+			if r < 0x20 && r != '\t' && r != '\n' && r != '\r' {
+				return -1
+			}
+			return r
+		}, message)
 		return errors.New("smux failed to read: " + string(message))
 	}
 	return nil
