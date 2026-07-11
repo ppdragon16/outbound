@@ -3,11 +3,14 @@ package anytls
 import (
 	"crypto/tls"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
+	anytlsprotocol "github.com/daeuniverse/outbound/protocol/anytls"
 )
 
 func init() {
@@ -15,12 +18,15 @@ func init() {
 }
 
 type Anytls struct {
-	link     string
-	Name     string
-	Auth     string
-	Host     string
-	Sni      string
-	Insecure bool
+	link                    string
+	Name                    string
+	Auth                    string
+	Host                    string
+	Sni                     string
+	Insecure                bool
+	IdleSessionCheckInterval time.Duration
+	IdleSessionTimeout      time.Duration
+	MinIdleSession          int
 }
 
 func NewAnytls(link string) (dialer.Dialer, *dialer.Property, error) {
@@ -58,13 +64,30 @@ func parseAnytlsURL(link string) (*Anytls, error) {
 	if len(name) == 0 {
 		name = "anytls"
 	}
+
+	// Parse idle session configuration (optional).
+	var idleCheckInterval, idleTimeout time.Duration
+	var minIdleSession int
+	if s := u.Query().Get("idleCheckInterval"); s != "" {
+		idleCheckInterval, _ = time.ParseDuration(s)
+	}
+	if s := u.Query().Get("idleTimeout"); s != "" {
+		idleTimeout, _ = time.ParseDuration(s)
+	}
+	if s := u.Query().Get("minIdleSession"); s != "" {
+		minIdleSession, _ = strconv.Atoi(s)
+	}
+
 	antls := &Anytls{
-		link:     link,
-		Name:     name,
-		Auth:     u.User.Username(),
-		Host:     u.Host,
-		Sni:      sni,
-		Insecure: u.Query().Get("insecure") == "1",
+		link:                     link,
+		Name:                     name,
+		Auth:                     u.User.Username(),
+		Host:                     u.Host,
+		Sni:                      sni,
+		Insecure:                 u.Query().Get("insecure") == "1",
+		IdleSessionCheckInterval: idleCheckInterval,
+		IdleSessionTimeout:       idleTimeout,
+		MinIdleSession:           minIdleSession,
 	}
 
 	return antls, nil
@@ -77,6 +100,11 @@ func (s *Anytls) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer
 		protocol.Header{
 			ProxyAddress: s.Host,
 			Password:     s.Auth,
+			Feature1: &anytlsprotocol.Feature1{
+				IdleSessionCheckInterval: s.IdleSessionCheckInterval,
+				IdleSessionTimeout:       s.IdleSessionTimeout,
+				MinIdleSession:           s.MinIdleSession,
+			},
 			TlsConfig: &tls.Config{
 				ServerName:         s.Sni,
 				InsecureSkipVerify: s.Insecure,

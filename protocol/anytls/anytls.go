@@ -2,9 +2,17 @@ package anytls
 
 import (
 	"encoding/binary"
+	"time"
 
 	"github.com/daeuniverse/outbound/pool"
 )
+
+// Feature1 carries AnyTLS-specific configuration through Header.Feature1.
+type Feature1 struct {
+	IdleSessionCheckInterval time.Duration
+	IdleSessionTimeout       time.Duration
+	MinIdleSession           int
+}
 
 const ( // cmds
 	cmdWaste               = iota // Paddings

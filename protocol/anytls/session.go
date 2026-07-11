@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/infra/socks"
@@ -33,6 +34,9 @@ type session struct {
 	sid             atomic.Uint32
 	closed          atomic.Bool
 	closeStreamChan chan uint32
+
+	heartbeatInterval time.Duration
+	idleSince         time.Time
 }
 
 func newSession(conn net.Conn, seq uint64) *session {
@@ -51,17 +55,23 @@ func (s *session) newStream(addr string) (*stream, error) {
 	if s.Closed() {
 		return nil, net.ErrClosed
 	}
+	// Clear any stale deadline left by another goroutine before
+	// session re-entry. DAE sets its own deadlines on the returned
+	// stream afterwards.
+	_ = s.conn.SetDeadline(time.Time{})
 	s.sid.Add(1)
 	sid := s.sid.Load()
 
 	frame := newFrame(cmdSettings, sid)
 	frame.data = settingsBytes(s.GetPadding())
 	if _, err := writeFrame(s, frame); err != nil {
+		s.Close()
 		return nil, err
 	}
 
 	frame = newFrame(cmdSYN, sid)
 	if _, err := writeFrame(s, frame); err != nil {
+		s.Close()
 		return nil, err
 	}
 
@@ -72,6 +82,7 @@ func (s *session) newStream(addr string) (*stream, error) {
 	frame = newFrame(cmdPSH, sid)
 	frame.data = tgtAddr
 	if _, err := writeFrame(s, frame); err != nil {
+		s.Close()
 		return nil, err
 	}
 
@@ -107,6 +118,9 @@ func (s *session) removeStream(sid uint32) {
 
 	delete(s.streams, sid)
 
+	// Clear any deadlines the stream set on the underlying connection.
+	_ = s.conn.SetDeadline(time.Time{})
+
 	if s.closed.Load() {
 		return
 	}
@@ -130,6 +144,12 @@ func (s *session) run() error {
 			return net.ErrClosed
 		}
 		if _, err := io.ReadFull(s.conn, header[:]); err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// Transient timeout from a stream deadline on s.conn.
+				_ = s.conn.SetReadDeadline(time.Time{})
+				continue
+			}
+
 			return err
 		}
 		sid := header.StreamID()
@@ -217,6 +237,50 @@ func (s *session) run() error {
 			return fmt.Errorf("invalid cmd: %d", header.Cmd())
 		}
 	}
+}
+
+// Probe sends a lightweight heartbeat frame to verify the underlying connection
+// is still alive. It returns nil if the write succeeds.
+func (s *session) Probe() error {
+	// Clear any stale deadline before probing — this is the first
+	// write when pulling a session from the idle pool.
+	_ = s.conn.SetDeadline(time.Time{})
+	frame := newFrame(cmdHeartRequest, 0)
+	_, err := writeFrame(s, frame)
+	return err
+}
+
+// startHeartbeat launches a periodic heartbeat goroutine that sends
+// cmdHeartRequest frames to keep the session alive and detect dead
+// connections early.
+func (s *session) startHeartbeat() {
+	if s.heartbeatInterval <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(s.heartbeatInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			if s.Closed() {
+				return
+			}
+			if err := s.Probe(); err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					_ = s.conn.SetWriteDeadline(time.Time{})
+					continue
+				}
+				s.Close()
+				return
+			}
+		}
+	}()
+}
+
+// ActiveStreams returns the number of currently open streams on this session.
+func (s *session) ActiveStreams() int {
+	s.streamLock.RLock()
+	defer s.streamLock.RUnlock()
+	return len(s.streams)
 }
 
 func (s *session) Close() error {
