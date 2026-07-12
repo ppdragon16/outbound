@@ -144,12 +144,6 @@ func (s *session) run() error {
 			return net.ErrClosed
 		}
 		if _, err := io.ReadFull(s.conn, header[:]); err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// Transient timeout from a stream deadline on s.conn.
-				_ = s.conn.SetReadDeadline(time.Time{})
-				continue
-			}
-
 			return err
 		}
 		sid := header.StreamID()

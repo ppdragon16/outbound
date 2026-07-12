@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,12 +22,18 @@ type stream struct {
 
 	// Chunk-chain receive path: received pool buffers are stored directly
 	// and returned to the pool when consumed by Read. No extra copy.
-	readMu      sync.Mutex
-	readChunks  [][]byte
+	readMu       sync.Mutex
+	readChunks   [][]byte
 	readChunkOff int
-	readCond    *sync.Cond
-	readEOF     bool
-	readErr     error
+	readCond     *sync.Cond
+	readEOF      bool
+	readErr      error
+
+	// readDeadline is the deadline for stream.Read calls.
+	// A timer fires readCond.Signal when the deadline expires so that
+	// Read (which blocks on readCond.Wait) can detect the timeout.
+	readDeadline      time.Time
+	readDeadlineTimer *time.Timer
 
 	closed  atomic.Bool
 	finSent atomic.Bool
@@ -61,6 +68,9 @@ func (c *stream) Read(b []byte) (n int, err error) {
 	defer c.readMu.Unlock()
 
 	for len(c.readChunks) == 0 && !c.readEOF && c.readErr == nil {
+		if !c.readDeadline.IsZero() && time.Now().After(c.readDeadline) {
+			return 0, os.ErrDeadlineExceeded
+		}
 		c.readCond.Wait()
 	}
 	if c.readErr != nil {
@@ -98,6 +108,7 @@ func (c *stream) pushData(chunk []byte) {
 // Called from session.Close() while holding streamLock.
 func (c *stream) terminate() {
 	c.readMu.Lock()
+	c.stopReadDeadlineTimer()
 	if c.readErr == nil {
 		c.readErr = net.ErrClosed
 	}
@@ -112,10 +123,21 @@ func (c *stream) terminate() {
 // caller has no way to read it anymore.
 func (c *stream) closeRead() {
 	c.readMu.Lock()
+	c.stopReadDeadlineTimer()
 	c.drainChunks()
 	c.readEOF = true
 	c.readCond.Broadcast()
 	c.readMu.Unlock()
+}
+
+// stopReadDeadlineTimer stops the read deadline timer without discarding it
+// so it can be reused on the next SetReadDeadline call.
+// Must be called with readMu held.
+func (c *stream) stopReadDeadlineTimer() {
+	c.readDeadline = time.Time{}
+	if c.readDeadlineTimer != nil {
+		c.readDeadlineTimer.Stop()
+	}
 }
 
 // drainChunks returns all unread chunk buffers to the pool.
@@ -151,6 +173,8 @@ func (c *stream) CloseWrite() error {
 	if c.finSent.CompareAndSwap(false, true) {
 		frame := newFrame(cmdFIN, c.id)
 		_, _ = writeFrame(c.session, frame)
+		// Wakes up read within 10s in case the server never sends its FIN.
+		_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
 	}
 	return nil
 }
@@ -164,11 +188,31 @@ func (c *stream) RemoteAddr() net.Addr {
 }
 
 func (c *stream) SetDeadline(t time.Time) error {
-	return c.conn.SetDeadline(t)
+	c.SetReadDeadline(t)
+	return c.conn.SetWriteDeadline(t)
 }
 
+// SetReadDeadline arms a timer that signals the read condition variable when
+// the deadline expires, so that Read (which blocks on readCond.Wait) can
+// detect the timeout. The timer is created once and reused via Reset.
 func (c *stream) SetReadDeadline(t time.Time) error {
-	return c.conn.SetReadDeadline(t)
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	c.readDeadline = t
+	if t.IsZero() {
+		c.stopReadDeadlineTimer()
+		return nil
+	}
+	if c.readDeadlineTimer == nil {
+		c.readDeadlineTimer = time.AfterFunc(time.Until(t), func() {
+			c.readMu.Lock()
+			c.readCond.Signal()
+			c.readMu.Unlock()
+		})
+	} else {
+		c.readDeadlineTimer.Reset(time.Until(t))
+	}
+	return nil
 }
 
 func (c *stream) SetWriteDeadline(t time.Time) error {
