@@ -3,7 +3,6 @@ package anytls
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -15,6 +14,8 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
+
+	"github.com/refraction-networking/utls"
 )
 
 func init() {
@@ -78,7 +79,10 @@ func NewDialer(ParentDialer netproxy.Dialer, header protocol.Header) (netproxy.D
 		},
 		proxyAddress:             header.ProxyAddress,
 		key:                      sum[:],
-		tlsConfig:                header.TlsConfig,
+		tlsConfig: &tls.Config{
+			ServerName:         header.TlsConfig.ServerName,
+			InsecureSkipVerify: header.TlsConfig.InsecureSkipVerify,
+		},
 		idleSessions:             make(map[uint64]*session),
 		idleSessionCheckInterval: checkInterval,
 		idleSessionTimeout:       idleTimeout,
