@@ -14,20 +14,115 @@ import (
 	"github.com/daeuniverse/outbound/protocol/infra/socks"
 )
 
+const chunkRingGrow = 8
+
+// chunkRing is a growable ring buffer of pool-backed []byte chunks.
+//
+// Full is detected by buf[tail] != nil (slot already occupied);
+// empty by buf[head] == nil (no data). Consumed slots are explicitly
+// nilled so that the pool buffers they reference remain GC-visible.
+//
+// off tracks the byte offset within buf[head] — the next Read will
+// start from buf[head][off] rather than the chunk boundary.
+type chunkRing struct {
+	buf  [][]byte
+	head int // index of first valid chunk
+	tail int // index of next write position
+	cnt  int // number of queued chunks
+	off  int // byte offset within buf[head]
+}
+
+func (r *chunkRing) push(chunk []byte) {
+	if r.buf == nil {
+		r.buf = make([][]byte, chunkRingGrow)
+	}
+	if r.buf[r.tail] != nil {
+		r.grow()
+	}
+	r.buf[r.tail] = chunk
+	r.tail = (r.tail + 1) % len(r.buf)
+	r.cnt++
+}
+
+func (r *chunkRing) pop() []byte {
+	chunk := r.buf[r.head]
+	r.buf[r.head] = nil
+	r.head = (r.head + 1) % len(r.buf)
+	r.cnt--
+	return chunk
+}
+
+func (r *chunkRing) isEmpty() bool { return r.buf[r.head] == nil }
+
+// available returns the number of readable bytes across all queued chunks,
+// accounting for the offset within the first chunk.
+func (r *chunkRing) available() int {
+	if r.isEmpty() {
+		return 0
+	}
+	total := 0
+	for i, pos := 0, r.head; i < r.cnt; i++ {
+		total += len(r.buf[pos])
+		pos = (pos + 1) % len(r.buf)
+	}
+	return total - r.off
+}
+
+// read copies up to len(p) bytes from the ring into p, consuming them.
+// Partially-consumed chunks stay in the ring; fully-consumed chunks are
+// returned to the pool. Returns the number of bytes copied.
+func (r *chunkRing) read(p []byte) int {
+	total := 0
+	for total < len(p) && !r.isEmpty() {
+		chunk := r.buf[r.head][r.off:]
+		n := copy(p[total:], chunk)
+		total += n
+		r.off += n
+		if r.off >= len(r.buf[r.head]) {
+			pool.PutBuffer(r.pop())
+			r.off = 0
+		}
+	}
+	return total
+}
+
+// drain calls fn on every queued chunk (typically pool.PutBuffer) and
+// resets the ring to empty. The underlying array is retained for reuse.
+func (r *chunkRing) drain(fn func([]byte)) {
+	if r.buf == nil {
+		return
+	}
+	for !r.isEmpty() {
+		fn(r.pop())
+	}
+	r.off = 0
+}
+
+func (r *chunkRing) grow() {
+	// Called only when the ring is full, which implies head == tail.
+	// Copy the two segments: [head, end) then [0, head).
+	n := len(r.buf) + chunkRingGrow
+	newBuf := make([][]byte, n)
+	c := copy(newBuf, r.buf[r.head:])
+	copy(newBuf[c:], r.buf[:r.tail])
+	r.buf = newBuf
+	r.head = 0
+	r.tail = r.cnt
+}
+
 type stream struct {
 	*session
 	id uint32
 
 	writeMu sync.Mutex
 
-	// Chunk-chain receive path: received pool buffers are stored directly
-	// and returned to the pool when consumed by Read. No extra copy.
-	readMu       sync.Mutex
-	readChunks   [][]byte
-	readChunkOff int
-	readCond     *sync.Cond
-	readEOF      bool
-	readErr      error
+	// Chunk-chain receive path: received pool buffers are stored in a ring
+	// buffer and returned to the pool when consumed by Read. No extra copy.
+	readMu   sync.Mutex
+	readRing chunkRing
+	readCond *sync.Cond
+	readEOF  bool
+	readErr  error
 
 	// readDeadline is the deadline for stream.Read calls.
 	// A timer fires readCond.Signal when the deadline expires so that
@@ -41,8 +136,9 @@ type stream struct {
 
 func newStream(session *session, id uint32) *stream {
 	s := &stream{
-		session: session,
-		id:      id,
+		session:  session,
+		id:       id,
+		readRing: chunkRing{buf: make([][]byte, chunkRingGrow)},
 	}
 	s.readCond = sync.NewCond(&s.readMu)
 	return s
@@ -67,7 +163,7 @@ func (c *stream) Read(b []byte) (n int, err error) {
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 
-	for len(c.readChunks) == 0 && !c.readEOF && c.readErr == nil {
+	for c.readRing.isEmpty() && !c.readEOF && c.readErr == nil {
 		if !c.readDeadline.IsZero() && time.Now().After(c.readDeadline) {
 			return 0, os.ErrDeadlineExceeded
 		}
@@ -76,30 +172,18 @@ func (c *stream) Read(b []byte) (n int, err error) {
 	if c.readErr != nil {
 		return 0, c.readErr
 	}
-	if c.readEOF && len(c.readChunks) == 0 {
+	if c.readEOF && c.readRing.isEmpty() {
 		return 0, io.EOF
 	}
 
-	total := 0
-	for len(c.readChunks) > 0 && total < len(b) {
-		chunk := c.readChunks[0][c.readChunkOff:]
-		n := copy(b[total:], chunk)
-		total += n
-		c.readChunkOff += n
-		if c.readChunkOff >= len(c.readChunks[0]) {
-			pool.PutBuffer(c.readChunks[0])
-			c.readChunks = c.readChunks[1:]
-			c.readChunkOff = 0
-		}
-	}
-	return total, nil
+	return c.readRing.read(b), nil
 }
 
 // pushData takes ownership of chunk (a pool buffer) and delivers it to the stream.
 // The caller must not use chunk after this call.
 func (c *stream) pushData(chunk []byte) {
 	c.readMu.Lock()
-	c.readChunks = append(c.readChunks, chunk)
+	c.readRing.push(chunk)
 	c.readCond.Signal()
 	c.readMu.Unlock()
 }
@@ -143,11 +227,7 @@ func (c *stream) stopReadDeadlineTimer() {
 // drainChunks returns all unread chunk buffers to the pool.
 // Must be called with readMu held.
 func (c *stream) drainChunks() {
-	for _, chunk := range c.readChunks {
-		pool.PutBuffer(chunk)
-	}
-	c.readChunks = nil
-	c.readChunkOff = 0
+	c.readRing.drain(pool.PutBuffer)
 }
 
 func (c *stream) remoteClose() {
@@ -241,10 +321,9 @@ func (ps *packetStream) ReadFromAddrPort(p []byte) (int, netip.AddrPort, error) 
 	ps.readMu.Lock()
 	defer ps.readMu.Unlock()
 
-	// Wait until we have at least a 2-byte length prefix.
+	// Wait for and consume the 2-byte length prefix.
 	for {
-		avail := ps.chunkAvail()
-		if avail >= 2 {
+		if ps.readRing.available() >= 2 {
 			break
 		}
 		if ps.readEOF || ps.readErr != nil {
@@ -255,19 +334,17 @@ func (ps *packetStream) ReadFromAddrPort(p []byte) (int, netip.AddrPort, error) 
 	if ps.readErr != nil {
 		return 0, netip.AddrPort{}, ps.readErr
 	}
-	if ps.chunkAvail() < 2 {
+	if ps.readRing.available() < 2 {
 		return 0, netip.AddrPort{}, io.EOF
 	}
 
-	// Peek the 2-byte length prefix.
 	var lenBuf [2]byte
-	ps.peekChunk(lenBuf[:])
+	ps.readRing.read(lenBuf[:])
 	length := binary.BigEndian.Uint16(lenBuf[:])
 
-	// Wait for the full datagram.
+	// Wait for the full payload.
 	for {
-		avail := ps.chunkAvail()
-		if avail >= int(length)+2 {
+		if ps.readRing.available() >= int(length) {
 			break
 		}
 		if ps.readEOF || ps.readErr != nil {
@@ -278,7 +355,7 @@ func (ps *packetStream) ReadFromAddrPort(p []byte) (int, netip.AddrPort, error) 
 	if ps.readErr != nil {
 		return 0, netip.AddrPort{}, ps.readErr
 	}
-	if ps.chunkAvail() < int(length)+2 {
+	if ps.readRing.available() < int(length) {
 		return 0, netip.AddrPort{}, io.ErrUnexpectedEOF
 	}
 
@@ -286,72 +363,8 @@ func (ps *packetStream) ReadFromAddrPort(p []byte) (int, netip.AddrPort, error) 
 		return 0, netip.AddrPort{}, io.ErrShortBuffer
 	}
 
-	// Discard the 2-byte length prefix, then copy the payload.
-	ps.discardChunk(2)
-	n := ps.copyFromChunks(p[:length])
+	n := ps.readRing.read(p[:length])
 	return n, ps.addr, nil
-}
-
-// chunkAvail returns the total available bytes in the chunk chain.
-// Must be called with readMu held.
-func (ps *packetStream) chunkAvail() int {
-	total := 0
-	for _, ch := range ps.readChunks {
-		total += len(ch)
-	}
-	return total - ps.readChunkOff
-}
-
-// peekChunk copies bytes from the chunk chain without consuming them.
-// Must be called with readMu held and enough bytes available.
-func (ps *packetStream) peekChunk(p []byte) {
-	off := ps.readChunkOff
-	need := len(p)
-	for _, ch := range ps.readChunks {
-		n := copy(p[len(p)-need:], ch[off:])
-		need -= n
-		if need == 0 {
-			return
-		}
-		off = 0
-	}
-}
-
-// discardChunk advances the read position by n bytes, returning consumed
-// chunks to the pool.
-// Must be called with readMu held and enough bytes available.
-func (ps *packetStream) discardChunk(n int) {
-	for n > 0 {
-		chunk := ps.readChunks[0]
-		avail := len(chunk) - ps.readChunkOff
-		if n < avail {
-			ps.readChunkOff += n
-			return
-		}
-		n -= avail
-		pool.PutBuffer(chunk)
-		ps.readChunks = ps.readChunks[1:]
-		ps.readChunkOff = 0
-	}
-}
-
-// copyFromChunks copies n bytes from the chunk chain to p, consuming and
-// returning chunks to the pool.
-// Must be called with readMu held.
-func (ps *packetStream) copyFromChunks(p []byte) int {
-	total := 0
-	for total < len(p) && len(ps.readChunks) > 0 {
-		chunk := ps.readChunks[0][ps.readChunkOff:]
-		n := copy(p[total:], chunk)
-		total += n
-		ps.readChunkOff += n
-		if ps.readChunkOff >= len(ps.readChunks[0]) {
-			pool.PutBuffer(ps.readChunks[0])
-			ps.readChunks = ps.readChunks[1:]
-			ps.readChunkOff = 0
-		}
-	}
-	return total
 }
 
 func ToAddrPort(addr net.Addr) (netip.AddrPort, error) {
