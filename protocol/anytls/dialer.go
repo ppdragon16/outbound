@@ -77,11 +77,17 @@ func NewDialer(ParentDialer netproxy.Dialer, header protocol.Header) (netproxy.D
 		StatelessDialer: protocol.StatelessDialer{
 			ParentDialer: ParentDialer,
 		},
-		proxyAddress:             header.ProxyAddress,
-		key:                      sum[:],
+		proxyAddress: header.ProxyAddress,
+		key:          sum[:],
 		tlsConfig: &tls.Config{
 			ServerName:         header.TlsConfig.ServerName,
 			InsecureSkipVerify: header.TlsConfig.InsecureSkipVerify,
+			// Only use X25519 for key exchange. The default includes
+			// X25519MLKEM768 which triggers expensive ML-KEM-768
+			// post-quantum key generation (~1184-byte key share and
+			// heavy lattice-based computation). For anytls, TLS is an
+			// obfuscation layer; security comes from the anytls key.
+			CurvePreferences: []tls.CurveID{tls.X25519},
 		},
 		idleSessions:             make(map[uint64]*session),
 		idleSessionCheckInterval: checkInterval,
