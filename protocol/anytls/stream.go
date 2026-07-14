@@ -14,9 +14,9 @@ import (
 	"github.com/daeuniverse/outbound/protocol/infra/socks"
 )
 
-const chunkRingGrow = 8
+const chunkRingSize = 8
 
-// chunkRing is a growable ring buffer of pool-backed []byte chunks.
+// chunkRing is a fixed-size ring buffer of pool-backed []byte chunks.
 //
 // Full is detected by buf[tail] != nil (slot already occupied);
 // empty by buf[head] == nil (no data). Consumed slots are explicitly
@@ -32,16 +32,17 @@ type chunkRing struct {
 	off  int // byte offset within buf[head]
 }
 
-func (r *chunkRing) push(chunk []byte) {
+func (r *chunkRing) push(chunk []byte) bool {
 	if r.buf == nil {
-		r.buf = make([][]byte, chunkRingGrow)
+		r.buf = make([][]byte, chunkRingSize)
 	}
-	if r.buf[r.tail] != nil {
-		r.grow()
+	if r.isFull() {
+		return false
 	}
 	r.buf[r.tail] = chunk
 	r.tail = (r.tail + 1) % len(r.buf)
 	r.cnt++
+	return true
 }
 
 func (r *chunkRing) pop() []byte {
@@ -52,6 +53,7 @@ func (r *chunkRing) pop() []byte {
 	return chunk
 }
 
+func (r *chunkRing) isFull() bool  { return r.buf[r.tail] != nil }
 func (r *chunkRing) isEmpty() bool { return r.buf[r.head] == nil }
 
 // available returns the number of readable bytes across all queued chunks,
@@ -98,18 +100,6 @@ func (r *chunkRing) drain(fn func([]byte)) {
 	r.off = 0
 }
 
-func (r *chunkRing) grow() {
-	// Called only when the ring is full, which implies head == tail.
-	// Copy the two segments: [head, end) then [0, head).
-	n := len(r.buf) + chunkRingGrow
-	newBuf := make([][]byte, n)
-	c := copy(newBuf, r.buf[r.head:])
-	copy(newBuf[c:], r.buf[:r.tail])
-	r.buf = newBuf
-	r.head = 0
-	r.tail = r.cnt
-}
-
 type stream struct {
 	*session
 	id uint32
@@ -138,7 +128,7 @@ func newStream(session *session, id uint32) *stream {
 	s := &stream{
 		session:  session,
 		id:       id,
-		readRing: chunkRing{buf: make([][]byte, chunkRingGrow)},
+		readRing: chunkRing{buf: make([][]byte, chunkRingSize)},
 	}
 	s.readCond = sync.NewCond(&s.readMu)
 	return s
@@ -176,14 +166,23 @@ func (c *stream) Read(b []byte) (n int, err error) {
 		return 0, io.EOF
 	}
 
-	return c.readRing.read(b), nil
+	n = c.readRing.read(b)
+	c.readCond.Signal() // wake a blocked pushData
+	return n, nil
 }
 
 // pushData takes ownership of chunk (a pool buffer) and delivers it to the stream.
 // The caller must not use chunk after this call.
 func (c *stream) pushData(chunk []byte) {
 	c.readMu.Lock()
-	c.readRing.push(chunk)
+	for !c.readRing.push(chunk) {
+		if c.readEOF || c.readErr != nil {
+			pool.PutBuffer(chunk)
+			c.readMu.Unlock()
+			return
+		}
+		c.readCond.Wait()
+	}
 	c.readCond.Signal()
 	c.readMu.Unlock()
 }
