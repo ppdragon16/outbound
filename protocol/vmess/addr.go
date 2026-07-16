@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"net/netip"
 
 	"github.com/daeuniverse/outbound/protocol"
 )
@@ -103,10 +104,20 @@ func (m *Metadata) AddrLen() int {
 func (m *Metadata) PutAddr(dst []byte) (n int) {
 	switch m.Type {
 	case protocol.MetadataTypeIPv4:
-		copy(dst, net.ParseIP(m.Hostname).To4()[:4])
+		if m.CachedAddr.IsValid() {
+			ip4 := m.CachedAddr.As4()
+			copy(dst, ip4[:])
+		} else {
+			copy(dst, net.ParseIP(m.Hostname).To4()[:4])
+		}
 		return 4
 	case protocol.MetadataTypeIPv6:
-		copy(dst, net.ParseIP(m.Hostname)[:16])
+		if m.CachedAddr.IsValid() {
+			ip6 := m.CachedAddr.As16()
+			copy(dst, ip6[:])
+		} else {
+			copy(dst, net.ParseIP(m.Hostname)[:16])
+		}
 		return 16
 	case protocol.MetadataTypeDomain:
 		dst[0] = byte(len([]byte(m.Hostname)))
@@ -130,12 +141,18 @@ func (m *Metadata) CompleteFromInstructionData(instructionData []byte) (err erro
 		if len(instructionData) < 45 {
 			return fmt.Errorf("bad ipv4 req: insuffient data: expected 45 but got: %v", len(instructionData))
 		}
-		m.Hostname = net.IP(instructionData[41:45]).String()
+		var ip4 [4]byte
+		copy(ip4[:], instructionData[41:45])
+		m.CachedAddr = netip.AddrFrom4(ip4)
+		m.Hostname = m.CachedAddr.String()
 	case protocol.MetadataTypeIPv6:
 		if len(instructionData) < 57 {
 			return fmt.Errorf("bad ipv6 req: insuffient data: expected 57 but got: %v", len(instructionData))
 		}
-		m.Hostname = net.IP(instructionData[41:57]).String()
+		var ip6 [16]byte
+		copy(ip6[:], instructionData[41:57])
+		m.CachedAddr = netip.AddrFrom16(ip6)
+		m.Hostname = m.CachedAddr.String()
 	case protocol.MetadataTypeDomain:
 		if len(instructionData) < 42+int(instructionData[41]) {
 			return fmt.Errorf("bad domain req: insuffient data: expected %v but got: %v", 42+int(instructionData[41]), len(instructionData))

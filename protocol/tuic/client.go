@@ -344,11 +344,21 @@ func writeConnectBuf(metadata *protocol.Metadata) []byte {
 	case protocol.MetadataTypeIPv4:
 		addrType = AtypIPv4
 		addrLen = net.IPv4len
-		addrBytes = net.ParseIP(metadata.Hostname).To4()
+		if metadata.CachedAddr.IsValid() {
+			ip4 := metadata.CachedAddr.As4()
+			addrBytes = ip4[:]
+		} else {
+			addrBytes = net.ParseIP(metadata.Hostname).To4()
+		}
 	case protocol.MetadataTypeIPv6:
 		addrType = AtypIPv6
 		addrLen = net.IPv6len
-		addrBytes = net.ParseIP(metadata.Hostname).To16()
+		if metadata.CachedAddr.IsValid() {
+			ip6 := metadata.CachedAddr.As16()
+			addrBytes = ip6[:]
+		} else {
+			addrBytes = net.ParseIP(metadata.Hostname).To16()
+		}
 	case protocol.MetadataTypeDomain:
 		addrType = AtypDomainName
 		addrLen = 1 + len(metadata.Hostname)
@@ -356,7 +366,12 @@ func writeConnectBuf(metadata *protocol.Metadata) []byte {
 	default:
 		addrType = AtypIPv4
 		addrLen = net.IPv4len
-		addrBytes = net.ParseIP(metadata.Hostname).To4()
+		if metadata.CachedAddr.IsValid() {
+			ip4 := metadata.CachedAddr.As4()
+			addrBytes = ip4[:]
+		} else {
+			addrBytes = net.ParseIP(metadata.Hostname).To4()
+		}
 	}
 
 	// Total: 2 (VER+TYPE) + 1 (addrType) + addrLen + 2 (port)

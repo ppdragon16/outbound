@@ -19,6 +19,9 @@ type PacketConn struct {
 }
 
 func (c *PacketConn) Write(b []byte) (int, error) {
+	if c.Conn.Metadata.CachedAddr.IsValid() {
+		return c.WriteToAddrPort(b, netip.AddrPortFrom(c.Conn.Metadata.CachedAddr, c.Conn.Metadata.Port))
+	}
 	ip, err := netip.ParseAddr(c.Conn.Metadata.Hostname)
 	if err != nil {
 		// Fallback for domain names: use WriteTo with string addr
@@ -59,9 +62,16 @@ func (c *PacketConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err e
 	if _, err = m.Unpack(c.Conn); err != nil {
 		return 0, netip.AddrPort{}, err
 	}
-	ap, err = m.DomainIpMapping(&c.domainIpMapping)
-	if err != nil {
-		return 0, netip.AddrPort{}, fmt.Errorf("ReadFrom AddrPort: %w", err)
+	if m.CachedAddr.IsValid() {
+		// Fast path: IP metadata types have the addr already parsed from
+		// raw bytes during Unpack, avoiding net.IP.String() allocation and
+		// the subsequent netip.ParseAddr(Hostname) round-trip.
+		ap = netip.AddrPortFrom(m.CachedAddr, m.Port)
+	} else {
+		ap, err = m.DomainIpMapping(&c.domainIpMapping)
+		if err != nil {
+			return 0, netip.AddrPort{}, fmt.Errorf("ReadFrom AddrPort: %w", err)
+		}
 	}
 
 	buf := pool.GetBuffer(2)

@@ -440,10 +440,20 @@ func NewAddress(metadata *protocol.Metadata) *Address {
 	switch metadata.Type {
 	case protocol.MetadataTypeIPv4:
 		addrType = AtypIPv4
-		addr = net.ParseIP(metadata.Hostname).To4()
+		if metadata.CachedAddr.IsValid() {
+			ip4 := metadata.CachedAddr.As4()
+			addr = ip4[:]
+		} else {
+			addr = net.ParseIP(metadata.Hostname).To4()
+		}
 	case protocol.MetadataTypeIPv6:
 		addrType = AtypIPv6
-		addr = net.ParseIP(metadata.Hostname).To16()
+		if metadata.CachedAddr.IsValid() {
+			ip6 := metadata.CachedAddr.As16()
+			addr = ip6[:]
+		} else {
+			addr = net.ParseIP(metadata.Hostname).To16()
+		}
 	case protocol.MetadataTypeDomain:
 		addrType = AtypDomainName
 		addr = make([]byte, len(metadata.Hostname)+1)

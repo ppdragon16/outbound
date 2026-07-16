@@ -18,6 +18,12 @@ type Metadata struct {
 	Cmd      MetadataCmd
 	Cipher   string
 	IsClient bool
+
+	// CachedAddr stores the parsed IP address for IPv4/IPv6 metadata types,
+	// avoiding the string allocation and re-parse cost of net.IP.String() +
+	// netip.ParseAddr(Hostname) in the hot path. Set by Unpack implementations
+	// that read raw IP bytes from the wire.
+	CachedAddr netip.Addr
 }
 
 func (m *Metadata) DomainIpMapping(cache *sync.Map) (addrPort netip.AddrPort, err error) {
@@ -71,23 +77,30 @@ func ParseMetadata(tgt string) (mdata Metadata, err error) {
 	}
 	tgtIP, err := netip.ParseAddr(host)
 	var typ MetadataType
+	var cachedAddr netip.Addr
 	if err != nil {
 		typ = MetadataTypeDomain
 	} else if tgtIP.Is4() {
 		typ = MetadataTypeIPv4
+		cachedAddr = tgtIP
 	} else {
 		typ = MetadataTypeIPv6
+		cachedAddr = tgtIP
 	}
 	return Metadata{
-		Type:     typ,
-		Hostname: host,
-		Port:     uint16(port),
+		Type:       typ,
+		Hostname:   host,
+		Port:       uint16(port),
+		CachedAddr: cachedAddr,
 	}, nil
 }
 
 func (m *Metadata) AddrPort() (netip.AddrPort, error) {
 	switch m.Type {
 	case MetadataTypeIPv4, MetadataTypeIPv6:
+		if m.CachedAddr.IsValid() {
+			return netip.AddrPortFrom(m.CachedAddr, m.Port), nil
+		}
 		ip, err := netip.ParseAddr(m.Hostname)
 		if err != nil {
 			return netip.AddrPort{}, err

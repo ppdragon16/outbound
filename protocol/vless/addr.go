@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"net"
+	"net/netip"
 
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
@@ -20,14 +20,20 @@ func CompleteMetadataFromReader(m *Metadata, first4 []byte, r io.Reader) (err er
 		if _, err = io.ReadFull(r, buf); err != nil {
 			return err
 		}
-		m.Hostname = net.IP(buf).String()
+		var ip4 [4]byte
+		copy(ip4[:], buf)
+		m.CachedAddr = netip.AddrFrom4(ip4)
+		m.Hostname = m.CachedAddr.String()
 	case protocol.MetadataTypeIPv6:
 		buf := pool.GetBuffer(16)
 		defer pool.PutBuffer(buf)
 		if _, err = io.ReadFull(r, buf); err != nil {
 			return err
 		}
-		m.Hostname = net.IP(buf).String()
+		var ip6 [16]byte
+		copy(ip6[:], buf)
+		m.CachedAddr = netip.AddrFrom16(ip6)
+		m.Hostname = m.CachedAddr.String()
 	case protocol.MetadataTypeDomain:
 		buf := pool.GetBuffer(1 + 255)
 		defer pool.PutBuffer(buf)
