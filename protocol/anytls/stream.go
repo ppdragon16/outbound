@@ -249,16 +249,12 @@ func (c *stream) Close() error {
 }
 
 func (c *stream) CloseWrite() error {
-	if c.finSent.CompareAndSwap(false, true) {
-		frame := newFrame(cmdFIN, c.id)
-		_, _ = writeFrame(c.session, frame)
-
-		// Use an independent timer (not SetReadDeadline) to force-close
-		// the stream if the server never sends its FIN. SetReadDeadline
-		// could be overridden by the caller.
-		time.AfterFunc(10*time.Second, func() { c.Close() })
-	}
-	return nil
+	// The sing-anytls server never sends FIN in response to a client-
+	// initiated close (closeLocally consumes dieOnce, blocking the
+	// closeWithError -> streamClosed -> cmdFIN path).  Waiting for the
+	// server to reply is therefore pointless — close the stream fully
+	// and return the session to the idle pool immediately.
+	return c.Close()
 }
 
 func (c *stream) LocalAddr() net.Addr {
