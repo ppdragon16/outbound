@@ -252,8 +252,11 @@ func (c *stream) CloseWrite() error {
 	if c.finSent.CompareAndSwap(false, true) {
 		frame := newFrame(cmdFIN, c.id)
 		_, _ = writeFrame(c.session, frame)
-		// Wakes up read within 10s in case the server never sends its FIN.
-		_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+
+		// Use an independent timer (not SetReadDeadline) to force-close
+		// the stream if the server never sends its FIN. SetReadDeadline
+		// could be overridden by the caller.
+		time.AfterFunc(10*time.Second, func() { c.Close() })
 	}
 	return nil
 }
