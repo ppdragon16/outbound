@@ -224,7 +224,19 @@ func (d *Dialer) Connect() error {
 }
 
 // Disconnect implements netproxy.Dialer.
+// It is called when the dialer is permanently removed (e.g. via update-sub
+// or daemon shutdown). It cleans up all juicity-specific resources: shared
+// QUIC transport, client ring, and all clientImpl QUIC connections.
 func (d *Dialer) Disconnect() error {
+	// Close all clientImpls in the ring (cancels contexts, closes QUIC connections).
+	d.clientRing.Close()
+	// Close the shared QUIC transport and its underlying UDP socket.
+	d.transportMu.Lock()
+	if d.sharedTransport != nil {
+		d.sharedTransport.Close()
+		d.sharedTransport = nil
+	}
+	d.transportMu.Unlock()
 	return d.nextDialer.Disconnect()
 }
 

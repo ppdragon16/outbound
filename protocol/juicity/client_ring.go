@@ -138,3 +138,28 @@ func (r *clientRing) passiveRemove(elem *list.Element) {
 	}
 	r.ring.Remove(elem)
 }
+
+// Close closes all clientImpls in the ring and clears the ring.
+// It is called when the parent Dialer is being permanently removed
+// (e.g. via update-sub or daemon shutdown).
+func (r *clientRing) Close() {
+	// Collect all clients under the lock, then release and close them
+	// individually. We must NOT hold r.mu while calling cli.Close() because
+	// clientImpl.Close() triggers detachCallback -> passiveRemove which
+	// tries to acquire r.mu.
+	r.mu.Lock()
+	clients := make([]*clientImpl, 0)
+	for e := r.ring.Front(); e != nil; e = e.Next() {
+		if e.Value != nil {
+			clients = append(clients, e.Value.(*clientRingNode).cli)
+			e.Value = nil // prevent passiveRemove from operating on this element
+		}
+	}
+	r.ring.Init()
+	r.current = nil
+	r.mu.Unlock()
+
+	for _, cli := range clients {
+		cli.Close()
+	}
+}
