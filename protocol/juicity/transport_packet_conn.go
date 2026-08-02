@@ -2,6 +2,7 @@ package juicity
 
 import (
 	"context"
+	"io"
 	"net"
 	"net/netip"
 	"sync"
@@ -96,6 +97,7 @@ func (c *TransportPacketConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPo
 }
 
 // WriteToAddrPort writes a packet to the target address.
+// Returns plaintext length as required by the io.Writer/PacketConn contract.
 func (c *TransportPacketConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (n int, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -115,9 +117,27 @@ func (c *TransportPacketConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (n in
 		return 0, err
 	}
 	defer pool.PutBuffer(toWrite)
-	return c.Transport.WriteTo(toWrite, c.proxyAddr)
+	wn, err := c.Transport.WriteTo(toWrite, c.proxyAddr)
+	if err != nil {
+		return 0, err
+	}
+	if wn != len(toWrite) {
+		return 0, io.ErrShortWrite
+	}
+	return len(b), nil
 }
 
+// Close closes both the Transport and the underlying Conn so no resources leak.
+// Closing only Conn leaves the Transport's goroutines and connection state alive.
 func (c *TransportPacketConn) Close() error {
-	return c.Conn.Close()
+	var err error
+	if c.Transport != nil {
+		err = c.Transport.Close()
+	}
+	if c.Conn != nil {
+		if closeErr := c.Conn.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	return err
 }

@@ -3,6 +3,7 @@ package juicity
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -97,6 +98,15 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 	t.connMutex.Lock()
 	defer t.connMutex.Unlock()
 	if t.quicConn != nil {
+		// Detect stale cached connections: if the QUIC connection's context
+		// is already done (server-side close, network loss, etc.), clean up
+		// and force a new connection instead of returning a dead one.
+		select {
+		case <-t.quicConn.Context().Done():
+			t.closeConnectionLocked(quicContextErr(t.quicConn.Context()))
+			return nil, common.ErrClientClosed
+		default:
+		}
 		return t.quicConn, nil
 	}
 	// Try the shared transport first (nil means this clientImpl manages its own).
@@ -120,7 +130,7 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 		// Only close the transport if we own it (not shared).
 		if t.sharedTransportPtr == nil {
 			transport.Close()
-			transport.Conn.Close()
+			_ = transport.Conn.Close()
 		}
 		return nil, err
 	}
@@ -151,6 +161,7 @@ func (t *clientImpl) sendAuthentication(quicConn quic.Connection) (err error) {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = uniStream.Close() }()
 	buf := pool.GetBytesBuffer()
 	defer pool.PutBytesBuffer(buf)
 	token, err := tuic.GenToken(quicConn.ConnectionState(), t.Uuid, t.Password)
@@ -165,30 +176,31 @@ func (t *clientImpl) sendAuthentication(quicConn quic.Connection) (err error) {
 	if err != nil {
 		return err
 	}
-	defer uniStream.Close()
 	for {
 		var auth *UnderlayAuth
 		select {
 		case <-t.Ctx.Done():
 			return t.Ctx.Err()
+		case <-quicConn.Context().Done():
+			return quicContextErr(quicConn.Context())
 		case auth = <-t.UnderlayAuth:
 		}
 		buf := auth.PackFromPool()
 		_, err = uniStream.Write(buf)
 		pool.PutBuffer(buf)
 		if err != nil {
-			t.Close()
+			_ = t.Close()
 			return err
 		}
 	}
 }
 
-func (t *clientImpl) Close() (err error) {
+func (t *clientImpl) Close() error {
 	t.connMutex.Lock()
 	select {
 	case <-t.Ctx.Done():
 		t.connMutex.Unlock()
-		return
+		return nil
 	default:
 		t.Cancel()
 	}
@@ -202,15 +214,15 @@ func (t *clientImpl) Close() (err error) {
 		t.connMutex.Lock()
 		defer t.connMutex.Unlock()
 		if t.quicConn != nil {
-			err = t.quicConn.CloseWithError(tuic.ProtocolError, common.ErrClientClosed.Error())
+			_ = t.quicConn.CloseWithError(tuic.ProtocolError, common.ErrClientClosed.Error())
 			t.quicConn = nil
 		}
 		if t.underConn != nil {
-			err = t.underConn.Close()
+			_ = t.underConn.Close()
 			t.underConn = nil
 		}
 	})
-	return err
+	return nil
 }
 
 func (t *clientImpl) DialContext(ctx context.Context, metadata *Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (*Conn, error) {
@@ -223,17 +235,19 @@ func (t *clientImpl) DialContext(ctx context.Context, metadata *Metadata, dialer
 	}
 	quicConn, err := t.getQuicConn(ctx, dialer, dialFn)
 	if err != nil {
+		if errors.Is(err, common.ErrClientClosed) {
+			return nil, err
+		}
 		return nil, fmt.Errorf("getQuicConn: %w", err)
 	}
 	quicStream, err := quicConn.OpenStream()
 	if err != nil {
-		t.connMutex.Lock()
-		// Detach it from pool due to bad connection.
-		if t.detachCallback != nil {
-			go t.detachCallback()
-			t.detachCallback = nil
+		if isStreamLimitReached(err) {
+			return nil, common.ErrTooManyOpenStreams
 		}
-		t.connMutex.Unlock()
+		if t.handleIfConnectionClosed(err) {
+			return nil, common.ErrClientClosed
+		}
 		return nil, fmt.Errorf("OpenStream: %w", err)
 	}
 	stream := NewConn(
@@ -254,8 +268,11 @@ func (t *clientImpl) DialAuth(ctx context.Context, metadata *Metadata, dialer ne
 		return nil, nil, ctx.Err()
 	default:
 	}
-	_, err = t.getQuicConn(ctx, dialer, dialFn)
+	quicConn, err := t.getQuicConn(ctx, dialer, dialFn)
 	if err != nil {
+		if errors.Is(err, common.ErrClientClosed) {
+			return nil, nil, err
+		}
 		return nil, nil, fmt.Errorf("getQuicConn: %w", err)
 	}
 	iv = make([]byte, CipherConf.SaltLen)
@@ -263,12 +280,94 @@ func (t *clientImpl) DialAuth(ctx context.Context, metadata *Metadata, dialer ne
 	iv[0], iv[1] = 0, 0
 	_, _ = fastrand.Read(iv[2:])
 	_, _ = fastrand.Read(psk)
-	t.UnderlayAuth <- &UnderlayAuth{
+	auth := &UnderlayAuth{
 		IV:       iv,
 		Psk:      psk,
 		Metadata: metadata,
 	}
+	// Non-blocking send with connection-death detection: if the QUIC
+	// connection died between getQuicConn and this send, detect it and
+	// clean up so the ring retries on the next node.
+	select {
+	case t.UnderlayAuth <- auth:
+	case <-quicConn.Context().Done():
+		if t.handleIfConnectionClosed(quicContextErr(quicConn.Context())) {
+			return nil, nil, common.ErrClientClosed
+		}
+		return nil, nil, quicContextErr(quicConn.Context())
+	case <-t.Ctx.Done():
+		return nil, nil, common.ErrClientClosed
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	}
 	return iv, psk, nil
+}
+
+// handleIfConnectionClosed detaches the connection from the client pool and
+// closes it when a permanent error (non-temporary) is encountered. Transient
+// net.Error.Temporary() failures are skipped — the connection may recover.
+func (t *clientImpl) handleIfConnectionClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	if netErr, ok := err.(net.Error); ok && netErr.Temporary() { // nolint:staticcheck
+		return false
+	}
+	t.connMutex.Lock()
+	defer t.connMutex.Unlock()
+	t.closeConnectionLocked(err)
+	return true
+}
+
+// quicContextErr extracts a meaningful error from a QUIC connection context,
+// preferring context.Cause over context.Err.
+func quicContextErr(ctx context.Context) error {
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return common.ErrClientClosed
+}
+
+// closeConnectionLocked tears down the connection: detaches from ring,
+// cancels context, closes QUIC conn and underlying UDP socket.
+// Must be called with connMutex held.
+func (t *clientImpl) closeConnectionLocked(err error) {
+	if t.detachCallback != nil {
+		go t.detachCallback()
+		t.detachCallback = nil
+	}
+	select {
+	case <-t.Ctx.Done():
+	default:
+		t.Cancel()
+	}
+	if t.quicConn != nil {
+		errStr := common.ErrClientClosed.Error()
+		if err != nil {
+			errStr = err.Error()
+		}
+		_ = t.quicConn.CloseWithError(tuic.ProtocolError, errStr)
+		t.quicConn = nil
+	}
+	if t.underConn != nil {
+		_ = t.underConn.Close()
+		t.underConn = nil
+	}
+}
+
+// isStreamLimitReached reports whether err is a recoverable stream-limit
+// error. The client ring should retry on the next connection rather than
+// destroying this one.
+func isStreamLimitReached(err error) bool {
+	var streamLimitPtr *quic.StreamLimitReachedError
+	if errors.As(err, &streamLimitPtr) {
+		return true
+	}
+	var streamLimit quic.StreamLimitReachedError
+	return errors.As(err, &streamLimit)
 }
 
 func (t *clientImpl) setOnClose(f func()) {

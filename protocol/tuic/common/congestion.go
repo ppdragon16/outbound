@@ -6,9 +6,9 @@ import (
 )
 
 const (
-	InitialStreamReceiveWindow     = 2 * 1024 * 1024  // 2 MB
+	InitialStreamReceiveWindow     = 8 * 1024 * 1024  // 8 MB (fast start — netem sweep confirmed)
 	MaxStreamReceiveWindow         = 32 * 1024 * 1024 // 32 MB
-	InitialConnectionReceiveWindow = 32 * 1024 * 1024 // 32 MB
+	InitialConnectionReceiveWindow = 12 * 1024 * 1024 // 12 MB (reduced from 32MB; enough for 1-2 concurrent streams)
 	MaxConnectionReceiveWindow     = 64 * 1024 * 1024 // 64 MB
 )
 

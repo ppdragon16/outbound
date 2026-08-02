@@ -4,7 +4,6 @@ import (
 	"container/list"
 	"context"
 	"errors"
-	"strings"
 	"sync"
 
 	"github.com/daeuniverse/outbound/netproxy"
@@ -91,7 +90,9 @@ func (r *clientRing) _tryNext(current **list.Element, f func(cli *clientRingNode
 
 	if *current == r.current {
 		// Clients are exhausted.
-		if strings.Contains(err.Error(), common.ErrTooManyOpenStreams.Error()) || errors.Is(err, common.ErrClientClosed) || errors.Is(err, common.ErrHoldOn) {
+		if errors.Is(err, common.ErrTooManyOpenStreams) ||
+			errors.Is(err, common.ErrClientClosed) ||
+			errors.Is(err, common.ErrHoldOn) {
 			goto getNew
 		}
 		// Not the expected error.
@@ -142,24 +143,27 @@ func (r *clientRing) passiveRemove(elem *list.Element) {
 // Close closes all clientImpls in the ring and clears the ring.
 // It is called when the parent Dialer is being permanently removed
 // (e.g. via update-sub or daemon shutdown).
-func (r *clientRing) Close() {
+func (r *clientRing) Close() error {
 	// Collect all clients under the lock, then release and close them
 	// individually. We must NOT hold r.mu while calling cli.Close() because
 	// clientImpl.Close() triggers detachCallback -> passiveRemove which
 	// tries to acquire r.mu.
 	r.mu.Lock()
-	clients := make([]*clientImpl, 0)
-	for e := r.ring.Front(); e != nil; e = e.Next() {
-		if e.Value != nil {
-			clients = append(clients, e.Value.(*clientRingNode).cli)
-			e.Value = nil // prevent passiveRemove from operating on this element
+	clients := make([]*clientImpl, 0, r.ring.Len())
+	for elem := r.ring.Front(); elem != nil; {
+		next := elem.Next()
+		if node, ok := elem.Value.(*clientRingNode); ok && node != nil && node.cli != nil {
+			clients = append(clients, node.cli)
 		}
+		elem.Value = nil
+		r.ring.Remove(elem)
+		elem = next
 	}
-	r.ring.Init()
 	r.current = nil
 	r.mu.Unlock()
 
 	for _, cli := range clients {
-		cli.Close()
+		_ = cli.Close()
 	}
+	return nil
 }

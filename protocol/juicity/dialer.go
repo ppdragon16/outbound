@@ -229,7 +229,7 @@ func (d *Dialer) Connect() error {
 // QUIC transport, client ring, and all clientImpl QUIC connections.
 func (d *Dialer) Disconnect() error {
 	// Close all clientImpls in the ring (cancels contexts, closes QUIC connections).
-	d.clientRing.Close()
+	_ = d.clientRing.Close()
 	// Close the shared QUIC transport and its underlying UDP socket.
 	d.transportMu.Lock()
 	if d.sharedTransport != nil {
