@@ -138,12 +138,16 @@ func (c *stream) Write(b []byte) (n int, err error) {
 	if c.closed.Load() {
 		return 0, net.ErrClosed
 	}
+	if len(b) == 0 {
+		return 0, nil
+	}
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if c.closed.Load() {
+		return 0, net.ErrClosed
+	}
 
-	frame := newFrame(cmdPSH, c.id)
-	frame.data = b
-	return writeFrame(c.session, frame)
+	return writeDataFrames(c.session, c.id, b, time.Time{})
 }
 
 func (c *stream) Read(b []byte) (n int, err error) {
@@ -416,9 +420,7 @@ func (ps *packetStream) WriteToAddrPort(p []byte, ap netip.AddrPort) (n int, err
 		binary.BigEndian.PutUint16(data[1+tgtAddrLen:], uint16(len(p)))
 		copy(data[1+tgtAddrLen+2:], p)
 
-		frame := newFrame(cmdPSH, ps.id)
-		frame.data = data
-		if _, err := writeFrame(ps.session, frame); err != nil {
+		if _, err := writeDataFrames(ps.session, ps.id, data, time.Time{}); err != nil {
 			return 0, err
 		}
 		return len(p), nil
@@ -429,9 +431,7 @@ func (ps *packetStream) WriteToAddrPort(p []byte, ap netip.AddrPort) (n int, err
 	binary.BigEndian.PutUint16(data, uint16(len(p)))
 	copy(data[2:], p)
 
-	frame := newFrame(cmdPSH, ps.id)
-	frame.data = data
-	if _, err := writeFrame(ps.session, frame); err != nil {
+	if _, err := writeDataFrames(ps.session, ps.id, data, time.Time{}); err != nil {
 		return 0, err
 	}
 	return len(p), nil
