@@ -49,7 +49,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	if reservedStreamsCapability > 5 {
 		reservedStreamsCapability = 5
 	}
-	maxDatagramFrameSize := 1400
+	maxDatagramFrameSize := 1452 // quic-go MaxPacketBufferSize
 	udpRelayMode := common.NATIVE
 	if header.Flags&protocol.Flags_Tuic_UdpRelayModeQuic > 0 {
 		// FIXME: QUIC has severe performance problems.
@@ -100,7 +100,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 				Password:              header.Password,
 				UdpRelayMode:          udpRelayMode,
 				CongestionController:  header.Feature1.(string),
-				ReduceRtt:             false,
+				ReduceRtt:             true,
 				CWND:                  10,
 				MaxUdpRelayPacketSize: maxDatagramFrameSize,
 			},
