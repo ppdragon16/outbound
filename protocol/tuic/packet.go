@@ -36,6 +36,10 @@ func NewPackets() *Packets {
 func (p *Packets) PushBack(packet *Packet) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.closed {
+		packet.releaseData()
+		return
+	}
 	p.list.PushBack(packet)
 	select {
 	case <-p.isEmptyState.Done():
@@ -73,6 +77,10 @@ func (p *Packets) Close() error {
 	case <-p.isEmptyState.Done():
 	default:
 		p.cancelEmptyState()
+	}
+	for p.list.Len() > 0 {
+		pkt := p.list.Remove(p.list.Front()).(*Packet)
+		pkt.releaseData()
 	}
 	return nil
 }
@@ -216,7 +224,15 @@ func (q *quicStreamPacketConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrP
 				err = net.ErrClosed
 				return
 			}
-			_d, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, &deFragger{})
+			if packet.FRAG_TOTAL <= 1 {
+			n = copy(p, packet.DATA)
+			if packet.ADDR != nil {
+				ap = packet.ADDR.UDPAddr().AddrPort()
+			}
+			packet.releaseData()
+			return
+		}
+		_d, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, &deFragger{})
 			d := _d.(*deFragger)
 			var assembled bool
 			if n, ap, assembled = d.Feed(packet, p); assembled {

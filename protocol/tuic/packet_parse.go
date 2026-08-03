@@ -2,6 +2,7 @@ package tuic
 
 import (
 	"encoding/binary"
+	"github.com/daeuniverse/outbound/pool"
 	"fmt"
 	"net"
 
@@ -45,11 +46,17 @@ func readPacketFromMessage(msg []byte) (*Packet, error) {
 	off += n
 
 	var data []byte
+	var dataFromPool bool
 	if size > 0 {
 		if len(msg[off:]) < int(size) {
 			return nil, fmt.Errorf("tuic: data truncated: need %d have %d", size, len(msg[off:]))
 		}
-		data = make([]byte, size)
+		if fragTotal <= 1 {
+			data = pool.GetBuffer(int(size))
+			dataFromPool = true
+		} else {
+			data = make([]byte, size)
+		}
 		copy(data, msg[off:off+int(size)])
 	}
 
@@ -62,6 +69,7 @@ func readPacketFromMessage(msg []byte) (*Packet, error) {
 		SIZE:         size,
 		ADDR:         addr,
 		DATA:         data,
+		dataFromPool: dataFromPool,
 	}, nil
 }
 
