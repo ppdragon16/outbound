@@ -1,12 +1,11 @@
 package tuic
 
 import (
-	"container/list"
-	"context"
 	"errors"
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/outbound/pkg/fastrand"
@@ -15,73 +14,56 @@ import (
 	"github.com/daeuniverse/quic-go"
 )
 
+const packetChanCap = 2048
+
 type Packets struct {
-	mu               sync.Mutex
-	list             *list.List
-	isEmptyState     context.Context
-	cancelEmptyState func()
-	closed           bool
+	mu     sync.Mutex
+	ch     chan *Packet
+	closed atomic.Bool
 }
 
 func NewPackets() *Packets {
-	ctx, cancel := context.WithCancel(context.Background())
 	return &Packets{
-		mu:               sync.Mutex{},
-		list:             list.New().Init(),
-		isEmptyState:     ctx,
-		cancelEmptyState: cancel,
+		ch: make(chan *Packet, packetChanCap),
 	}
 }
 
 func (p *Packets) PushBack(packet *Packet) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
+	if p.closed.Load() {
+		p.mu.Unlock()
 		packet.releaseData()
 		return
 	}
-	p.list.PushBack(packet)
-	select {
-	case <-p.isEmptyState.Done():
-	default:
-		p.cancelEmptyState()
-	}
+	// Channel send while holding mu so concurrent Close cannot close the
+	// channel underneath us (Close also acquires mu before close).
+	p.ch <- packet
+	p.mu.Unlock()
 }
 
 func (p *Packets) PopFrontBlock() (packet *Packet, closed bool) {
-	<-p.isEmptyState.Done()
-	if p.closed {
+	packet, ok := <-p.ch
+	if !ok {
 		return nil, true
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	packet = p.list.Remove(p.list.Front()).(*Packet)
-	if p.list.Len() == 0 {
-		p.setEmpty()
-	}
 	return packet, false
-}
-
-func (p *Packets) setEmpty() {
-	p.isEmptyState, p.cancelEmptyState = context.WithCancel(context.Background())
 }
 
 func (p *Packets) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.closed {
+	if p.closed.Load() {
 		return nil
 	}
-	p.closed = true
-	select {
-	case <-p.isEmptyState.Done():
-	default:
-		p.cancelEmptyState()
+	p.closed.Store(true)
+	// Drain buffered packets so pool-backed DATA is returned.
+	// No new PushBack can run concurrently — it would block on p.mu.
+	for len(p.ch) > 0 {
+		if pkt := <-p.ch; pkt != nil {
+			pkt.releaseData()
+		}
 	}
-	for p.list.Len() > 0 {
-		pkt := p.list.Remove(p.list.Front()).(*Packet)
-		pkt.releaseData()
-	}
+	close(p.ch)
 	return nil
 }
 
