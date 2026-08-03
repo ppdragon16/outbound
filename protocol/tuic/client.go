@@ -398,7 +398,11 @@ func (t *clientImpl) ListenPacketWithDialer(ctx context.Context, metadata *proto
 	}
 
 	var connId uint16
-	incomingPackets := NewPackets()
+	cap := 64
+	if metadata.Port == 53 {
+		cap = 1 // DNS: strictly 1-in-1-out
+	}
+	incomingPackets := NewPackets(cap)
 	for {
 		connId = uint16(fastrand.Intn(0xFFFF))
 		_, loaded := t.udpIncomingPacketsMap.LoadOrStore(connId, incomingPackets)

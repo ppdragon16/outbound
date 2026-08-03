@@ -14,17 +14,15 @@ import (
 	"github.com/daeuniverse/quic-go"
 )
 
-const packetChanCap = 2048
-
 type Packets struct {
 	mu     sync.Mutex
 	ch     chan *Packet
 	closed atomic.Bool
 }
 
-func NewPackets() *Packets {
+func NewPackets(cap int) *Packets {
 	return &Packets{
-		ch: make(chan *Packet, packetChanCap),
+		ch: make(chan *Packet, cap),
 	}
 }
 
@@ -35,9 +33,13 @@ func (p *Packets) PushBack(packet *Packet) {
 		packet.releaseData()
 		return
 	}
-	// Channel send while holding mu so concurrent Close cannot close the
-	// channel underneath us (Close also acquires mu before close).
-	p.ch <- packet
+	select {
+	case p.ch <- packet:
+	default:
+		// Channel full: drop the packet and release pool-backed DATA.
+		// QUIC flow control backpressures the sender.
+		packet.releaseData()
+	}
 	p.mu.Unlock()
 }
 
