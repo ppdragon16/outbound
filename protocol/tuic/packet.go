@@ -113,27 +113,28 @@ func (q *quicStreamPacketConn) close() (err error) {
 		}()
 	}
 	if q.incomingPackets != nil {
+		// Close the queue BEFORE the Dissociate so blocked PopFrontBlock
+		// callers unblock immediately instead of leaking.
+		pkts := q.incomingPackets
 		q.incomingPackets = nil
+		pkts.Close()
 
+		// Best-effort: tell the server to release this UDP association.
+		// If it fails (stream limit, dead conn, etc.), the server
+		// will eventually timeout the association on its own.
 		buf := pool.GetBytesBuffer()
 		defer pool.PutBytesBuffer(buf)
-		err = NewDissociate(q.connId, Ver5).WriteTo(buf)
-		if err != nil {
-			return
+		if e := NewDissociate(q.connId, Ver5).WriteTo(buf); e != nil {
+			return // non-fatal: we already closed the queue
 		}
-		var stream quic.SendStream
-		stream, err = q.quicConn.OpenUniStream()
-		if err != nil {
-			return
+		stream, e := q.quicConn.OpenUniStream()
+		if e != nil {
+			return // non-fatal
 		}
-		_, err = buf.WriteTo(stream)
-		if err != nil {
-			return
+		if _, e = buf.WriteTo(stream); e != nil {
+			return // non-fatal
 		}
-		err = stream.Close()
-		if err != nil {
-			return
-		}
+		_ = stream.Close()
 	}
 	return
 }
