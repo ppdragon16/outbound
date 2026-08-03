@@ -2,12 +2,11 @@ package tuic
 
 import (
 	"bufio"
-	"bytes"
+	"errors"
 	"context"
 	"encoding/binary"
 	"crypto/tls"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
@@ -57,6 +56,12 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 	t.connMutex.Lock()
 	defer t.connMutex.Unlock()
 	if t.quicConn != nil {
+		select {
+		case <-t.quicConn.Context().Done():
+			t.quicConn = nil
+			return nil, common.ErrClientClosed
+		default:
+		}
 		return t.quicConn, nil
 	}
 	// Try the shared transport first (nil means this clientImpl manages its own).
@@ -195,54 +200,46 @@ func (t *clientImpl) handleMessage(quicConn quic.Connection) (err error) {
 	}()
 	for {
 		// TODO:
-		ctx, cancel := context.WithTimeout(context.TODO(), 3*time.Minute)
-		message, err := quicConn.ReceiveDatagram(ctx)
-		cancel()
+		message, err := quicConn.ReceiveDatagram(context.Background())
 		if err != nil {
 			return err
 		}
-		go func(message []byte) (err error) {
-			var assocId uint16
-			defer func() {
-				t.deferQuicConn(quicConn, err)
-				if err != nil && assocId != 0 {
-					if val, loaded := t.udpIncomingPacketsMap.LoadAndDelete(assocId); loaded {
-						val.(*Packets).Close()
-					}
-				}
-			}()
-			reader := bytes.NewReader(message)
-			commandHead, err := ReadCommandHead(reader)
-			if err != nil {
-				return err
-			}
-			switch commandHead.TYPE {
-			case PacketType:
-				var packet *Packet
-				packet, err = ReadPacketWithHead(commandHead, reader)
-				if err != nil {
-					return err
-				}
-				if t.udp && t.UdpRelayMode == common.NATIVE {
-					assocId = packet.ASSOC_ID
-					if val, ok := t.udpIncomingPacketsMap.Load(assocId); ok {
-						incomingPackets := val.(*Packets)
-						incomingPackets.PushBack(packet)
-					}
-				}
-			case HeartbeatType:
-				_, err = ReadHeartbeatWithHead(commandHead, reader)
-				if err != nil {
-					return err
+		go func(message []byte) {
+		var err error
+		var assocId uint16
+		defer func() {
+			t.deferQuicConn(quicConn, err)
+			if err != nil && assocId != 0 {
+				if val, loaded := t.udpIncomingPacketsMap.LoadAndDelete(assocId); loaded {
+					_ = val.(*Packets).Close()
 				}
 			}
-			return nil
-		}(message)
+		}()
+		if len(message) < 2 {
+			return
+		}
+		switch CommandType(message[1]) {
+		case PacketType:
+			packet, parseErr := readPacketFromMessage(message)
+			if parseErr != nil {
+				err = parseErr
+				return
+			}
+			if t.udp && t.UdpRelayMode == common.NATIVE {
+				assocId = packet.ASSOC_ID
+				if val, ok := t.udpIncomingPacketsMap.Load(assocId); ok {
+					val.(*Packets).PushBack(packet)
+					return
+				}
+			}
+		case HeartbeatType:
+		}
+	}(message)
 	}
 }
 
 func (t *clientImpl) deferQuicConn(quicConn quic.Connection, err error) {
-	if err != nil && !strings.Contains(err.Error(), common.ErrTooManyOpenStreams.Error()) {
+	if err != nil && !errors.Is(err, common.ErrTooManyOpenStreams) {
 		t.forceClose(quicConn, err)
 	}
 }
