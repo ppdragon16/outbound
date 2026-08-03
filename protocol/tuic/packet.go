@@ -216,10 +216,11 @@ func (q *quicStreamPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err erro
 // ReadFromAddrPort reads a packet and returns the source as netip.AddrPort.
 func (q *quicStreamPacketConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err error) {
 	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.incomingPackets != nil {
+	incomingPackets := q.incomingPackets
+	q.mu.Unlock()
+	if incomingPackets != nil {
 		for {
-			packet, closed := q.incomingPackets.PopFrontBlock()
+			packet, closed := incomingPackets.PopFrontBlock()
 			if closed {
 				err = net.ErrClosed
 				return
