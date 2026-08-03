@@ -71,8 +71,7 @@ func ReadTCPRequest(r io.Reader) (string, error) {
 }
 
 func WriteTCPRequest(w io.Writer, addr string) error {
-	padding := tcpRequestPadding.String()
-	paddingLen := len(padding)
+	paddingLen := tcpRequestPadding.randomLen()
 	addrLen := len(addr)
 	sz := int(quicvarint.Len(FrameTypeTCPRequest)) +
 		int(quicvarint.Len(uint64(addrLen))) + addrLen +
@@ -83,7 +82,7 @@ func WriteTCPRequest(w io.Writer, addr string) error {
 	i += varintPut(buf[i:], uint64(addrLen))
 	i += copy(buf[i:], addr)
 	i += varintPut(buf[i:], uint64(paddingLen))
-	copy(buf[i:], padding)
+	writeRandomBytes(buf[i : i+paddingLen])
 	_, err := w.Write(buf)
 	return err
 }
@@ -138,8 +137,7 @@ func ReadTCPResponse(r io.Reader) (bool, string, error) {
 }
 
 func WriteTCPResponse(w io.Writer, ok bool, msg string) error {
-	padding := tcpResponsePadding.String()
-	paddingLen := len(padding)
+	paddingLen := tcpResponsePadding.randomLen()
 	msgLen := len(msg)
 	sz := 1 + int(quicvarint.Len(uint64(msgLen))) + msgLen +
 		int(quicvarint.Len(uint64(paddingLen))) + paddingLen
@@ -153,7 +151,7 @@ func WriteTCPResponse(w io.Writer, ok bool, msg string) error {
 	i := varintPut(buf[1:], uint64(msgLen))
 	i += copy(buf[1+i:], msg)
 	i += varintPut(buf[1+i:], uint64(paddingLen))
-	copy(buf[1+i:], padding)
+	writeRandomBytes(buf[1+i : 1+i+paddingLen])
 	_, err := w.Write(buf)
 	return err
 }
@@ -174,6 +172,10 @@ type UDPMessage struct {
 	FragCount uint8  // 1
 	Addr      string // varint + bytes
 	Data      []byte
+	// Release returns the backing datagram buffer to quic-go's pool.
+	// Must be called exactly once when Data is no longer referenced;
+	// nil when the message owns no pooled storage.
+	Release func()
 }
 
 func (m *UDPMessage) HeaderSize() int {

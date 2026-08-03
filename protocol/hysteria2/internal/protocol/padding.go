@@ -14,15 +14,32 @@ type padding struct {
 	Max int
 }
 
-func (p padding) String() string {
-	n := p.Min + rand.Intn(p.Max-p.Min)
-	bs := make([]byte, n)
-	if n > 0 {
-		_, _ = rand.Read(bs)
-		for i, b := range bs {
-			bs[i] = paddingChars[int(b)%len(paddingChars)]
-		}
+// randomLen returns a random padding length in [Min, Max).
+func (p padding) randomLen() int {
+	if p.Max <= p.Min {
+		return p.Min
 	}
+	return p.Min + rand.Intn(p.Max-p.Min)
+}
+
+// writeRandomBytes fills dst with random characters from paddingChars in
+// bulk via fastrand.Read, then maps each byte to the character set via
+// modulo. Order of magnitude faster than per-byte fastrand.Intn on long
+// paddings (authRequest goes up to 2048 bytes).
+func writeRandomBytes(dst []byte) {
+	if len(dst) == 0 {
+		return
+	}
+	_, _ = rand.Read(dst)
+	const n = byte(len(paddingChars))
+	for i := range dst {
+		dst[i] = paddingChars[dst[i]%n]
+	}
+}
+
+func (p padding) String() string {
+	bs := make([]byte, p.randomLen())
+	writeRandomBytes(bs)
 	return string(bs)
 }
 

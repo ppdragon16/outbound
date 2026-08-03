@@ -13,11 +13,13 @@ import (
 )
 
 const (
-	defaultStreamReceiveWindow = 8388608                            // 8MB
-	defaultConnReceiveWindow   = defaultStreamReceiveWindow * 5 / 2 // 20MB
-	defaultMaxIdleTimeout      = 30 * time.Second
-	defaultKeepAlivePeriod     = 10 * time.Second
-	defaultHandshakeIdleTimeout = 10 * time.Second
+	defaultStreamReceiveWindow    = 8 * 1024 * 1024  // 8MB initial
+	defaultConnReceiveWindow      = 20 * 1024 * 1024 // 20MB initial
+	defaultMaxStreamReceiveWindow = 32 * 1024 * 1024 // 32MB ceiling (netem sweep peak)
+	defaultMaxConnReceiveWindow   = 64 * 1024 * 1024 // 64MB ceiling (stream x2)
+	defaultMaxIdleTimeout         = 30 * time.Second
+	defaultKeepAlivePeriod        = 10 * time.Second
+	defaultHandshakeIdleTimeout   = 10 * time.Second
 )
 
 type Config struct {
@@ -48,7 +50,7 @@ func (c *Config) verifyAndFill() error {
 		return oops.In("Hysteria2 Config Verify").With("field", "QUICConfig.InitialStreamReceiveWindow").With("reason", "must be at least 16384").New("invalid config")
 	}
 	if c.QUICConfig.MaxStreamReceiveWindow == 0 {
-		c.QUICConfig.MaxStreamReceiveWindow = defaultStreamReceiveWindow
+		c.QUICConfig.MaxStreamReceiveWindow = defaultMaxStreamReceiveWindow
 	} else if c.QUICConfig.MaxStreamReceiveWindow < 16384 {
 		return oops.In("Hysteria2 Config Verify").With("field", "QUICConfig.MaxStreamReceiveWindow").With("reason", "must be at least 16384").New("invalid config")
 	}
@@ -58,7 +60,7 @@ func (c *Config) verifyAndFill() error {
 		return oops.In("Hysteria2 Config Verify").With("field", "QUICConfig.InitialConnectionReceiveWindow").With("reason", "must be at least 16384").New("invalid config")
 	}
 	if c.QUICConfig.MaxConnectionReceiveWindow == 0 {
-		c.QUICConfig.MaxConnectionReceiveWindow = defaultConnReceiveWindow
+		c.QUICConfig.MaxConnectionReceiveWindow = defaultMaxConnReceiveWindow
 	} else if c.QUICConfig.MaxConnectionReceiveWindow < 16384 {
 		return oops.In("Hysteria2 Config Verify").With("field", "QUICConfig.MaxConnectionReceiveWindow").With("reason", "must be at least 16384").New("invalid config")
 	}

@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	udpMessageChanSize = 1024
+	udpMessageChanSize = 128
 )
 
 type udpConn struct {
@@ -72,7 +72,8 @@ func (u *udpConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err erro
 			}
 			msg := &protocol.UDPMessage{}
 			if err := protocol.ParseUDPMessage(datagram, msg); err != nil {
-				// Invalid message, this is fine - just wait for the next
+				// Invalid message, release buffer and wait for the next
+				u.conn.ReleaseDatagram(datagram)
 				continue
 			}
 			n, ok := u.D.Feed(msg, p)
@@ -82,8 +83,10 @@ func (u *udpConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err erro
 			}
 			ap, err := netip.ParseAddrPort(msg.Addr)
 			if err != nil {
+				u.conn.ReleaseDatagram(datagram)
 				return 0, netip.AddrPort{}, err
 			}
+			u.conn.ReleaseDatagram(datagram)
 			return n, ap, nil
 		}
 	}
@@ -208,12 +211,15 @@ func (m *udpSessionManager) IsClosed() bool {
 
 func (m *udpSessionManager) feed(datagram []byte) {
 	if len(datagram) < 9 {
-		// Invalid message, this is fine - just wait for the next
+		// Invalid message, this is fine - just wait for the next.
+		// Release the pooled buffer now: nobody will consume it.
+		m.conn.ReleaseDatagram(datagram)
 		return
 	}
 	conn, ok := m.connMap.Load(binary.BigEndian.Uint32(datagram))
 	if !ok {
 		// Ignore message from unknown session
+		m.conn.ReleaseDatagram(datagram)
 		return
 	}
 
@@ -221,7 +227,9 @@ func (m *udpSessionManager) feed(datagram []byte) {
 	case conn.(*udpConn).ReceiveCh <- datagram:
 		// OK
 	default:
-		// Channel full, drop the message
+		// Channel full, drop the message. Return the pooled datagram buffer
+		// to quic-go now: nobody will ever consume it.
+		m.conn.ReleaseDatagram(datagram)
 	}
 }
 

@@ -95,6 +95,9 @@ func ParseTuicURL(u string) (data *Tuic, err error) {
 	if !allowInsecure {
 		allowInsecure, _ = strconv.ParseBool(t.Query().Get("skipVerify"))
 	}
+	if !allowInsecure {
+		allowInsecure, _ = strconv.ParseBool(t.Query().Get("insecure"))
+	}
 	sni := t.Query().Get("peer")
 	if sni == "" {
 		sni = t.Query().Get("sni")
