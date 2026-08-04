@@ -2,10 +2,10 @@ package tuic
 
 import (
 	"encoding/binary"
-	"github.com/daeuniverse/outbound/pool"
 	"fmt"
 	"net"
 
+	"github.com/daeuniverse/outbound/pool"
 )
 
 // readPacketFromMessage parses a TUIC Packet command from its wire-format
@@ -91,8 +91,8 @@ func readAddressFromSlice(msg []byte) (*Address, int, error) {
 			addressPool.Put(a)
 			return nil, 0, fmt.Errorf("tuic: ipv4 address too short")
 		}
-		a.ADDR = make([]byte, addrLen)
-		copy(a.ADDR, msg[off:])
+		copy(a.buf[:], msg[off:off+addrLen])
+		a.ADDR = a.buf[:addrLen]
 		off += addrLen
 	case AtypIPv6:
 		const addrLen = net.IPv6len
@@ -100,8 +100,8 @@ func readAddressFromSlice(msg []byte) (*Address, int, error) {
 			addressPool.Put(a)
 			return nil, 0, fmt.Errorf("tuic: ipv6 address too short")
 		}
-		a.ADDR = make([]byte, addrLen)
-		copy(a.ADDR, msg[off:])
+		copy(a.buf[:], msg[off:off+addrLen])
+		a.ADDR = a.buf[:addrLen]
 		off += addrLen
 	case AtypDomainName:
 		if len(msg[off:]) < 1 {

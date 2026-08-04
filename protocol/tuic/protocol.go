@@ -475,6 +475,7 @@ type Address struct {
 	TYPE byte
 	ADDR []byte
 	PORT uint16
+	buf  [16]byte // inline storage for IPv4/IPv6 ADDR, avoids per-packet heap allocation
 }
 
 // reset clears the Address fields for reuse in the pool.

@@ -211,14 +211,17 @@ func (q *quicStreamPacketConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrP
 				return
 			}
 			if packet.FRAG_TOTAL <= 1 {
-			n = copy(p, packet.DATA)
-			if packet.ADDR != nil {
-				ap = packet.ADDR.UDPAddr().AddrPort()
+				n = copy(p, packet.DATA)
+				if packet.ADDR != nil {
+					addr, ok := netip.AddrFromSlice(packet.ADDR.ADDR)
+					if ok {
+						ap = netip.AddrPortFrom(addr, packet.ADDR.PORT)
+					}
+				}
+				packet.Release()
+				return
 			}
-			packet.Release()
-			return
-		}
-		_d, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, &deFragger{})
+			_d, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, &deFragger{})
 			d := _d.(*deFragger)
 			var assembled bool
 			if n, ap, assembled = d.Feed(packet, p); assembled {
