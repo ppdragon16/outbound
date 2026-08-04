@@ -76,17 +76,24 @@ func (u *udpConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err erro
 				u.conn.ReleaseDatagram(datagram)
 				continue
 			}
+			// Wire the Release callback so Defragger can return pooled
+			// buffers when fragments are completed or discarded.
+			// ReleaseDatagram must be called on the original full-cap
+			// buffer; msg.Data is only a sub-slice.
+			msg.Release = func() { u.conn.ReleaseDatagram(datagram) }
 			n, ok := u.D.Feed(msg, p)
 			if !ok {
-				// Incomplete message, wait for more
+				// Defragger is holding msg.Data for reassembly;
+				// Release will be called when all fragments arrive
+				// or when the packet is discarded.
 				continue
 			}
+			// Feed returned true: all fragments assembled and their
+			// buffers already released via msg.Release.
 			ap, err := netip.ParseAddrPort(msg.Addr)
 			if err != nil {
-				u.conn.ReleaseDatagram(datagram)
 				return 0, netip.AddrPort{}, err
 			}
-			u.conn.ReleaseDatagram(datagram)
 			return n, ap, nil
 		}
 	}
