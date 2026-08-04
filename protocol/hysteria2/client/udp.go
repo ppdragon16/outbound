@@ -71,15 +71,15 @@ func (u *udpConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err erro
 			if !ok {
 				return 0, netip.AddrPort{}, io.EOF
 			}
-			msg.DataBuf = datagram
 			if err := protocol.ParseUDPMessage(datagram, &msg); err != nil {
-				u.conn.ReleaseDatagram(datagram)
+				pool.PutBuffer(datagram)
 				continue
 			}
+			msg.DataBuf = datagram // set after Parse; it resets to nil
 			if msg.FragCount <= 1 {
 				// Single fragment: copy and release immediately.
 				n = copy(p, msg.Data)
-				u.conn.ReleaseDatagram(datagram)
+				pool.PutBuffer(datagram)
 				return n, msg.AddrPort, nil
 			}
 			// Fragmented: Defragger takes ownership of DataBuf;
@@ -224,13 +224,18 @@ func (m *udpSessionManager) feed(datagram []byte) {
 		return
 	}
 
+	// Copy into a pool buffer so the quic-go buffer can be released
+	// immediately — avoids exhausting the bounded datagramBufPool.
+	buf := pool.GetBuffer(len(datagram))
+	copy(buf, datagram)
+	m.conn.ReleaseDatagram(datagram)
+
 	select {
-	case conn.(*udpConn).ReceiveCh <- datagram:
+	case conn.(*udpConn).ReceiveCh <- buf:
 		// OK
 	default:
-		// Channel full, drop the message. Return the pooled datagram buffer
-		// to quic-go now: nobody will ever consume it.
-		m.conn.ReleaseDatagram(datagram)
+		// Channel full, drop the message.
+		pool.PutBuffer(buf)
 	}
 }
 
@@ -242,7 +247,7 @@ func (m *udpSessionManager) NewUDP() (net.PacketConn, error) {
 	ctx, cancel := context.WithCancel(m.ctx)
 	conn := &udpConn{
 		ID:           id,
-		D:            &frag.Defragger{ReleaseFn: m.conn.ReleaseDatagram},
+		D:            &frag.Defragger{ReleaseFn: pool.PutBuffer},
 		ReceiveCh:    make(chan []byte, udpMessageChanSize),
 		conn:         m.conn,
 		sm:           m,
