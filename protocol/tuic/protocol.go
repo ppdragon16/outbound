@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"sync"
 
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
@@ -230,8 +231,28 @@ func (c Connect) BytesLen() int {
 	return c.CommandHead.BytesLen() + c.ADDR.BytesLen()
 }
 
+var packetPool = sync.Pool{
+	New: func() any { return &Packet{} },
+}
+
+// getPacket retrieves a *Packet from the pool and resets its released flag.
+func getPacket() *Packet {
+	p := packetPool.Get().(*Packet)
+	p.released = false
+	return p
+}
+
+var addressPool = sync.Pool{
+	New: func() any { return &Address{} },
+}
+
+// getAddress retrieves an *Address from the pool.
+func getAddress() *Address {
+	return addressPool.Get().(*Address)
+}
+
 type Packet struct {
-	*CommandHead
+	CommandHead
 	ASSOC_ID   uint16
 	PKT_ID     uint16
 	FRAG_TOTAL uint8
@@ -241,6 +262,7 @@ type Packet struct {
 	DATA       []byte
 
 	dataFromPool bool
+	released     bool
 }
 
 // releaseData returns DATA to the pool if pool-backed; no-op otherwise.
@@ -253,9 +275,26 @@ func (p *Packet) releaseData() {
 	p.DATA = nil
 }
 
+// Release returns the Packet's DATA, Address, and the Packet itself to their
+// respective pools. It is safe to call multiple times (idempotent).
+func (p *Packet) Release() {
+	if p == nil || p.released {
+		return
+	}
+	p.released = true
+	p.releaseData()
+	if p.ADDR != nil {
+		p.ADDR.reset()
+		addressPool.Put(p.ADDR)
+		p.ADDR = nil
+	}
+	p.CommandHead = CommandHead{}
+	packetPool.Put(p)
+}
+
 func NewPacket(ASSOC_ID uint16, PKT_ID uint16, FRGA_TOTAL uint8, FRAG_ID uint8, SIZE uint16, ADDR *Address, DATA []byte, VER byte) *Packet {
 	return &Packet{
-		CommandHead: NewCommandHead(PacketType, VER),
+		CommandHead: CommandHead{VER: VER, TYPE: PacketType},
 		ASSOC_ID:    ASSOC_ID,
 		PKT_ID:      PKT_ID,
 		FRAG_ID:     FRAG_ID,
@@ -268,7 +307,7 @@ func NewPacket(ASSOC_ID uint16, PKT_ID uint16, FRGA_TOTAL uint8, FRAG_ID uint8, 
 
 func ReadPacketWithHead(head *CommandHead, reader BufferedReader) (c *Packet, err error) {
 	var _c Packet
-	_c.CommandHead = head
+	_c.CommandHead = *head
 	if _c.CommandHead.TYPE != PacketType {
 		err = fmt.Errorf("error command type: %s", _c.CommandHead.TYPE)
 		return nil, err
@@ -436,6 +475,13 @@ type Address struct {
 	TYPE byte
 	ADDR []byte
 	PORT uint16
+}
+
+// reset clears the Address fields for reuse in the pool.
+func (a *Address) reset() {
+	a.TYPE = 0
+	a.ADDR = nil
+	a.PORT = 0
 }
 
 func NewAddress(metadata *protocol.Metadata) *Address {

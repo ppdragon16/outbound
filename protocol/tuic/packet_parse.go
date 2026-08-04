@@ -15,8 +15,8 @@ import (
 //
 // Hot path: processDatagram calls this for every inbound UDP datagram.
 //
-// Allocations: 4 (Packet + Address + ADDR slice + DATA slice), down from
-// 12 via the reader+binary.Read path.
+// Allocations: 1 (ADDR slice). Packet, Address, and DATA are obtained
+// from sync.Pool.
 func readPacketFromMessage(msg []byte) (*Packet, error) {
 	// VER(1) + TYPE(1) + ASSOC_ID(2) + PKT_ID(2) + FRAG_TOTAL(1) + FRAG_ID(1) + SIZE(2)
 	const fixedLen = 2 + 2 + 2 + 1 + 1 + 2
@@ -46,82 +46,89 @@ func readPacketFromMessage(msg []byte) (*Packet, error) {
 	off += n
 
 	var data []byte
-	var dataFromPool bool
 	if size > 0 {
 		if len(msg[off:]) < int(size) {
+			// Release the pooled Address before returning the error.
+			addr.reset()
+			addressPool.Put(addr)
 			return nil, fmt.Errorf("tuic: data truncated: need %d have %d", size, len(msg[off:]))
 		}
-		if fragTotal <= 1 {
-			data = pool.GetBuffer(int(size))
-			dataFromPool = true
-		} else {
-			data = make([]byte, size)
-		}
+		data = pool.GetBuffer(int(size))
 		copy(data, msg[off:off+int(size)])
 	}
 
-	return &Packet{
-		CommandHead:  &CommandHead{VER: ver, TYPE: PacketType},
-		ASSOC_ID:     assocId,
-		PKT_ID:       pktId,
-		FRAG_TOTAL:   fragTotal,
-		FRAG_ID:      fragId,
-		SIZE:         size,
-		ADDR:         addr,
-		DATA:         data,
-		dataFromPool: dataFromPool,
-	}, nil
+	p := getPacket()
+	p.CommandHead = CommandHead{VER: ver, TYPE: PacketType}
+	p.ASSOC_ID = assocId
+	p.PKT_ID = pktId
+	p.FRAG_TOTAL = fragTotal
+	p.FRAG_ID = fragId
+	p.SIZE = size
+	p.ADDR = addr
+	p.DATA = data
+	p.dataFromPool = size > 0
+	return p, nil
 }
 
 // readAddressFromSlice parses an Address directly from a byte slice,
 // returning the Address, the number of bytes consumed, and any error.
 // Avoids the BufferedReader interface and io.ReadFull overhead.
+// The returned *Address is obtained from addressPool.
 func readAddressFromSlice(msg []byte) (*Address, int, error) {
 	if len(msg) < 1 {
 		return nil, 0, fmt.Errorf("tuic: address type byte missing")
 	}
 	typ := msg[0]
 	off := 1
-	var addr []byte
+
+	a := getAddress()
+	a.TYPE = typ
+
 	switch typ {
 	case AtypIPv4:
 		const addrLen = net.IPv4len
 		if len(msg[off:]) < addrLen+2 {
+			addressPool.Put(a)
 			return nil, 0, fmt.Errorf("tuic: ipv4 address too short")
 		}
-		addr = make([]byte, addrLen)
-		copy(addr, msg[off:])
+		a.ADDR = make([]byte, addrLen)
+		copy(a.ADDR, msg[off:])
 		off += addrLen
 	case AtypIPv6:
 		const addrLen = net.IPv6len
 		if len(msg[off:]) < addrLen+2 {
+			addressPool.Put(a)
 			return nil, 0, fmt.Errorf("tuic: ipv6 address too short")
 		}
-		addr = make([]byte, addrLen)
-		copy(addr, msg[off:])
+		a.ADDR = make([]byte, addrLen)
+		copy(a.ADDR, msg[off:])
 		off += addrLen
 	case AtypDomainName:
 		if len(msg[off:]) < 1 {
+			addressPool.Put(a)
 			return nil, 0, fmt.Errorf("tuic: domain length byte missing")
 		}
 		addrLen := int(msg[off])
 		if len(msg[off:]) < 1+addrLen+2 {
+			addressPool.Put(a)
 			return nil, 0, fmt.Errorf("tuic: domain address too short")
 		}
-		addr = make([]byte, 1+addrLen)
-		addr[0] = byte(addrLen)
-		copy(addr[1:], msg[off+1:off+1+addrLen])
+		a.ADDR = make([]byte, 1+addrLen)
+		a.ADDR[0] = byte(addrLen)
+		copy(a.ADDR[1:], msg[off+1:off+1+addrLen])
 		off += 1 + addrLen
 	case AtypNone:
 		// Address type None: no ADDR, no PORT (used on non-first fragments).
-		return &Address{TYPE: typ}, off, nil
+		return a, off, nil
 	default:
+		addressPool.Put(a)
 		return nil, 0, fmt.Errorf("tuic: unknown address type: %#x", typ)
 	}
 	if len(msg[off:]) < 2 {
+		addressPool.Put(a)
 		return nil, 0, fmt.Errorf("tuic: address port missing")
 	}
-	port := binary.BigEndian.Uint16(msg[off:])
+	a.PORT = binary.BigEndian.Uint16(msg[off:])
 	off += 2
-	return &Address{TYPE: typ, ADDR: addr, PORT: port}, off, nil
+	return a, off, nil
 }

@@ -123,11 +123,15 @@ type deFragger struct {
 }
 
 // Feed feeds a fragment and returns the assembled result when complete.
+// Caller must call m.Release() when assembled is true (Feed releases stored
+// fragments on assembly but the caller owns m when FRAG_TOTAL <= 1).
 func (d *deFragger) Feed(m *Packet, p []byte) (n int, addrPort netip.AddrPort, assembled bool) {
 	if m.FRAG_TOTAL <= 1 {
 		return copy(p, m.DATA), m.ADDR.UDPAddr().AddrPort(), true
 	}
 	if m.FRAG_ID >= m.FRAG_TOTAL {
+		// Invalid fragment: release immediately.
+		m.Release()
 		return
 	}
 	if d.count == 0 {
@@ -145,8 +149,15 @@ func (d *deFragger) Feed(m *Packet, p []byte) (n int, addrPort netip.AddrPort, a
 				}
 				n += copy(p[n:], frag.DATA)
 			}
+			// Capture addrPort before releasing (Release nils frag.ADDR).
+			addrPort = d.frags[0].ADDR.UDPAddr().AddrPort()
+			// Release all assembled fragments back to pools.
+			for _, frag := range d.frags {
+				frag.Release()
+			}
+			d.frags = nil
 			d.count = 0
-			return n, d.frags[0].ADDR.UDPAddr().AddrPort(), true
+			return n, addrPort, true
 		}
 	}
 	return

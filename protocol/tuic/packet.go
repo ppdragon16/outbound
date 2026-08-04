@@ -30,15 +30,15 @@ func (p *Packets) PushBack(packet *Packet) {
 	p.mu.Lock()
 	if p.closed.Load() {
 		p.mu.Unlock()
-		packet.releaseData()
+		packet.Release()
 		return
 	}
 	select {
 	case p.ch <- packet:
 	default:
-		// Channel full: drop the packet and release pool-backed DATA.
+		// Channel full: drop the packet and release all resources.
 		// QUIC flow control backpressures the sender.
-		packet.releaseData()
+		packet.Release()
 	}
 	p.mu.Unlock()
 }
@@ -58,11 +58,11 @@ func (p *Packets) Close() error {
 		return nil
 	}
 	p.closed.Store(true)
-	// Drain buffered packets so pool-backed DATA is returned.
+	// Drain buffered packets so pool-backed resources are returned.
 	// No new PushBack can run concurrently — it would block on p.mu.
 	for len(p.ch) > 0 {
 		if pkt := <-p.ch; pkt != nil {
-			pkt.releaseData()
+			pkt.Release()
 		}
 	}
 	close(p.ch)
@@ -215,7 +215,7 @@ func (q *quicStreamPacketConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrP
 			if packet.ADDR != nil {
 				ap = packet.ADDR.UDPAddr().AddrPort()
 			}
-			packet.releaseData()
+			packet.Release()
 			return
 		}
 		_d, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, &deFragger{})
