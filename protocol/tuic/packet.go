@@ -88,8 +88,10 @@ type quicStreamPacketConn struct {
 	closeErr  error
 	closed    bool
 
-	// TODO: multiple defraggers for different PKT_ID
-	deFraggers sync.Map
+	// deFraggers reassembles fragmented packets by PKT_ID.
+	// Only accessed from the single ReadFromAddrPort reader goroutine;
+	// a plain map is sufficient (no concurrent reads).
+	deFraggers map[uint16]*deFragger
 
 	muTimer       sync.Mutex
 	deadlineTimer *time.Timer
@@ -221,11 +223,16 @@ func (q *quicStreamPacketConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrP
 				packet.Release()
 				return
 			}
-			_d, _ := q.deFraggers.LoadOrStore(packet.PKT_ID, &deFragger{})
-			d := _d.(*deFragger)
+			var d *deFragger
+			if v, ok := q.deFraggers[packet.PKT_ID]; ok {
+				d = v
+			} else {
+				d = &deFragger{}
+				q.deFraggers[packet.PKT_ID] = d
+			}
 			var assembled bool
 			if n, ap, assembled = d.Feed(packet, p); assembled {
-				q.deFraggers.Delete(packet.PKT_ID)
+				delete(q.deFraggers, packet.PKT_ID)
 				return
 			}
 			// FIXME: Timeout to clean deFraggers.

@@ -198,44 +198,36 @@ func (t *clientImpl) handleMessage(quicConn quic.Connection) (err error) {
 	defer func() {
 		t.deferQuicConn(quicConn, err)
 	}()
+	receiveCtx := context.Background()
 	for {
-		// TODO:
-		message, err := quicConn.ReceiveDatagram(context.Background())
+		message, err := quicConn.ReceiveDatagram(receiveCtx)
 		if err != nil {
 			return err
 		}
-		go func(message []byte) {
-			var err error
-			var assocId uint16
-			defer func() {
-				quicConn.ReleaseDatagram(message)
-				t.deferQuicConn(quicConn, err)
-				if err != nil && assocId != 0 {
-					if val, loaded := t.udpIncomingPacketsMap.LoadAndDelete(assocId); loaded {
-						_ = val.(*Packets).Close()
-					}
-				}
-			}()
-			if len(message) < 2 {
-				return
+		if len(message) < 2 {
+			quicConn.ReleaseDatagram(message)
+			continue
+		}
+		switch CommandType(message[1]) {
+		case PacketType:
+			packet, parseErr := readPacketFromMessage(message)
+			// message buffer copied during parsing; release immediately.
+			quicConn.ReleaseDatagram(message)
+			if parseErr != nil {
+				return parseErr
 			}
-			switch CommandType(message[1]) {
-			case PacketType:
-				packet, parseErr := readPacketFromMessage(message)
-				if parseErr != nil {
-					err = parseErr
-					return
+			if t.udp && t.UdpRelayMode == common.NATIVE {
+				assocId := packet.ASSOC_ID
+				if val, ok := t.udpIncomingPacketsMap.Load(assocId); ok {
+					val.(*Packets).PushBack(packet)
+					continue
 				}
-				if t.udp && t.UdpRelayMode == common.NATIVE {
-					assocId = packet.ASSOC_ID
-					if val, ok := t.udpIncomingPacketsMap.Load(assocId); ok {
-						val.(*Packets).PushBack(packet)
-						return
-					}
-				}
-			case HeartbeatType:
 			}
-		}(message)
+			// Packet not dispatched: release pool-backed resources.
+			packet.Release()
+		case HeartbeatType:
+			quicConn.ReleaseDatagram(message)
+		}
 	}
 }
 
@@ -419,6 +411,7 @@ func (t *clientImpl) ListenPacketWithDialer(ctx context.Context, metadata *proto
 		maxUdpRelayPacketSize: t.MaxUdpRelayPacketSize,
 		deferQuicConnFn:       t.deferQuicConn,
 		closeDeferFn:          nil,
+			deFraggers:            make(map[uint16]*deFragger),
 	}
 	return pc, nil
 }
