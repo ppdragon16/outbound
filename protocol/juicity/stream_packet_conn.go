@@ -98,10 +98,10 @@ func (c *PacketConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err e
 func (c *PacketConn) WriteToAddrPort(p []byte, ap netip.AddrPort) (n int, err error) {
 	metadata := Metadata{
 		Metadata: protocol.Metadata{
-			Type:     protocol.MetadataTypeIPv4,
-			Hostname: ap.Addr().String(),
-			Port:     ap.Port(),
-			IsClient: true,
+			Type:       protocol.MetadataTypeIPv4,
+			CachedAddr: ap.Addr(),
+			Port:       ap.Port(),
+			IsClient:   true,
 		},
 		Network: "udp",
 	}
