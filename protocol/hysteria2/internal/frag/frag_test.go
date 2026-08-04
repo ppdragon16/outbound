@@ -1,6 +1,7 @@
 package frag
 
 import (
+	"net/netip"
 	"reflect"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestFragUDPMessage(t *testing.T) {
 					PacketID:  123,
 					FragID:    0,
 					FragCount: 1,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("hello"),
 				},
 				100,
@@ -36,7 +37,7 @@ func TestFragUDPMessage(t *testing.T) {
 					PacketID:  123,
 					FragID:    0,
 					FragCount: 1,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("hello"),
 				},
 			},
@@ -49,10 +50,10 @@ func TestFragUDPMessage(t *testing.T) {
 					PacketID:  123,
 					FragID:    0,
 					FragCount: 1,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("hello"),
 				},
-				20,
+				21,
 			},
 			[]protocol.UDPMessage{
 				{
@@ -60,7 +61,7 @@ func TestFragUDPMessage(t *testing.T) {
 					PacketID:  123,
 					FragID:    0,
 					FragCount: 2,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("hel"),
 				},
 				{
@@ -68,7 +69,7 @@ func TestFragUDPMessage(t *testing.T) {
 					PacketID:  123,
 					FragID:    1,
 					FragCount: 2,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("lo"),
 				},
 			},
@@ -81,10 +82,10 @@ func TestFragUDPMessage(t *testing.T) {
 					PacketID:  123,
 					FragID:    0,
 					FragCount: 1,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("abcdefgh"),
 				},
-				19,
+				20,
 			},
 			[]protocol.UDPMessage{
 				{
@@ -92,7 +93,7 @@ func TestFragUDPMessage(t *testing.T) {
 					PacketID:  123,
 					FragID:    0,
 					FragCount: 4,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("ab"),
 				},
 				{
@@ -100,7 +101,7 @@ func TestFragUDPMessage(t *testing.T) {
 					PacketID:  123,
 					FragID:    1,
 					FragCount: 4,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("cd"),
 				},
 				{
@@ -108,7 +109,7 @@ func TestFragUDPMessage(t *testing.T) {
 					PacketID:  123,
 					FragID:    2,
 					FragCount: 4,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("ef"),
 				},
 				{
@@ -116,7 +117,7 @@ func TestFragUDPMessage(t *testing.T) {
 					PacketID:  123,
 					FragID:    3,
 					FragCount: 4,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("gh"),
 				},
 			},
@@ -136,9 +137,9 @@ func TestDefragger(t *testing.T) {
 		m *protocol.UDPMessage
 	}
 	tests := []struct {
-		name    string
-		args    args
-		wantOk  bool
+		name     string
+		args     args
+		wantOk   bool
 		wantData string
 	}{
 		{
@@ -149,7 +150,7 @@ func TestDefragger(t *testing.T) {
 					PacketID:  987,
 					FragID:    0,
 					FragCount: 1,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("hello"),
 				},
 			},
@@ -164,7 +165,7 @@ func TestDefragger(t *testing.T) {
 					PacketID:  987,
 					FragID:    0,
 					FragCount: 2,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("hello "),
 				},
 			},
@@ -179,7 +180,7 @@ func TestDefragger(t *testing.T) {
 					PacketID:  987,
 					FragID:    1,
 					FragCount: 2,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("moto"),
 				},
 			},
@@ -194,7 +195,7 @@ func TestDefragger(t *testing.T) {
 					PacketID:  987,
 					FragID:    0,
 					FragCount: 3,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("deco"),
 				},
 			},
@@ -209,7 +210,7 @@ func TestDefragger(t *testing.T) {
 					PacketID:  987,
 					FragID:    1,
 					FragCount: 3,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("*"),
 				},
 			},
@@ -224,7 +225,7 @@ func TestDefragger(t *testing.T) {
 					PacketID:  987,
 					FragID:    2,
 					FragCount: 3,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("27"),
 				},
 			},
@@ -239,7 +240,7 @@ func TestDefragger(t *testing.T) {
 					PacketID:  233,
 					FragID:    1,
 					FragCount: 2,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("shinsekai"),
 				},
 			},
@@ -254,7 +255,7 @@ func TestDefragger(t *testing.T) {
 					PacketID:  244,
 					FragID:    1,
 					FragCount: 2,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("what???"),
 				},
 			},
@@ -269,7 +270,7 @@ func TestDefragger(t *testing.T) {
 					PacketID:  233,
 					FragID:    1,
 					FragCount: 2,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte(" annaijo"),
 				},
 			},
@@ -284,7 +285,7 @@ func TestDefragger(t *testing.T) {
 					PacketID:  233,
 					FragID:    88,
 					FragCount: 2,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("shinsekai"),
 				},
 			},
@@ -299,7 +300,7 @@ func TestDefragger(t *testing.T) {
 					PacketID:  233,
 					FragID:    0,
 					FragCount: 2,
-					Addr:      "test:123",
+					AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
 					Data:      []byte("shinsekai"),
 				},
 			},

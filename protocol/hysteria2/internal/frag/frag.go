@@ -30,14 +30,13 @@ func FragUDPMessage(m *protocol.UDPMessage, maxSize int) []protocol.UDPMessage {
 	return frags
 }
 
-// fragPiece holds a fragment's data slice together with a function that
-// releases the backing buffer back to quic-go's datagram pool. Fragments
-// reference the pool buffer indirectly (via msg.Data = msg[addrEnd:]), so
-// the release callback closes over the original full-cap buffer — calling
-// ReleaseDatagram on the sub-slice alone would silently fail the cap check.
+// fragPiece holds a fragment's data sub-slice together with the full-cap
+// datagram buffer (DataBuf). The full-cap buffer is needed because
+// quic-go's ReleaseDatagram checks cap(buf) == MaxPacketBufferSize,
+// which fails on sub-slices.
 type fragPiece struct {
-	data    []byte
-	release func()
+	data []byte
+	buf  []byte // full-cap buffer from quic-go's ReceiveDatagram
 }
 
 // Defragger handles the defragmentation of UDP messages.
@@ -45,18 +44,19 @@ type fragPiece struct {
 // If another packet arrives before a packet has received all fragments
 // in their entirety, any previous state is discarded.
 type Defragger struct {
-	pktID uint16
-	frags []fragPiece
-	count uint8
+	pktID     uint16
+	frags     []fragPiece
+	count     uint8
+	ReleaseFn func([]byte) // injected by caller: releases a quic-go datagram buffer
 }
 
-// releaseAll calls the release callback on every stored fragment and resets
+// releaseAll calls ReleaseFn on every stored full-cap buffer and resets
 // the frags slice to zero values. Safe to call when no fragments are stored.
 func (d *Defragger) releaseAll() {
 	for i := range d.frags {
-		if d.frags[i].release != nil {
-			d.frags[i].release()
-			d.frags[i].release = nil
+		if d.frags[i].buf != nil {
+			d.ReleaseFn(d.frags[i].buf)
+			d.frags[i].buf = nil
 		}
 		d.frags[i].data = nil
 	}
@@ -64,17 +64,20 @@ func (d *Defragger) releaseAll() {
 
 func (d *Defragger) Feed(m *protocol.UDPMessage, p []byte) (int, bool) {
 	if m.FragCount <= 1 {
+		// Single fragment: release the buffer immediately.
 		n := copy(p, m.Data)
-		if m.Release != nil {
-			m.Release()
+		if d.ReleaseFn != nil && m.DataBuf != nil {
+			d.ReleaseFn(m.DataBuf)
 		}
+		m.DataBuf = nil
 		return n, true
 	}
 	if m.FragID >= m.FragCount {
 		// Invalid fragment ID: release the current buffer.
-		if m.Release != nil {
-			m.Release()
+		if d.ReleaseFn != nil && m.DataBuf != nil {
+			d.ReleaseFn(m.DataBuf)
 		}
+		m.DataBuf = nil
 		return 0, false
 	}
 	if m.PacketID != d.pktID || m.FragCount != uint8(len(d.frags)) {
@@ -87,19 +90,21 @@ func (d *Defragger) Feed(m *protocol.UDPMessage, p []byte) (int, bool) {
 		} else {
 			d.frags = make([]fragPiece, m.FragCount)
 		}
-		d.frags[m.FragID] = fragPiece{data: m.Data, release: m.Release}
+		d.frags[m.FragID] = fragPiece{data: m.Data, buf: m.DataBuf}
+		m.DataBuf = nil
 		d.count = 1
 	} else if d.frags[m.FragID].data == nil {
-		d.frags[m.FragID] = fragPiece{data: m.Data, release: m.Release}
+		d.frags[m.FragID] = fragPiece{data: m.Data, buf: m.DataBuf}
+		m.DataBuf = nil
 		d.count++
 		if int(d.count) == len(d.frags) {
 			// all fragments received, assemble and release
 			off := 0
 			for i := range d.frags {
 				off += copy(p[off:], d.frags[i].data)
-				if d.frags[i].release != nil {
-					d.frags[i].release()
-					d.frags[i].release = nil
+				if d.frags[i].buf != nil {
+					d.ReleaseFn(d.frags[i].buf)
+					d.frags[i].buf = nil
 				}
 				d.frags[i].data = nil
 			}
@@ -107,9 +112,10 @@ func (d *Defragger) Feed(m *protocol.UDPMessage, p []byte) (int, bool) {
 		}
 	} else {
 		// Duplicate fragment: release the current buffer.
-		if m.Release != nil {
-			m.Release()
+		if d.ReleaseFn != nil && m.DataBuf != nil {
+			d.ReleaseFn(m.DataBuf)
 		}
+		m.DataBuf = nil
 	}
 	return 0, false
 }

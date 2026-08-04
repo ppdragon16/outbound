@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net/netip"
 
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/quic-go/quicvarint"
@@ -170,16 +171,16 @@ type UDPMessage struct {
 	PacketID  uint16 // 2
 	FragID    uint8  // 1
 	FragCount uint8  // 1
-	Addr      string // varint + bytes
+	AddrPort  netip.AddrPort
 	Data      []byte
-	// Release returns the backing datagram buffer to quic-go's pool.
-	// Must be called exactly once when Data is no longer referenced;
-	// nil when the message owns no pooled storage.
-	Release func()
+	// DataBuf holds the full-cap datagram buffer backing Data.
+	// Set only for inbound messages (from quic-go's ReceiveDatagram);
+	// nil for outbound.  Used by Defragger to release pooled buffers.
+	DataBuf []byte
 }
 
 func (m *UDPMessage) HeaderSize() int {
-	lAddr := len(m.Addr)
+	lAddr := addrPortStrLen(m.AddrPort)
 	return 4 + 2 + 1 + 1 + int(quicvarint.Len(uint64(lAddr))) + lAddr
 }
 
@@ -196,10 +197,221 @@ func (m *UDPMessage) Serialize(buf []byte) int {
 	binary.BigEndian.PutUint16(buf[4:], m.PacketID)
 	buf[6] = m.FragID
 	buf[7] = m.FragCount
-	i := varintPut(buf[8:], uint64(len(m.Addr)))
-	i += copy(buf[8+i:], m.Addr)
+	lAddr := addrPortStrLen(m.AddrPort)
+	i := varintPut(buf[8:], uint64(lAddr))
+	i += putAddrPort(buf[8+i:], m.AddrPort)
 	i += copy(buf[8+i:], m.Data)
 	return 8 + i
+}
+
+// addrPortStrLen returns the wire-format string length of an AddrPort.
+// IPv4: "1.2.3.4:443", IPv6: "[::1]:443".
+func addrPortStrLen(ap netip.AddrPort) int {
+	addr := ap.Addr()
+	if addr.Is4() {
+		ip4 := addr.As4()
+		return byteWidth(ip4[0]) + 1 + byteWidth(ip4[1]) + 1 +
+			byteWidth(ip4[2]) + 1 + byteWidth(ip4[3]) + 1 +
+			lenUint16(ap.Port())
+	}
+	// IPv6: [...] + colon + port
+	return 1 + len(addr.String()) + 1 + 1 + lenUint16(ap.Port())
+}
+
+// putAddrPort writes the wire-format string representation of ap into buf.
+// Returns bytes written. buf must have at least addrPortStrLen(ap) bytes.
+func putAddrPort(buf []byte, ap netip.AddrPort) int {
+	addr := ap.Addr()
+	if addr.Is4() {
+		ip4 := addr.As4()
+		n := putByte(buf, ip4[0])
+		buf[n] = '.'
+		n++
+		n += putByte(buf[n:], ip4[1])
+		buf[n] = '.'
+		n++
+		n += putByte(buf[n:], ip4[2])
+		buf[n] = '.'
+		n++
+		n += putByte(buf[n:], ip4[3])
+		buf[n] = ':'
+		n++
+		n += putUint16(buf[n:], ap.Port())
+		return n
+	}
+	// IPv6
+	return copy(buf, ap.String())
+}
+
+// byteWidth returns the number of decimal digits in v.
+func byteWidth(v byte) int {
+	if v < 10 {
+		return 1
+	}
+	if v < 100 {
+		return 2
+	}
+	return 3
+}
+
+// putByte writes the decimal representation of v into buf.
+// Returns bytes written.
+func putByte(buf []byte, v byte) int {
+	if v >= 100 {
+		buf[0] = byte(v/100) + '0'
+		buf[1] = byte(v/10%10) + '0'
+		buf[2] = byte(v%10) + '0'
+		return 3
+	}
+	if v >= 10 {
+		buf[0] = byte(v/10) + '0'
+		buf[1] = byte(v%10) + '0'
+		return 2
+	}
+	buf[0] = byte(v) + '0'
+	return 1
+}
+
+// lenUint16 returns the number of decimal digits needed to represent n.
+func lenUint16(n uint16) int {
+	switch {
+	case n < 10:
+		return 1
+	case n < 100:
+		return 2
+	case n < 1000:
+		return 3
+	case n < 10000:
+		return 4
+	default:
+		return 5
+	}
+}
+
+// putUint16 writes the decimal representation of v into buf.
+// Returns bytes written.
+func putUint16(buf []byte, v uint16) int {
+	if v >= 10000 {
+		buf[0] = byte(v/10000) + '0'
+		v %= 10000
+		buf[1] = byte(v/1000) + '0'
+		v %= 1000
+		buf[2] = byte(v/100) + '0'
+		v %= 100
+		buf[3] = byte(v/10) + '0'
+		buf[4] = byte(v%10) + '0'
+		return 5
+	}
+	if v >= 1000 {
+		buf[0] = byte(v/1000) + '0'
+		v %= 1000
+		buf[1] = byte(v/100) + '0'
+		v %= 100
+		buf[2] = byte(v/10) + '0'
+		buf[3] = byte(v%10) + '0'
+		return 4
+	}
+	if v >= 100 {
+		buf[0] = byte(v/100) + '0'
+		v %= 100
+		buf[1] = byte(v/10) + '0'
+		buf[2] = byte(v%10) + '0'
+		return 3
+	}
+	if v >= 10 {
+		buf[0] = byte(v/10) + '0'
+		buf[1] = byte(v%10) + '0'
+		return 2
+	}
+	buf[0] = byte(v) + '0'
+	return 1
+}
+
+// parseAddrPortBytes parses a wire-format address (IP:port or [IP]:port)
+// directly from bytes into netip.AddrPort without intermediate string allocation.
+func parseAddrPortBytes(b []byte) (netip.AddrPort, error) {
+	if len(b) == 0 {
+		return netip.AddrPort{}, fmt.Errorf("empty address")
+	}
+	if b[0] == '[' {
+		// IPv6: [addr]:port
+		closeBracket := -1
+		for i := 1; i < len(b); i++ {
+			if b[i] == ']' {
+				closeBracket = i
+				break
+			}
+		}
+		if closeBracket < 0 || closeBracket+1 >= len(b) || b[closeBracket+1] != ':' {
+			return netip.AddrPort{}, fmt.Errorf("malformed ipv6 address: %s", string(b))
+		}
+		addr, err := netip.ParseAddr(string(b[1:closeBracket]))
+		if err != nil {
+			return netip.AddrPort{}, err
+		}
+		port, err := parseUint16(b[closeBracket+2:])
+		if err != nil {
+			return netip.AddrPort{}, err
+		}
+		return netip.AddrPortFrom(addr, port), nil
+	}
+	// IPv4: a.b.c.d:port — find last colon
+	lastColon := -1
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] == ':' {
+			lastColon = i
+			break
+		}
+	}
+	if lastColon < 0 {
+		return netip.AddrPort{}, fmt.Errorf("malformed ipv4 address: %s", string(b))
+	}
+	ipBytes := b[:lastColon]
+	port, err := parseUint16(b[lastColon+1:])
+	if err != nil {
+		return netip.AddrPort{}, err
+	}
+	// Parse dotted-decimal IPv4
+	var ip [4]byte
+	start := 0
+	for i := range 4 {
+		end := start
+		for end < len(ipBytes) && ipBytes[end] != '.' {
+			end++
+		}
+		if end == start {
+			return netip.AddrPort{}, fmt.Errorf("malformed ipv4 address: %s", string(b))
+		}
+		val, err := parseUint8(ipBytes[start:end])
+		if err != nil {
+			return netip.AddrPort{}, fmt.Errorf("invalid ipv4 octet: %s", string(ipBytes[start:end]))
+		}
+		ip[i] = val
+		start = end + 1
+	}
+	return netip.AddrPortFrom(netip.AddrFrom4(ip), port), nil
+}
+
+func parseUint16(b []byte) (uint16, error) {
+	var n uint16
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("invalid port: %s", string(b))
+		}
+		n = n*10 + uint16(c-'0')
+	}
+	return n, nil
+}
+
+func parseUint8(b []byte) (byte, error) {
+	var n byte
+	for _, c := range b {
+		if c < '0' || c > '9' {
+			return 0, fmt.Errorf("invalid number: %s", string(b))
+		}
+		n = n*10 + byte(c-'0')
+	}
+	return n, nil
 }
 
 func ParseUDPMessage(msg []byte, m *UDPMessage) error {
@@ -221,8 +433,13 @@ func ParseUDPMessage(msg []byte, m *UDPMessage) error {
 	if len(msg) <= addrEnd {
 		return oops.Tags("protocol error").New("invalid message length")
 	}
-	m.Addr = string(msg[addrStart:addrEnd])
+	ap, err := parseAddrPortBytes(msg[addrStart:addrEnd])
+	if err != nil {
+		return oops.Tags("protocol error").Wrap(err)
+	}
+	m.AddrPort = ap
 	m.Data = msg[addrEnd:]
+	m.DataBuf = nil // caller must set
 	return nil
 }
 

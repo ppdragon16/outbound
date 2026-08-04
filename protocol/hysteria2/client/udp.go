@@ -60,6 +60,7 @@ func (u *udpConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 }
 
 func (u *udpConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err error) {
+	var msg protocol.UDPMessage
 	for {
 		select {
 		case <-u.ctx.Done():
@@ -70,31 +71,24 @@ func (u *udpConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err erro
 			if !ok {
 				return 0, netip.AddrPort{}, io.EOF
 			}
-			msg := &protocol.UDPMessage{}
-			if err := protocol.ParseUDPMessage(datagram, msg); err != nil {
-				// Invalid message, release buffer and wait for the next
+			msg.DataBuf = datagram
+			if err := protocol.ParseUDPMessage(datagram, &msg); err != nil {
 				u.conn.ReleaseDatagram(datagram)
 				continue
 			}
-			// Wire the Release callback so Defragger can return pooled
-			// buffers when fragments are completed or discarded.
-			// ReleaseDatagram must be called on the original full-cap
-			// buffer; msg.Data is only a sub-slice.
-			msg.Release = func() { u.conn.ReleaseDatagram(datagram) }
-			n, ok := u.D.Feed(msg, p)
+			if msg.FragCount <= 1 {
+				// Single fragment: copy and release immediately.
+				n = copy(p, msg.Data)
+				u.conn.ReleaseDatagram(datagram)
+				return n, msg.AddrPort, nil
+			}
+			// Fragmented: Defragger takes ownership of DataBuf;
+			// it will release via ReleaseFn when assembly completes.
+			n, ok = u.D.Feed(&msg, p)
 			if !ok {
-				// Defragger is holding msg.Data for reassembly;
-				// Release will be called when all fragments arrive
-				// or when the packet is discarded.
 				continue
 			}
-			// Feed returned true: all fragments assembled and their
-			// buffers already released via msg.Release.
-			ap, err := netip.ParseAddrPort(msg.Addr)
-			if err != nil {
-				return 0, netip.AddrPort{}, err
-			}
-			return n, ap, nil
+			return n, msg.AddrPort, nil
 		}
 	}
 }
@@ -119,7 +113,7 @@ func (u *udpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (n int, err error
 		PacketID:  0,
 		FragID:    0,
 		FragCount: 1,
-		Addr:      ap.String(),
+		AddrPort:  ap,
 		Data:      b,
 	}
 	buf := pool.GetBuffer(protocol.MaxUDPSize)
@@ -248,7 +242,7 @@ func (m *udpSessionManager) NewUDP() (net.PacketConn, error) {
 	ctx, cancel := context.WithCancel(m.ctx)
 	conn := &udpConn{
 		ID:           id,
-		D:            &frag.Defragger{},
+		D:            &frag.Defragger{ReleaseFn: m.conn.ReleaseDatagram},
 		ReceiveCh:    make(chan []byte, udpMessageChanSize),
 		conn:         m.conn,
 		sm:           m,
