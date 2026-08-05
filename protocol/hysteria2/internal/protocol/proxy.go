@@ -216,7 +216,7 @@ func addrPortStrLen(ap netip.AddrPort) int {
 			lenUint16(ap.Port())
 	}
 	// IPv6: [...] + colon + port
-	return 1 + len(addr.String()) + 1 + 1 + lenUint16(ap.Port())
+	return 1 + ipv6CanonicalLen(addr.As16()) + 1 + 1 + lenUint16(ap.Port())
 }
 
 // putAddrPort writes the wire-format string representation of ap into buf.
@@ -241,7 +241,87 @@ func putAddrPort(buf []byte, ap netip.AddrPort) int {
 		return n
 	}
 	// IPv6
-	return copy(buf, ap.String())
+	buf[0] = '['
+	end := addr.AppendTo(buf[1:1])
+	n := 1 + len(end)
+	buf[n] = ']'
+	n++
+	buf[n] = ':'
+	n++
+	n += putUint16(buf[n:], ap.Port())
+	return n
+}
+
+// ipv6CanonicalLen returns the length of the canonical RFC 5952 string
+// representation of an IPv6 address without brackets.
+func ipv6CanonicalLen(ip [16]byte) int {
+	hextets := [8]int{
+		int(ip[0])<<8 | int(ip[1]),
+		int(ip[2])<<8 | int(ip[3]),
+		int(ip[4])<<8 | int(ip[5]),
+		int(ip[6])<<8 | int(ip[7]),
+		int(ip[8])<<8 | int(ip[9]),
+		int(ip[10])<<8 | int(ip[11]),
+		int(ip[12])<<8 | int(ip[13]),
+		int(ip[14])<<8 | int(ip[15]),
+	}
+
+	// Find longest zero run (RFC 5952: leftmost when tied).
+	bestStart, bestLen := 0, 0
+	for i := 0; i < 8; {
+		if hextets[i] != 0 {
+			i++
+			continue
+		}
+		j := i
+		for j < 8 && hextets[j] == 0 {
+			j++
+		}
+		if run := j - i; run > bestLen {
+			bestStart, bestLen = i, run
+		}
+		i = j
+	}
+
+	total := 0
+
+	// Groups before the compressed run.
+	for i := 0; i < bestStart; i++ {
+		if i > 0 {
+			total++ // ':'
+		}
+		total += hexDigitCount(hextets[i])
+	}
+
+	// "::" — provides its own separator from the left part.
+	if bestLen > 0 {
+		total += 2
+	}
+
+	// Groups after the compressed run.
+	for i := bestStart + bestLen; i < 8; i++ {
+		if i > bestStart+bestLen {
+			total++ // ':'
+		}
+		total += hexDigitCount(hextets[i])
+	}
+
+	return total
+}
+
+// hexDigitCount returns the number of lowercase hex digits needed for v,
+// with no leading zeros (except 0 itself, which needs 1 digit).
+func hexDigitCount(v int) int {
+	switch {
+	case v < 0x10:
+		return 1
+	case v < 0x100:
+		return 2
+	case v < 0x1000:
+		return 3
+	default:
+		return 4
+	}
 }
 
 // byteWidth returns the number of decimal digits in v.

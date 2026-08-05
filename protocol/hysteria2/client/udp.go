@@ -126,22 +126,20 @@ func (u *udpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (n int, err error
 		for _, fMsg := range fMsgs {
 			err := u.WritePacket(buf, &fMsg)
 			if err != nil {
-				return 0, err
+				return 0, oops.Wrapf(err, "failed to send fragment")
 			}
 		}
 		return len(b), nil
 	}
-	return len(b), err
+	return len(b), oops.Wrapf(err, "failed to SendDatagram")
 }
 
 func (u *udpConn) WritePacket(buf []byte, msg *protocol.UDPMessage) error {
 	msgN := msg.Serialize(buf)
 	if msgN < 0 {
-		// Message larger than buffer, silent drop
-		return nil
+		return &quic.DatagramTooLargeError{MaxDataLen: int64(len(buf))}
 	}
-	err := u.conn.SendDatagram(buf[:msgN])
-	return oops.Wrapf(err, "failed to SendDatagram")
+	return u.conn.SendDatagram(buf[:msgN])
 }
 
 func (u *udpConn) Close() error {
