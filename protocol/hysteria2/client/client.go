@@ -13,6 +13,7 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/utils"
+	"github.com/daeuniverse/outbound/protocol/hysteria2/obfs"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/udphop"
 	"github.com/daeuniverse/outbound/protocol/tuic/congestion"
 
@@ -226,6 +227,12 @@ func (c *Client) connectSinglePort(ctx context.Context) (pktConn net.PacketConn,
 	if err != nil {
 		return nil, nil, err
 	}
+	if c.config.ObfsPassword != "" {
+		pktConn, err = obfs.WrapPacketConnSalamander(pktConn, []byte(c.config.ObfsPassword))
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	// Capture pktConn in a local so the deferred cleanup is immune to
 	// named-return-value reassignment (e.g. "return nil, nil, herr"
 	// sets pktConn=nil before the defer runs).
@@ -292,6 +299,16 @@ func (c *Client) connectPortHopping(ctx context.Context) (pktConn net.PacketConn
 			attemptCancel()
 			lastErr = err
 			continue
+		}
+		if c.config.ObfsPassword != "" {
+			opc, oerr := obfs.WrapPacketConnSalamander(pktConn, []byte(c.config.ObfsPassword))
+			if oerr != nil {
+				attemptCancel()
+				pktConn.Close()
+				lastErr = oerr
+				continue
+			}
+			pktConn = opc
 		}
 
 		conn, resp, herr := c.tryHandshake(attemptCtx, pktConn, c.config.Addr)

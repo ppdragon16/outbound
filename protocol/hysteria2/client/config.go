@@ -31,6 +31,7 @@ type Config struct {
 	BandwidthConfig BandwidthConfig
 	UDPHopInterval  time.Duration
 	FastOpen        bool
+	ObfsPassword    string
 
 	filled bool // whether the fields have been verified and filled
 }

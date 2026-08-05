@@ -28,11 +28,12 @@ type Hysteria2 struct {
 	User      string
 	Password  string
 	Server    string
-	Insecure  bool
-	Sni       string
-	PinSHA256 string
-	MaxTx     uint64
-	MaxRx     uint64
+	Insecure     bool
+	Sni          string
+	PinSHA256    string
+	MaxTx        uint64
+	MaxRx        uint64
+	ObfsPassword string
 }
 
 func NewHysteria2(link string) (dialer.Dialer, *dialer.Property, error) {
@@ -62,6 +63,7 @@ func (s *Hysteria2) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dia
 
 	feature1 := &hysteria2.Feature1{
 		UDPHopInterval: option.UDPHopInterval,
+		ObfsPassword:   s.ObfsPassword,
 	}
 	if s.MaxTx > 0 && s.MaxRx > 0 {
 		feature1.BandwidthConfig = client.BandwidthConfig{
@@ -114,7 +116,6 @@ func normalizeCertHash(hash string) string {
 
 // ref: https://v2.hysteria.network/zh/docs/developers/URI-Scheme/
 func ParseHysteria2URL(link string) (*Hysteria2, error) {
-	// TODO: support salamander obfuscation
 	u, err := url.Parse(link)
 	if err != nil {
 		return nil, err
@@ -138,15 +139,28 @@ func ParseHysteria2URL(link string) (*Hysteria2, error) {
 			return nil, dialer.InvalidParameterErr
 		}
 	}
+	var obfsPassword string
+	if obfsType := q.Get("obfs"); obfsType != "" {
+		switch strings.ToLower(obfsType) {
+		case "salamander":
+			obfsPassword = q.Get("obfs-password")
+			if obfsPassword == "" {
+				return nil, fmt.Errorf("%w: obfs=salamander requires obfs-password", dialer.InvalidParameterErr)
+			}
+		default:
+			return nil, fmt.Errorf("%w: unknown obfs type %q", dialer.InvalidParameterErr, obfsType)
+		}
+	}
 	conf := &Hysteria2{
-		Name:      u.Fragment,
-		User:      u.User.Username(),
-		Server:    u.Host,
-		Insecure:  insecure,
-		Sni:       q.Get("sni"),
-		PinSHA256: q.Get("pinSHA256"),
-		MaxTx:     maxTx,
-		MaxRx:     maxRx,
+		Name:         u.Fragment,
+		User:         u.User.Username(),
+		Server:       u.Host,
+		Insecure:     insecure,
+		Sni:          q.Get("sni"),
+		PinSHA256:    q.Get("pinSHA256"),
+		MaxTx:        maxTx,
+		MaxRx:        maxRx,
+		ObfsPassword: obfsPassword,
 	}
 	conf.Password, _ = u.User.Password()
 	return conf, nil
@@ -175,6 +189,10 @@ func (s *Hysteria2) ExportToURL() string {
 	if s.MaxTx > 0 && s.MaxRx > 0 {
 		q.Set("maxTx", strconv.FormatUint(s.MaxTx, 10))
 		q.Set("maxRx", strconv.FormatUint(s.MaxRx, 10))
+	}
+	if s.ObfsPassword != "" {
+		q.Set("obfs", "salamander")
+		q.Set("obfs-password", s.ObfsPassword)
 	}
 	t.RawQuery = q.Encode()
 	return t.String()
