@@ -411,7 +411,7 @@ func (t *clientImpl) ListenPacketWithDialer(ctx context.Context, metadata *proto
 		maxUdpRelayPacketSize: t.MaxUdpRelayPacketSize,
 		deferQuicConnFn:       t.deferQuicConn,
 		closeDeferFn:          nil,
-			deFraggers:            make(map[uint16]*deFragger),
+		// deFraggers is lazily initialized on first fragmented packet.
 	}
 	return pc, nil
 }

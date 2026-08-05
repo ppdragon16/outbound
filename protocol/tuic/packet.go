@@ -227,12 +227,16 @@ func (q *quicStreamPacketConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrP
 			if v, ok := q.deFraggers[packet.PKT_ID]; ok {
 				d = v
 			} else {
-				d = &deFragger{}
+				if q.deFraggers == nil {
+					q.deFraggers = make(map[uint16]*deFragger, 2)
+				}
+				d = getDeFragger()
 				q.deFraggers[packet.PKT_ID] = d
 			}
 			var assembled bool
 			if n, ap, assembled = d.Feed(packet, p); assembled {
 				delete(q.deFraggers, packet.PKT_ID)
+				putDeFragger(d)
 				return
 			}
 			// FIXME: Timeout to clean deFraggers.

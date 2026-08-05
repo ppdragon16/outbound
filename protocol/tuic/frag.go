@@ -3,6 +3,7 @@ package tuic
 import (
 	"encoding/binary"
 	"net/netip"
+	"sync"
 
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/quic-go"
@@ -115,11 +116,23 @@ func fragWriteNative(quicConn quic.Connection, connId, pktId uint16, addr netip.
 	return nil
 }
 
+// deFraggerInlineSize is the number of fragment slots stored inline.
+// Most fragmented TUIC packets have 2-4 fragments; this avoids a heap allocation
+// for the common case while falling back to a heap slice for larger FRAG_TOTAL.
+const deFraggerInlineSize = 8
+
+var deFraggerPool = sync.Pool{
+	New: func() any { return &deFragger{} },
+}
+
 // deFragger reassembles fragmented tuic UDP packets by PKT_ID.
 type deFragger struct {
 	pkgID uint16
 	frags []*Packet
 	count uint8
+	// inline stores fragment pointers for FRAG_TOTAL <= deFraggerInlineSize.
+	// When frags is backed by inline, no heap allocation occurs for the slice.
+	inline [deFraggerInlineSize]*Packet
 }
 
 // Feed feeds a fragment and returns the assembled result when complete.
@@ -137,7 +150,11 @@ func (d *deFragger) Feed(m *Packet, p []byte) (n int, addrPort netip.AddrPort, a
 	}
 	if d.count == 0 {
 		d.pkgID = m.PKT_ID
-		d.frags = make([]*Packet, m.FRAG_TOTAL)
+		if int(m.FRAG_TOTAL) <= deFraggerInlineSize {
+			d.frags = d.inline[:m.FRAG_TOTAL]
+		} else {
+			d.frags = make([]*Packet, m.FRAG_TOTAL)
+		}
 		d.count = 1
 		d.frags[m.FRAG_ID] = m
 	} else if d.frags[m.FRAG_ID] == nil {
@@ -163,4 +180,19 @@ func (d *deFragger) Feed(m *Packet, p []byte) (n int, addrPort netip.AddrPort, a
 		}
 	}
 	return
+}
+
+// getDeFragger returns a deFragger from the pool, ready for use.
+func getDeFragger() *deFragger {
+	return deFraggerPool.Get().(*deFragger)
+}
+
+// putDeFragger returns d to the pool after clearing inline references.
+// This ensures the pool does not retain pointers to released Packet objects.
+func putDeFragger(d *deFragger) {
+	for i := range d.inline {
+		d.inline[i] = nil
+	}
+	d.frags = nil
+	deFraggerPool.Put(d)
 }
