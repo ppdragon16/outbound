@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"unsafe"
 
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/quic-go/quicvarint"
@@ -345,7 +346,7 @@ func parseAddrPortBytes(b []byte) (netip.AddrPort, error) {
 		if closeBracket < 0 || closeBracket+1 >= len(b) || b[closeBracket+1] != ':' {
 			return netip.AddrPort{}, fmt.Errorf("malformed ipv6 address: %s", string(b))
 		}
-		addr, err := netip.ParseAddr(string(b[1:closeBracket]))
+		addr, err := netip.ParseAddr(unsafe.String(&b[1], closeBracket-1))
 		if err != nil {
 			return netip.AddrPort{}, err
 		}
