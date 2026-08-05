@@ -28,12 +28,14 @@ type Conn struct {
 	remoteAddr net.Addr
 }
 
-func (c *Conn) reqHeaderFromPool(payload []byte) (buf []byte) {
+// reqHeader builds the request header into a small pooled buffer. The payload
+// is written separately via net.Buffers so a large payload cannot inflate this
+// buffer past the pool's largest bucket (same cliff as vless/anytls).
+func (c *Conn) reqHeader() (buf []byte) {
 	addrLen := c.Metadata.Len()
-	buf = pool.GetBuffer(1 + addrLen + len(payload))
+	buf = pool.GetBuffer(1 + addrLen)
 	buf[0] = NetworkToByte(c.Metadata.Network)
 	c.Metadata.PackTo(buf[1:])
-	copy(buf[1+addrLen:], payload)
 	return buf
 }
 
@@ -59,9 +61,13 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	defer c.writeMutex.Unlock()
 	if !c.onceWrite {
 		if c.Metadata.IsClient {
-			buf := c.reqHeaderFromPool(b)
-			defer pool.PutBuffer(buf)
-			if _, err = c.Stream.Write(buf); err != nil {
+			header := c.reqHeader()
+			defer pool.PutBuffer(header)
+			buffers := net.Buffers{header}
+			if len(b) > 0 {
+				buffers = append(buffers, b)
+			}
+			if _, err = buffers.WriteTo(c.Stream); err != nil {
 				return 0, fmt.Errorf("write header: %w", err)
 			}
 			c.onceWrite = true

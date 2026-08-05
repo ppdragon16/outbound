@@ -93,12 +93,15 @@ func (c *Conn) IntrinsicConn() net.Conn {
 	return c.Conn
 }
 
-func (c *Conn) reqHeaderFromPool(payload []byte) (buf []byte) {
+// reqHeader builds the request header into a small pooled buffer. The payload
+// is written separately via net.Buffers so a large payload cannot inflate this
+// buffer past the pool's largest bucket (the same cliff anytls hit).
+func (c *Conn) reqHeader() (buf []byte) {
 	addrLen := c.metadata.AddrLen()
 	if !c.metadata.Mux {
-		buf = pool.GetBuffer(1 + 16 + len(c.addonsBytes) + 1 + 1 + 2 + 1 + addrLen + len(payload))
+		buf = pool.GetBuffer(1 + 16 + len(c.addonsBytes) + 1 + 1 + 2 + 1 + addrLen)
 	} else {
-		buf = pool.GetBuffer(1 + 16 + len(c.addonsBytes) + 1 + 1 + len(payload))
+		buf = pool.GetBuffer(1 + 16 + len(c.addonsBytes) + 1 + 1)
 	}
 	start := 0
 	buf[start] = 0 // version
@@ -117,12 +120,9 @@ func (c *Conn) reqHeaderFromPool(payload []byte) (buf []byte) {
 		buf[start] = vmess.MetadataTypeToByte(c.metadata.Type) // addr type
 		start += 1
 		c.metadata.PutAddr(buf[start:])
-		start += addrLen
 	} else {
 		buf[start] = vmess.NetworkToByte("mux") // inst
-		start += 1
 	}
-	copy(buf[start:], payload)
 	return buf
 }
 
@@ -145,9 +145,13 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 func (c *Conn) write(b []byte) (n int, err error) {
 	if !c.onceWrite {
 		if c.metadata.IsClient {
-			buf := c.reqHeaderFromPool(b)
-			defer pool.PutBuffer(buf)
-			if _, err = c.Conn.Write(buf); err != nil {
+			header := c.reqHeader()
+			defer pool.PutBuffer(header)
+			buffers := net.Buffers{header}
+			if len(b) > 0 {
+				buffers = append(buffers, b)
+			}
+			if _, err = buffers.WriteTo(c.Conn); err != nil {
 				return 0, fmt.Errorf("write header: %w", err)
 			}
 			c.onceWrite = true
