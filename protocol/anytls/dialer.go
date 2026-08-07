@@ -3,6 +3,7 @@ package anytls
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -14,8 +15,6 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
-
-	"github.com/refraction-networking/utls"
 )
 
 func init() {
@@ -37,6 +36,10 @@ type Dialer struct {
 	idleSessionTimeout       time.Duration
 	minIdleSession           int
 	heartbeatInterval        time.Duration
+
+	// replenishing guards the background replenishment goroutine so only
+	// one runs at a time.
+	replenishing atomic.Bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -173,10 +176,20 @@ func (d *Dialer) getSession(ctx context.Context) (*session, error) {
 			s.Close()
 			continue
 		}
+		// Pool just shrunk by one — check if we need to replenish.
+		d.maybeReplenish()
 		return s, nil
 	}
 
-	// No healthy idle session — create a new one.
+	// No healthy idle session — trigger async replenishment and create
+	// one synchronously.
+	d.maybeReplenish()
+	return d.createSession(ctx)
+}
+
+// createSession dials a new TCP+TLS connection to the proxy, performs the
+// anytls key exchange, and starts the session's background goroutines.
+func (d *Dialer) createSession(ctx context.Context) (*session, error) {
 	conn, err := d.ParentDialer.DialContext(ctx, "tcp", d.proxyAddress)
 	if err != nil {
 		return nil, err
@@ -203,6 +216,67 @@ func (d *Dialer) getSession(ctx context.Context) (*session, error) {
 	s.startHeartbeat()
 
 	return s, nil
+}
+
+// maybeReplenish triggers async session creation when the idle pool drops
+// below half of minIdleSession. Only one replenisher runs at a time;
+// subsequent calls while a replenisher is already running are no-ops.
+func (d *Dialer) maybeReplenish() {
+	if d.minIdleSession <= 0 {
+		return
+	}
+	d.mu.Lock()
+	idleCount := len(d.idleSessions)
+	d.mu.Unlock()
+
+	if idleCount >= d.minIdleSession/2 {
+		return
+	}
+	if d.replenishing.CompareAndSwap(false, true) {
+		go d.replenish()
+	}
+}
+
+// replenish creates sessions in the background until the idle pool reaches
+// minIdleSession, or until a connection fails. It stops early if the dialer
+// has been disconnected.
+func (d *Dialer) replenish() {
+	defer d.replenishing.Store(false)
+
+	for {
+		if d.ctx.Err() != nil {
+			return
+		}
+
+		d.mu.Lock()
+		idleCount := len(d.idleSessions)
+		d.mu.Unlock()
+
+		if idleCount >= d.minIdleSession {
+			return
+		}
+
+		// Use a generous timeout so the dial doesn't hang indefinitely;
+		// the parent dialer may also impose its own deadline.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		s, err := d.createSession(ctx)
+		cancel()
+		if err != nil {
+			return
+		}
+
+		d.mu.Lock()
+		// If the dialer was disconnected between createSession and now,
+		// close the session instead of leaking it into a dead pool.
+		if d.ctx.Err() != nil {
+			d.mu.Unlock()
+			s.Close()
+			return
+		}
+		s.idleSince = time.Now()
+		d.idleSessions[s.seq] = s
+		d.mu.Unlock()
+	}
 }
 
 // manageSession returns the session to the idle pool each time a stream
