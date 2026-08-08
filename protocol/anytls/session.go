@@ -37,6 +37,11 @@ type session struct {
 
 	heartbeatInterval time.Duration
 	idleSince         time.Time
+
+	// dialLatency is the TCP+TLS handshake duration measured when this
+	// session was created. Used to prefer faster sessions during pool
+	// selection and to evict slower sessions during cleanup.
+	dialLatency time.Duration
 }
 
 func newSession(conn net.Conn, seq uint64) *session {

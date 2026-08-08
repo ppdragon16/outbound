@@ -140,22 +140,34 @@ func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 	return s.newPacketStream(net.JoinHostPort("sp.v2.udp-over-tcp.arpa", port), addr)
 }
 
-// pickIdleSession returns an idle session from the pool, or nil if none are
-// available. The caller owns the returned session and must either use it or
-// call Close() on it.
+// pickIdleSession returns the idle session with the lowest dial latency from
+// the pool, or nil if none are available. The caller owns the returned session
+// and must either use it or call Close() on it.
 func (d *Dialer) pickIdleSession() *session {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	for seq := range d.idleSessions {
-		s := d.idleSessions[seq]
+
+	// First pass: sweep dead entries.
+	for seq, s := range d.idleSessions {
 		if s.closed.Load() {
 			delete(d.idleSessions, seq)
-			continue
 		}
-		delete(d.idleSessions, seq)
-		return s
 	}
-	return nil
+	if len(d.idleSessions) == 0 {
+		return nil
+	}
+
+	// Second pass: pick the session with the lowest dial latency.
+	var best *session
+	var bestSeq uint64
+	for seq, s := range d.idleSessions {
+		if best == nil || s.dialLatency < best.dialLatency {
+			best = s
+			bestSeq = seq
+		}
+	}
+	delete(d.idleSessions, bestSeq)
+	return best
 }
 
 func (d *Dialer) getSession(ctx context.Context) (*session, error) {
@@ -190,6 +202,7 @@ func (d *Dialer) getSession(ctx context.Context) (*session, error) {
 // createSession dials a new TCP+TLS connection to the proxy, performs the
 // anytls key exchange, and starts the session's background goroutines.
 func (d *Dialer) createSession(ctx context.Context) (*session, error) {
+	start := time.Now()
 	conn, err := d.ParentDialer.DialContext(ctx, "tcp", d.proxyAddress)
 	if err != nil {
 		return nil, err
@@ -210,6 +223,7 @@ func (d *Dialer) createSession(ctx context.Context) (*session, error) {
 	s := newSession(tlsConn, seq)
 	s.heartbeatInterval = d.heartbeatInterval
 	s.idleSince = time.Now()
+	s.dialLatency = time.Since(start)
 
 	go d.manageSession(s, seq)
 	go s.run()
@@ -339,7 +353,7 @@ func (d *Dialer) cleanupIdleSessions() {
 	}
 
 	if d.minIdleSession <= 0 || nonExpired >= d.minIdleSession {
-		// Enough non-expired — close all expired, no sorting needed.
+		// Enough non-expired — close all expired.
 		for _, s := range expired {
 			delete(d.idleSessions, s.seq)
 		}
@@ -348,14 +362,21 @@ func (d *Dialer) cleanupIdleSessions() {
 			s.Close()
 		}
 	} else {
-		// Need to keep some expired; sort newest-first, protect the freshest.
+		// Need to keep some expired; protect the lowest-latency ones
+		// so the pool skews toward faster connections over time.
 		slices.SortFunc(expired, func(a, b *session) int {
-			return b.idleSince.Compare(a.idleSince)
+			if a.dialLatency < b.dialLatency {
+				return -1
+			}
+			if a.dialLatency > b.dialLatency {
+				return 1
+			}
+			return 0
 		})
 		n := min(d.minIdleSession-nonExpired, len(expired))
 		for i, s := range expired {
 			if i < n {
-				s.idleSince = time.Now() // protect
+				s.idleSince = time.Now() // protect the fastest
 			} else {
 				delete(d.idleSessions, s.seq)
 			}
