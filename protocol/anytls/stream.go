@@ -323,7 +323,7 @@ func (ps *packetStream) ReadFromAddrPort(p []byte) (int, netip.AddrPort, error) 
 	ps.readMu.Lock()
 	defer ps.readMu.Unlock()
 
-	// Wait for and consume the 2-byte length prefix.
+	// Wait for the 2-byte length prefix.
 	for {
 		if ps.readRing.available() >= 2 {
 			break
@@ -340,9 +340,25 @@ func (ps *packetStream) ReadFromAddrPort(p []byte) (int, netip.AddrPort, error) 
 		return 0, netip.AddrPort{}, io.EOF
 	}
 
+	// Snapshot ring state so we can roll back the length-prefix read
+	// if the caller's buffer is too small (ErrShortBuffer).
+	savedHead := ps.readRing.head
+	savedCnt := ps.readRing.cnt
+	savedOff := ps.readRing.off
+
 	var lenBuf [2]byte
 	ps.readRing.read(lenBuf[:])
 	length := binary.BigEndian.Uint16(lenBuf[:])
+
+	// Check buffer size before consuming the payload. If the buffer is
+	// too small, restore the length prefix into the ring so the caller
+	// can retry with a larger buffer without corrupting the frame stream.
+	if len(p) < int(length) {
+		ps.readRing.head = savedHead
+		ps.readRing.cnt = savedCnt
+		ps.readRing.off = savedOff
+		return 0, netip.AddrPort{}, io.ErrShortBuffer
+	}
 
 	// Wait for the full payload.
 	for {
@@ -361,11 +377,8 @@ func (ps *packetStream) ReadFromAddrPort(p []byte) (int, netip.AddrPort, error) 
 		return 0, netip.AddrPort{}, io.ErrUnexpectedEOF
 	}
 
-	if len(p) < int(length) {
-		return 0, netip.AddrPort{}, io.ErrShortBuffer
-	}
-
 	n := ps.readRing.read(p[:length])
+	ps.readCond.Signal() // wake a blocked pushData (ring may have been full)
 	return n, ps.addr, nil
 }
 
