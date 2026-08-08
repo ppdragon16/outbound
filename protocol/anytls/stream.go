@@ -14,7 +14,7 @@ import (
 	"github.com/daeuniverse/outbound/protocol/infra/socks"
 )
 
-const chunkRingSize = 8
+const chunkRingSize = 16
 
 // chunkRing is a fixed-size ring buffer of pool-backed []byte chunks.
 //
