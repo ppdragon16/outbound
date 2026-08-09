@@ -6,13 +6,13 @@ import (
 )
 
 type PacketConn struct {
-	net.PacketConn
+	*net.UDPConn
 }
 
 func (c *PacketConn) ReadFromAddrPort(b []byte) (n int, ap netip.AddrPort, err error) {
-	return c.PacketConn.(*net.UDPConn).ReadFromUDPAddrPort(b)
+	return c.ReadFromUDPAddrPort(b)
 }
 
 func (c *PacketConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
-	return c.PacketConn.(*net.UDPConn).WriteToUDPAddrPort(b, ap)
+	return c.WriteToUDPAddrPort(b, ap)
 }
