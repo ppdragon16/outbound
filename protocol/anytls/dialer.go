@@ -3,7 +3,6 @@ package anytls
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"net"
@@ -11,6 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
@@ -25,7 +26,7 @@ type Dialer struct {
 	protocol.StatelessDialer
 	proxyAddress string
 	key          []byte
-	tlsConfig    *tls.Config
+	tlsConfig    *utls.Config
 
 	sessionCounter atomic.Uint64
 
@@ -82,7 +83,7 @@ func NewDialer(ParentDialer netproxy.Dialer, header protocol.Header) (netproxy.D
 		},
 		proxyAddress: header.ProxyAddress,
 		key:          sum[:],
-		tlsConfig: &tls.Config{
+		tlsConfig: &utls.Config{
 			ServerName:         header.TlsConfig.ServerName,
 			InsecureSkipVerify: header.TlsConfig.InsecureSkipVerify,
 			// Only use X25519 for key exchange. The default includes
@@ -90,7 +91,7 @@ func NewDialer(ParentDialer netproxy.Dialer, header protocol.Header) (netproxy.D
 			// post-quantum key generation (~1184-byte key share and
 			// heavy lattice-based computation). For anytls, TLS is an
 			// obfuscation layer; security comes from the anytls key.
-			CurvePreferences: []tls.CurveID{tls.X25519},
+			CurvePreferences: []utls.CurveID{utls.X25519},
 		},
 		idleSessions:             make(map[uint64]*session),
 		idleSessionCheckInterval: checkInterval,
@@ -208,7 +209,7 @@ func (d *Dialer) createSession(ctx context.Context) (*session, error) {
 		return nil, err
 	}
 
-	tlsConn := tls.Client(conn, d.tlsConfig)
+	tlsConn := utls.Client(conn, d.tlsConfig)
 
 	buf := pool.GetBuffer(len(d.key) + 2)
 	defer pool.PutBuffer(buf)

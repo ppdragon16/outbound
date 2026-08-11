@@ -3,12 +3,13 @@ package vision
 
 import (
 	"bytes"
-	gotls "crypto/tls"
 	"errors"
 	"fmt"
 	"net"
 	"reflect"
 	"unsafe"
+
+	xtls "crypto/tls"
 
 	"github.com/daeuniverse/outbound/transport/tls"
 	utls "github.com/refraction-networking/utls"
@@ -43,7 +44,12 @@ func NewConn(conn net.Conn, userUUID []byte) (*Conn, error) {
 	var p unsafe.Pointer
 	if iconn, ok := conn.(interface{ IntrinsicConn() net.Conn }); ok {
 		ic := iconn.IntrinsicConn()
-		if tlsConn, ok := ic.(*gotls.Conn); ok {
+		if tlsConn, ok := ic.(*utls.Conn); ok {
+			c.Conn = tlsConn.NetConn()
+			c.tlsConn = tlsConn
+			t = reflect.TypeOf(tlsConn).Elem()
+			p = unsafe.Pointer(tlsConn)
+		} else if tlsConn, ok := ic.(*xtls.Conn); ok {
 			c.Conn = tlsConn.NetConn()
 			c.tlsConn = tlsConn
 			t = reflect.TypeOf(tlsConn).Elem()

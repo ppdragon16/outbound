@@ -3,7 +3,6 @@ package httpupgrade
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -11,13 +10,15 @@ import (
 	"net/url"
 	"strings"
 
+	utls "github.com/refraction-networking/utls"
+
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 )
 
 type Dialer struct {
 	protocol.StatelessDialer
-	tlsConfig  *tls.Config
+	tlsConfig  *utls.Config
 	addr       string
 	host       string
 	path       string
@@ -60,7 +61,7 @@ func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 		if t.serverName == "" {
 			t.serverName = u.Hostname()
 		}
-		t.tlsConfig = &tls.Config{
+		t.tlsConfig = &utls.Config{
 			ServerName:         t.serverName,
 			InsecureSkipVerify: t.skipVerify,
 			NextProtos:         []string{"http/1.1"},
@@ -79,7 +80,7 @@ func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c net.C
 		}
 
 		if t.tlsConfig != nil {
-			conn = tls.Client(conn, t.tlsConfig)
+			conn = utls.Client(conn, t.tlsConfig)
 		}
 
 		req, err := http.NewRequest("GET", t.path, nil)

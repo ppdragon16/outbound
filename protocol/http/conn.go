@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"container/list"
 	"context"
-	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -16,6 +15,10 @@ import (
 	"regexp"
 	"sync"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
+
+	xtls "crypto/tls"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"golang.org/x/net/http2"
@@ -419,7 +422,12 @@ func (p *h2ConnsPool) GetConn(nextDialer netproxy.Dialer, addr string, magicNetw
 		return nil, nil, fmt.Errorf("h2ConnsPool.GetClientConn: %w", err)
 	}
 	nextProto := ""
-	if tlsConn, ok := rawConn.(*tls.Conn); ok {
+	if tlsConn, ok := rawConn.(*utls.Conn); ok {
+		if err := tlsConn.Handshake(); err != nil {
+			return nil, nil, err
+		}
+		nextProto = tlsConn.ConnectionState().NegotiatedProtocol
+	} else if tlsConn, ok := rawConn.(*xtls.Conn); ok {
 		if err := tlsConn.Handshake(); err != nil {
 			return nil, nil, err
 		}

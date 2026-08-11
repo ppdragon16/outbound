@@ -1,10 +1,11 @@
 package hysteria2
 
 import (
-	"crypto/tls"
 	"net"
 	"strings"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
@@ -31,7 +32,7 @@ type Feature1 struct {
 func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
 	host, port := parseServerAddrString(header.ProxyAddress)
 	config := &client.Config{
-		TLSConfig: tls.Config{
+		TLSConfig: utls.Config{
 			ServerName:            header.TlsConfig.ServerName,
 			InsecureSkipVerify:    header.TlsConfig.InsecureSkipVerify,
 			VerifyPeerCertificate: header.TlsConfig.VerifyPeerCertificate,

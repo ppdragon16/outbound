@@ -2,9 +2,10 @@ package client
 
 import (
 	"context"
-	"crypto/tls"
 	"net"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/pmtud"
@@ -26,7 +27,7 @@ type Config struct {
 	Addr            net.Addr
 	NextDialer      netproxy.Dialer
 	Auth            string
-	TLSConfig       tls.Config
+	TLSConfig       utls.Config
 	QUICConfig      quic.Config
 	BandwidthConfig BandwidthConfig
 	UDPHopInterval  time.Duration

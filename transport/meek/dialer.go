@@ -2,11 +2,12 @@ package meek
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"net"
 	"net/url"
 	"strings"
+
+	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
@@ -14,7 +15,7 @@ import (
 
 type Dialer struct {
 	protocol.StatelessDialer
-	tlsConfig  *tls.Config
+	tlsConfig  *utls.Config
 	addr       string
 	url        string
 	serverName string
@@ -66,7 +67,7 @@ func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 	if m.serverName == "" {
 		m.serverName = u.Hostname()
 	}
-	m.tlsConfig = &tls.Config{
+	m.tlsConfig = &utls.Config{
 		ServerName:         m.serverName,
 		InsecureSkipVerify: m.skipVerify,
 		NextProtos:         m.alpn,

@@ -1,12 +1,13 @@
 package tuic
 
 import (
-	"crypto/tls"
 	"fmt"
 	"net"
 	"net/url"
 	"strconv"
 	"strings"
+
+	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/dialer"
@@ -56,9 +57,9 @@ func (s *Tuic) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) 
 	if d, err = protocol.NewDialer("tuic", d, protocol.Header{
 		ProxyAddress: net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
 		Feature1:     s.CongestionControl,
-		TlsConfig: &tls.Config{
+		TlsConfig: &utls.Config{
 			NextProtos:         s.Alpn,
-			MinVersion:         tls.VersionTLS13,
+			MinVersion:         utls.VersionTLS13,
 			ServerName:         s.Sni,
 			InsecureSkipVerify: s.AllowInsecure || option.AllowInsecure,
 		},

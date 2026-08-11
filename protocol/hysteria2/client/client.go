@@ -2,11 +2,12 @@ package client
 
 import (
 	"context"
-	"crypto/tls"
 	"net"
 	"net/http"
 	"sync"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 
 	"github.com/samber/oops"
 
@@ -349,7 +350,7 @@ func (c *Client) tryHandshake(ctx context.Context, pktConn net.PacketConn, remot
 	rt := &http3.Transport{
 		TLSClientConfig: &c.config.TLSConfig,
 		QUICConfig:      &c.config.QUICConfig,
-		Dial: func(dialCtx context.Context, _ string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
+		Dial: func(dialCtx context.Context, _ string, tlsCfg *utls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
 			qc, err := quic.DialEarly(dialCtx, pktConn, remoteAddr, tlsCfg, cfg)
 			if err != nil {
 				return nil, err

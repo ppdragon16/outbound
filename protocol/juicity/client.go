@@ -2,13 +2,14 @@ package juicity
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"sync"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/netproxy"
@@ -68,7 +69,7 @@ func (a *UnderlayAuth) Unpack(r io.Reader) (n int, err error) {
 }
 
 type ClientOption struct {
-	TlsConfig            *tls.Config
+	TlsConfig            *utls.Config
 	QuicConfig           *quic.Config
 	Uuid                 [16]byte
 	Password             string

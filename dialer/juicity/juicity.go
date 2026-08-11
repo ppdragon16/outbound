@@ -2,7 +2,6 @@ package juicity
 
 import (
 	"bytes"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
@@ -10,6 +9,8 @@ import (
 	"net"
 	"net/url"
 	"strconv"
+
+	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/dialer"
@@ -50,9 +51,9 @@ func NewJuicity(link string) (dialer.Dialer, *dialer.Property, error) {
 func (s *Juicity) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) (netproxy.Dialer, error) {
 	d := parentDialer
 	var err error
-	tlsConfig := &tls.Config{
+	tlsConfig := &utls.Config{
 		NextProtos:         []string{"h3"},
-		MinVersion:         tls.VersionTLS13,
+		MinVersion:         utls.VersionTLS13,
 		ServerName:         s.Sni,
 		InsecureSkipVerify: s.AllowInsecure || option.AllowInsecure,
 	}

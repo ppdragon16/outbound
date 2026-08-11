@@ -3,7 +3,6 @@ package vision
 import (
 	"bytes"
 	"crypto/subtle"
-	gotls "crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -16,6 +15,8 @@ import (
 
 	"github.com/google/uuid"
 	utls "github.com/refraction-networking/utls"
+
+	"crypto/tls"
 )
 
 var (
@@ -52,7 +53,7 @@ func (w *writeWrapper) Write(p []byte) (int, error) {
 }
 
 type Conn struct {
-	net.Conn                  // underlay conn (net.Conn/net.PacketConn)
+	net.Conn             // underlay conn (net.Conn/net.PacketConn)
 	overlayConn net.Conn // (vless.Conn)
 	userUUID    []byte
 
@@ -323,8 +324,12 @@ func (vc *Conn) write(p []byte) (err error) {
 		if err != nil {
 			return err
 		}
-		if tlsConn, ok := vc.tlsConn.(*gotls.Conn); ok {
-			if tlsConn.ConnectionState().Version != gotls.VersionTLS13 {
+		if tlsConn, ok := vc.tlsConn.(*utls.Conn); ok {
+			if tlsConn.ConnectionState().Version != utls.VersionTLS13 {
+				return ErrNotTLS13
+			}
+		} else if tlsConn, ok := vc.tlsConn.(*tls.Conn); ok {
+			if tlsConn.ConnectionState().Version != tls.VersionTLS13 {
 				return ErrNotTLS13
 			}
 		} else if utlsConn, ok := vc.tlsConn.(*utls.UConn); ok {

@@ -3,12 +3,13 @@ package juicity
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
 	"strings"
 	"testing"
+
+	tls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/direct"

@@ -1,11 +1,12 @@
 package anytls
 
 import (
-	"crypto/tls"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
@@ -18,15 +19,16 @@ func init() {
 }
 
 type Anytls struct {
-	link                    string
-	Name                    string
-	Auth                    string
-	Host                    string
-	Sni                     string
-	Insecure                bool
+	link     string
+	Name     string
+	Auth     string
+	Host     string
+	Sni      string
+	Insecure bool
+
 	IdleSessionCheckInterval time.Duration
-	IdleSessionTimeout      time.Duration
-	MinIdleSession          int
+	IdleSessionTimeout       time.Duration
+	MinIdleSession           int
 }
 
 func NewAnytls(link string) (dialer.Dialer, *dialer.Property, error) {
@@ -105,7 +107,7 @@ func (s *Anytls) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer
 				IdleSessionTimeout:       s.IdleSessionTimeout,
 				MinIdleSession:           s.MinIdleSession,
 			},
-			TlsConfig: &tls.Config{
+			TlsConfig: &utls.Config{
 				ServerName:         s.Sni,
 				InsecureSkipVerify: s.Insecure,
 			},

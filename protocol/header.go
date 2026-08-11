@@ -1,12 +1,12 @@
 package protocol
 
-import "crypto/tls"
+import utls "github.com/refraction-networking/utls"
 
 type Header struct {
 	ProxyAddress string
 	SNI          string
 	Feature1     interface{}
-	TlsConfig    *tls.Config
+	TlsConfig    *utls.Config
 	Cipher       string
 	User         string
 	Password     string

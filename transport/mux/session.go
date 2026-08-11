@@ -1,7 +1,6 @@
 package mux
 
 import (
-	"crypto/tls"
 	"encoding/binary"
 	"io"
 	"net"
@@ -54,10 +53,6 @@ func setKeepAlive(conn net.Conn, period time.Duration) {
 			_ = k.SetKeepAlive(true)
 			_ = k.SetKeepAlivePeriod(period)
 			return
-		}
-		if tc, ok := conn.(*tls.Conn); ok {
-			conn = tc.NetConn()
-			continue
 		}
 		if nc, ok := conn.(interface{ NetConn() net.Conn }); ok {
 			conn = nc.NetConn()

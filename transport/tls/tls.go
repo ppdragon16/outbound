@@ -2,15 +2,15 @@ package tls
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"net"
 	"strings"
 
+	utls "github.com/refraction-networking/utls"
+
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
-	utls "github.com/refraction-networking/utls"
 )
 
 // Tls is a base Tls struct
@@ -25,7 +25,7 @@ type Tls struct {
 	fragmentMinInterval int64
 	fragmentMaxInterval int64
 
-	tlsConfig  *tls.Config
+	tlsConfig  *utls.Config
 	utlsConfig *utls.Config
 	utlsID     *utls.ClientHelloID
 }
@@ -56,7 +56,7 @@ func (s *TLSConfig) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Diale
 		}
 		s.Sni = host
 	}
-	t.tlsConfig = &tls.Config{
+	t.tlsConfig = &utls.Config{
 		ServerName:         s.Sni,
 		InsecureSkipVerify: s.AllowInsecure || option.AllowInsecure,
 	}
@@ -119,7 +119,7 @@ func (s *Tls) DialContext(ctx context.Context, network, addr string) (c net.Conn
 
 		switch s.tlsImplentation {
 		case "tls":
-			tlsConn = tls.Client(rc, s.tlsConfig)
+			tlsConn = utls.Client(rc, s.tlsConfig)
 
 		case "utls":
 			tlsConn = utls.UClient(rc, s.utlsConfig, *s.utlsID)

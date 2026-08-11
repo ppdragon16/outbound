@@ -2,12 +2,13 @@ package hysteria2
 
 import (
 	"crypto/sha256"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
+
+	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/common/bandwidth"
 	"github.com/daeuniverse/outbound/common/url"
@@ -24,10 +25,10 @@ func init() {
 }
 
 type Hysteria2 struct {
-	Name      string
-	User      string
-	Password  string
-	Server    string
+	Name         string
+	User         string
+	Password     string
+	Server       string
 	Insecure     bool
 	Sni          string
 	PinSHA256    string
@@ -52,7 +53,7 @@ func NewHysteria2(link string) (dialer.Dialer, *dialer.Property, error) {
 func (s *Hysteria2) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) (netproxy.Dialer, error) {
 	header := protocol.Header{
 		ProxyAddress: s.Server,
-		TlsConfig: &tls.Config{
+		TlsConfig: &utls.Config{
 			ServerName:         s.Sni,
 			InsecureSkipVerify: s.Insecure || option.AllowInsecure,
 		},

@@ -3,12 +3,13 @@ package tuic
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"net"
 	"sync"
 	"time"
+
+	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
@@ -21,7 +22,7 @@ import (
 const Ver5 = 0x5
 
 type ClientOption struct {
-	TlsConfig             *tls.Config
+	TlsConfig             *utls.Config
 	QuicConfig            *quic.Config
 	Uuid                  [16]byte
 	Password              string

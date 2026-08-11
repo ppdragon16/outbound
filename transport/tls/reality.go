@@ -13,7 +13,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
-	gotls "crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
@@ -36,6 +35,9 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	utls "github.com/refraction-networking/utls"
+
+	xtls "crypto/tls"
+
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
 	"golang.org/x/net/http2"
@@ -249,7 +251,7 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c net.
 			go func() {
 				client := &http.Client{
 					Transport: &http2.Transport{
-						DialTLSContext: func(ctx context.Context, network, addr string, cfg *gotls.Config) (net.Conn, error) {
+						DialTLSContext: func(ctx context.Context, network, addr string, cfg *xtls.Config) (net.Conn, error) {
 							return uConn, nil
 						},
 					},
