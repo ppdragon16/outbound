@@ -102,24 +102,22 @@ func (b *PooledBuffer) ReadFromN(r io.Reader, n int) error {
 	if needs <= 0 {
 		return nil
 	}
-	b.grow(needs + minRead)
-
+	m := b.grow(needs + minRead)
 	remaining := needs
-	tail := b.buf[len(b.buf):cap(b.buf)]
+	c := cap(b.buf)
+	copied := 0
 	for remaining > 0 {
-		nn, err := r.Read(tail)
+		nn, err := r.Read(b.buf[m+copied : c])
 		if nn > 0 {
-			b.buf = b.buf[:len(b.buf)+nn]
-			tail = tail[nn:]
+			copied += nn
 			remaining -= nn
 		}
-		if remaining <= 0 {
-			return nil
-		}
 		if err != nil {
+			b.buf = b.buf[:m+copied]
 			return err
 		}
 	}
+	b.buf = b.buf[:m+copied]
 	return nil
 }
 
