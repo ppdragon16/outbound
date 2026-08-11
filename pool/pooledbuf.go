@@ -96,6 +96,33 @@ func (b *PooledBuffer) ReadFrom(r io.Reader) (n int64, err error) {
 	}
 }
 
+// ReadFromN reads n bytes from r, or until EOF is reached.
+func (b *PooledBuffer) ReadFromN(r io.Reader, n int) error {
+	needs := n - b.Len()
+	if needs <= 0 {
+		return nil
+	}
+	b.grow(needs + minRead)
+
+	remaining := needs
+	tail := b.buf[len(b.buf):cap(b.buf)]
+	for remaining > 0 {
+		nn, err := r.Read(tail)
+		if nn > 0 {
+			b.buf = b.buf[:len(b.buf)+nn]
+			tail = tail[nn:]
+			remaining -= nn
+		}
+		if remaining <= 0 {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Grow ensures room for n more bytes.
 func (b *PooledBuffer) Grow(n int) {
 	if n < 0 {
