@@ -164,24 +164,30 @@ func (b *PooledBuffer) grow(n int) int {
 		b.buf = b.buf[:0]
 		b.off = 0
 	}
+	// Compact unread bytes to front. This frees capacity consumed by
+	// the read offset, so tryGrowByReslice succeeds more often and
+	// reallocations stay within the 64KB pool limit.
+	if b.off > 0 {
+		copy(b.buf, b.buf[b.off:])
+		b.buf = b.buf[:m]
+		b.off = 0
+	}
 	if i, ok := b.tryGrowByReslice(n); ok {
 		return i
 	}
+	// Reallocation needed.
 	c := cap(b.buf)
-	if n <= c/2-m {
-		copy(b.buf, b.buf[b.off:])
-	} else {
-		newCap := 2*c + n
-		newBuf := GetBuffer(newCap)
-		copy(newBuf, b.buf[b.off:])
-		if c > 0 {
-			PutBuffer(b.buf)
-		}
-		b.buf = newBuf[:m+n]
-		b.off = 0
-		return m
+	newCap := 2*c + n
+	// If the total fits within the pool max, cap at maxsize to avoid
+	// direct make() for buffers just over the 64KB threshold.
+	if newCap > maxsize && m+n <= maxsize {
+		newCap = maxsize
 	}
-	b.buf = b.buf[:m+n]
-	b.off = 0
+	newBuf := GetBuffer(newCap)
+	copy(newBuf, b.buf)
+	if c > 0 {
+		PutBuffer(b.buf)
+	}
+	b.buf = newBuf[:m+n]
 	return m
 }
