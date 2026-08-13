@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
@@ -24,6 +25,11 @@ import (
 
 const (
 	udpMessageChanSize = 128
+
+	// maxDemuxGoroutines caps how many receive goroutines may drain the shared
+	// datagram queue. Every goroutine parks on ReceiveDatagram most of the
+	// time, so the cap only guards against pathological GOMAXPROCS values.
+	maxDemuxGoroutines = 8
 )
 
 type udpConn struct {
@@ -37,6 +43,9 @@ type udpConn struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// receiveMu guards D.Feed (ReadFromAddrPort) against D.Close (Close):
+	// the Defragger has no internal synchronization.
+	receiveMu    sync.Mutex
 	readDeadline P.Deadline
 }
 
@@ -84,7 +93,9 @@ func (u *udpConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err erro
 			}
 			// Fragmented: Defragger takes ownership of DataBuf;
 			// it will release via ReleaseFn when assembly completes.
+			u.receiveMu.Lock()
 			n, ok = u.D.Feed(&msg, p)
+			u.receiveMu.Unlock()
 			if !ok {
 				continue
 			}
@@ -154,7 +165,9 @@ func (u *udpConn) WritePacket(buf []byte, msg *protocol.UDPMessage) error {
 func (u *udpConn) Close() error {
 	u.cancel()
 	u.sm.connMap.Delete(u.ID)
+	u.receiveMu.Lock()
 	u.D.Close()
+	u.receiveMu.Unlock()
 	return nil
 }
 
@@ -196,7 +209,14 @@ func newUDPSessionManager(conn quic.Connection) *udpSessionManager {
 		ctx:    ctx,
 		cancel: cancel,
 	}
-	go m.run()
+	// Parallel demux: a single run() goroutine caps aggregate packet rate at
+	// one core (parse + session lookup + copy + channel handoff per datagram).
+	// ReceiveDatagram is safe for concurrent consumers, so run one loop per
+	// CPU (capped) and let different sessions progress in parallel.
+	n := min(runtime.GOMAXPROCS(0), maxDemuxGoroutines)
+	for range n {
+		go m.run()
+	}
 	return m
 }
 
