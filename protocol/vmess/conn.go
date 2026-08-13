@@ -458,13 +458,14 @@ func (c *Conn) Metadata() Metadata {
 
 // readSize reads the size and padding from Conn. size=encryptedSize+padding
 func (c *Conn) readSize() (size uint16, padding uint16, err error) {
-	buf := pool.GetBuffer(int(c.readChunkSizeParser.SizeBytes()))
-	defer pool.PutBuffer(buf)
-	if _, err := io.ReadFull(c.Conn, buf); err != nil {
+	// SizeBytes is always 2 (ShakeSizeParser/PlainChunkSizeParser): use a
+	// stack array to avoid per-chunk pool operations on the hot path.
+	var buf [2]byte
+	if _, err := io.ReadFull(c.Conn, buf[:]); err != nil {
 		return 0, 0, err
 	}
 	padding = c.readPaddingGenerator.NextPaddingLen()
-	size, err = c.readChunkSizeParser.Decode(buf)
+	size, err = c.readChunkSizeParser.Decode(buf[:])
 	if err != nil {
 		return size, padding, err
 	}

@@ -97,7 +97,7 @@ func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c net.C
 		}
 
 		// TODO The bufio usage here is unreliable
-		resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+		resp, err := http.ReadResponse(bufio.NewReaderSize(conn, 32<<10), req)
 		if err != nil {
 			return nil, fmt.Errorf("httpupgrade: %w", err)
 		}
