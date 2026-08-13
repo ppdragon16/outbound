@@ -76,6 +76,27 @@ func (b *PooledBuffer) String() string {
 	return string(b.buf[b.off:])
 }
 
+// WriteTo writes the unread portion to w and resets the buffer once written,
+// mirroring bytes.Buffer.WriteTo.
+func (b *PooledBuffer) WriteTo(w io.Writer) (n int64, err error) {
+	if nBytes := b.Len(); nBytes > 0 {
+		m, e := w.Write(b.buf[b.off:])
+		if m > nBytes {
+			panic("PooledBuffer.WriteTo: invalid Write count")
+		}
+		b.off += m
+		n = int64(m)
+		if e != nil {
+			return n, e
+		}
+		if m != nBytes {
+			return n, io.ErrShortWrite
+		}
+	}
+	b.Reset()
+	return n, nil
+}
+
 // ReadFrom reads data from r until EOF.
 func (b *PooledBuffer) ReadFrom(r io.Reader) (n int64, err error) {
 	for {

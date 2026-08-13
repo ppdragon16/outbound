@@ -65,7 +65,7 @@ type StreamRequest struct {
 	PacketAddr  bool
 }
 
-func WriteStreamRequest(buf *bytes.Buffer, streamRequest *StreamRequest) error {
+func WriteStreamRequest(buf *pool.PooledBuffer, streamRequest *StreamRequest) error {
 	var flags uint16
 	if streamRequest.UDP {
 		flags |= flagUDP
@@ -79,8 +79,8 @@ func WriteStreamRequest(buf *bytes.Buffer, streamRequest *StreamRequest) error {
 
 func (c *Conn) Write(b []byte) (n int, err error) {
 	if !c.onceWrite {
-		buf := pool.GetBytesBuffer()
-		defer pool.PutBytesBuffer(buf)
+		buf := pool.NewPooledBuffer()
+		defer buf.Reset()
 		err = WriteStreamRequest(buf, &StreamRequest{
 			Destination: c.addr,
 			UDP:         c.udp,

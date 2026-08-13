@@ -1,7 +1,6 @@
 package socks5
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -33,7 +32,15 @@ type AddressInfo struct {
 	Port     uint16
 }
 
-func WriteAddr(addr string, buf *bytes.Buffer) error {
+// bufferWriter is the minimal interface WriteAddr needs; *bytes.Buffer and
+// *pool.PooledBuffer both satisfy it.
+type bufferWriter interface {
+	io.Writer
+	io.ByteWriter
+	io.StringWriter
+}
+
+func WriteAddr(addr string, buf bufferWriter) error {
 	addressInfo, err := AddressFromString(addr)
 	if err != nil {
 		return err
@@ -42,7 +49,7 @@ func WriteAddr(addr string, buf *bytes.Buffer) error {
 }
 
 // WriteAddrInfo writes address information to buffer
-func WriteAddrInfo(addr *AddressInfo, buf *bytes.Buffer) error {
+func WriteAddrInfo(addr *AddressInfo, buf bufferWriter) error {
 	buf.WriteByte(byte(addr.Type))
 	switch addr.Type {
 	case AddressTypeIPv4, AddressTypeIPv6:

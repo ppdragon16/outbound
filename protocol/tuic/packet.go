@@ -126,8 +126,8 @@ func (q *quicStreamPacketConn) close() (err error) {
 		// Best-effort: tell the server to release this UDP association.
 		// If it fails (stream limit, dead conn, etc.), the server
 		// will eventually timeout the association on its own.
-		buf := pool.GetBytesBuffer()
-		defer pool.PutBytesBuffer(buf)
+		buf := pool.NewPooledBuffer()
+		defer buf.Reset()
 		if e := NewDissociate(q.connId, Ver5).WriteTo(buf); e != nil {
 			return // non-fatal: we already closed the queue
 		}

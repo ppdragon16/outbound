@@ -163,8 +163,8 @@ func (t *clientImpl) sendAuthentication(quicConn quic.Connection) (err error) {
 		return err
 	}
 	defer func() { _ = uniStream.Close() }()
-	buf := pool.GetBytesBuffer()
-	defer pool.PutBytesBuffer(buf)
+	buf := pool.NewPooledBuffer()
+	defer buf.Reset()
 	token, err := tuic.GenToken(quicConn.ConnectionState(), t.Uuid, t.Password)
 	if err != nil {
 		return err

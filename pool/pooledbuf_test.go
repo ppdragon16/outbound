@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -181,5 +182,25 @@ func TestGrowNoAllocWhenCapacitySufficient(t *testing.T) {
 	b.Grow(512)
 	if cap(b.buf) != initialCap {
 		t.Fatalf("expected same cap %d, got %d", initialCap, cap(b.buf))
+	}
+}
+
+func TestPooledBufferWriteTo(t *testing.T) {
+	b := NewPooledBuffer()
+	b.WriteString("hello world")
+
+	var dst bytes.Buffer
+	n, err := b.WriteTo(&dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 11 {
+		t.Fatalf("n = %d, want 11", n)
+	}
+	if dst.String() != "hello world" {
+		t.Fatalf("dst = %q, want %q", dst.String(), "hello world")
+	}
+	if b.Len() != 0 {
+		t.Fatalf("buffer not reset after WriteTo: Len = %d", b.Len())
 	}
 }
