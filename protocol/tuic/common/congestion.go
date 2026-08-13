@@ -12,11 +12,19 @@ const (
 	MaxConnectionReceiveWindow     = 64 * 1024 * 1024 // 64 MB
 )
 
-func SetCongestionController(quicConn quic.Connection, cc string, cwnd int) {
+// SetCongestionController wires the configured congestion controller into the
+// QUIC connection. "brutal" uses cwnd as the target bandwidth in bytes per
+// second (community convention shared with sing-box and the tuic brutal
+// forks); when it is zero the connection falls back to BBR.
+func SetCongestionController(quicConn quic.Connection, cc string, cwnd uint64) {
 	switch cc {
+	case "brutal":
+		if cwnd == 0 {
+			congestion.UseBBR(quicConn)
+			return
+		}
+		congestion.UseBrutal(quicConn, cwnd)
 	default:
-		fallthrough
-	case "bbr":
 		congestion.UseBBR(quicConn)
 	}
 }

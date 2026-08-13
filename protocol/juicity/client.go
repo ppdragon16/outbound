@@ -74,7 +74,7 @@ type ClientOption struct {
 	Uuid                 [16]byte
 	Password             string
 	CongestionController string
-	CWND                 int
+	CWND                 uint64
 	Ctx                  context.Context
 	Cancel               func()
 	UnderlayAuth         chan *UnderlayAuth
