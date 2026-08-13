@@ -139,7 +139,16 @@ func (u *udpConn) WritePacket(buf []byte, msg *protocol.UDPMessage) error {
 	if msgN < 0 {
 		return &quic.DatagramTooLargeError{MaxDataLen: int64(len(buf))}
 	}
-	return u.conn.SendDatagram(buf[:msgN])
+	err := u.conn.SendDatagram(buf[:msgN])
+	if errors.Is(err, quic.ErrDatagramQueueFullTimeout) {
+		// The datagram send queue stayed full with nothing dequeued for the
+		// timeout: the transport is stalled, not merely backpressured. Retire
+		// the whole connection so this and every other in-flight write fails
+		// fast (closeErr) instead of blocking another timeout each, and so
+		// Client.Alive() turns false and dae re-dials promptly.
+		_ = u.conn.CloseWithError(closeErrCodeProtocolError, "datagram send queue full: timed out")
+	}
+	return err
 }
 
 func (u *udpConn) Close() error {
@@ -158,7 +167,9 @@ func (u *udpConn) SetReadDeadline(t time.Time) error {
 	return nil
 }
 
-// QUIC raw datagram will not block on write.
+// QUIC raw datagram can block on a full send queue, but only up to
+// quic-go's datagramSendQueueFullTimeout; after that it returns
+// ErrDatagramQueueFullTimeout and WritePacket retires the connection.
 func (u *udpConn) SetWriteDeadline(t time.Time) error {
 	return nil
 }

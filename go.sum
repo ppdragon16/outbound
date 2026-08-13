@@ -84,8 +84,8 @@ github.com/onsi/gomega v1.38.2/go.mod h1:W2MJcYxRGV63b418Ai34Ud0hEdTVXq9NW9+Sx6u
 github.com/pborman/getopt v0.0.0-20170112200414-7148bc3a4c30/go.mod h1:85jBQOZwpVEaDAr341tbn15RS4fCAsIst0qp7i8ex1o=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
-github.com/ppdragon16/quic-go v0.0.0-next.utls h1:K6YL33jPy3GpZNEt99jk4NFASzMEx7cQ1WIyXNupYRc=
-github.com/ppdragon16/quic-go v0.0.0-next.utls/go.mod h1:kladjzdb1evtZspr9w7A8ubFAjmII3pn7mA9j6LU3ws=
+github.com/ppdragon16/quic-go v0.0.0-next.utls.1 h1:5j+fFrDhAnKaTW/iiB2NdfTjXrRMKTlQXMXaoZDcduM=
+github.com/ppdragon16/quic-go v0.0.0-next.utls.1/go.mod h1:kladjzdb1evtZspr9w7A8ubFAjmII3pn7mA9j6LU3ws=
 github.com/quic-go/qpack v0.5.1 h1:giqksBPnT/HDtZ6VhtFKgoLOWmlyo9Ei6u9PqzIMbhI=
 github.com/quic-go/qpack v0.5.1/go.mod h1:+PC4XFrEskIVkcLzpEkbLqq1uCoxPhQuvK5rH1ZgaEg=
 github.com/refraction-networking/utls v1.8.1 h1:yNY1kapmQU8JeM1sSw2H2asfTIwWxIkrMJI0pRUOCAo=
