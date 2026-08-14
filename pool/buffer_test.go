@@ -240,3 +240,21 @@ func TestGetBufferAllocOnColdMiss(t *testing.T) {
 	}
 	resetClass(i)
 }
+
+// TestTinyClassBypassesRing verifies buffers <= smallClassSize are served by
+// sync.Pool directly and never allocate or populate the GC-surviving ring.
+func TestTinyClassBypassesRing(t *testing.T) {
+	const class = 16
+	i := classIndex(class)
+	resetClass(i)
+
+	b := GetBuffer(class)
+	PutBuffer(b)
+	if classPools[i].n != 0 {
+		t.Fatalf("tiny class %d should bypass the ring, got n=%d", class, classPools[i].n)
+	}
+	if classPools[i].buf != nil {
+		t.Fatalf("tiny class %d should not allocate a ring", class)
+	}
+	resetClass(i)
+}

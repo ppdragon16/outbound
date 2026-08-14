@@ -23,7 +23,13 @@ const (
 	// maxBucketCount additionally caps the number of buffers per size class,
 	// so the tiniest classes don't retain an absurd number of entries (the
 	// byte budget alone would allow ~2M one-byte buffers).
-	maxBucketCount = 4096
+	maxBucketCount = 2048
+
+	// smallClassSize is the largest size class served directly by sync.Pool
+	// instead of the GC-surviving ring. A ring entry is 32 bytes, so for
+	// buffers this small the ring's fixed overhead dwarfs the payload; a plain
+	// GC-cleared sync.Pool is enough and avoids committing a ring for them.
+	smallClassSize = 16
 
 	// bucketTTL is how long an idle buffer may sit in a pool before a
 	// background sweeper releases it, so an idle process does not hold onto
@@ -59,13 +65,14 @@ type classPool struct {
 	max  int        // max live buffers (see bucketMax)
 	mask int        // max - 1; max is a power of two, so & mask == % max
 
-	// Cumulative counters on the GetBuffer path, surfaced via PoolStats (see
-	// Stats). Updated with atomics so they never contend with the ring mutex.
-	// Reuse efficiency is the ratio of hits (ringHit+poolHit) to gets.
+	// Cumulative counters surfaced via PoolStats (see Stats). Updated with
+	// atomics so they never contend with the ring mutex. Reuse efficiency is
+	// the ratio of hits (ringHit+poolHit) to gets.
 	gets    atomic.Uint64 // GetBuffer calls for this class (poolable sizes)
 	ringHit atomic.Uint64 // served directly by the ring
 	poolHit atomic.Uint64 // served by the sync.Pool fallback
 	alloc   atomic.Uint64 // both tiers missed: served by a fresh make
+	demoted atomic.Uint64 // ring entries evicted to sync.Pool by the sweeper
 }
 
 var (
@@ -95,6 +102,7 @@ func init() {
 				p.mu.Lock()
 				for j := 0; j < sweepBatch && p.n > 0 && p.buf[p.head].putTime.Before(expiredTime); j++ {
 					pools[i].Put(p.buf[p.head].ptr) // demote to the GC-cleared fallback
+					p.demoted.Add(1)
 					p.buf[p.head] = bufEntry{}
 					p.head = (p.head + 1) & p.mask
 					p.n--
@@ -122,9 +130,11 @@ func GetBuffer(size int) []byte {
 		i := bits.Len32(uint32(size - 1))
 		class := 1 << i
 		classPools[i].gets.Add(1)
-		if b := classPools[i].get(class, size); b != nil {
-			classPools[i].ringHit.Add(1)
-			return b
+		if class > smallClassSize {
+			if b := classPools[i].get(class, size); b != nil {
+				classPools[i].ringHit.Add(1)
+				return b
+			}
 		}
 		if p := pools[i].Get(); p != nil {
 			classPools[i].poolHit.Add(1)
@@ -143,7 +153,13 @@ func PutBuffer(buf []byte) {
 	// stored in the next bucket would panic on a later GetBuffer.
 	if size := cap(buf); size >= 1 && size <= maxsize && size&(size-1) == 0 {
 		i := bits.Len32(uint32(size - 1))
+		class := 1 << i
 		ptr := unsafe.SliceData(buf)
+		if class <= smallClassSize {
+			// Tiny class: no ring, straight to the GC-cleared pool.
+			pools[i].Put(ptr)
+			return
+		}
 		if !classPools[i].put(ptr) {
 			// Ring full: fall back to sync.Pool. It is cleared by the GC,
 			// so overflow buffers are only kept best-effort.
@@ -206,6 +222,7 @@ type Stats struct {
 	RingHit   uint64 // served directly by the ring
 	PoolHit   uint64 // served by the sync.Pool fallback
 	Alloc     uint64 // both tiers missed: served by a fresh make
+	Demoted   uint64 // ring entries evicted to sync.Pool by the sweeper
 	Occupancy int    // live buffers currently held by the ring
 	Max       int    // ring capacity (bucketMax)
 }
@@ -253,6 +270,7 @@ func (p *classPool) stats() Stats {
 		RingHit:   p.ringHit.Load(),
 		PoolHit:   p.poolHit.Load(),
 		Alloc:     p.alloc.Load(),
+		Demoted:   p.demoted.Load(),
 		Occupancy: n,
 		Max:       p.max,
 	}
