@@ -42,8 +42,8 @@ type Conn struct {
 	onceWrite  bool
 	onceRead   sync.Once
 
-	addonsBytes  []byte
-	readWrapper  netproxy.ReadWrapper
+	addonsBytes []byte
+	readWrapper netproxy.ReadWrapper
 }
 
 // Unwrap returns the underlying net.Conn, allowing transport layers
