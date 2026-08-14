@@ -2,6 +2,7 @@ package pool
 
 import (
 	"math/bits"
+	"strings"
 	"testing"
 	"time"
 )
@@ -281,4 +282,29 @@ func TestRingGrowsOnOverflow(t *testing.T) {
 		t.Fatalf("n = %d, want %d", p.n, initialRingSize+1)
 	}
 	resetClass(i)
+}
+
+// TestPoolStackTrace verifies that GetBuffer and PutBuffer caller stacks are
+// recorded independently (gets and puts do not offset each other).
+func TestPoolStackTrace(t *testing.T) {
+	const class = 1024
+	i := classIndex(class)
+	resetClass(i)
+	classPools[i].trace = traceTracker{}
+	EnableTrackingStack.Store(true)
+	defer EnableTrackingStack.Store(false)
+
+	GetBuffer(class)               // one get
+	PutBuffer(make([]byte, class)) // one put
+
+	gets, puts := PoolStackTrace(class)
+	if len(gets) != 1 || len(puts) != 1 {
+		t.Fatalf("gets=%d puts=%d, want 1/1", len(gets), len(puts))
+	}
+	if !strings.Contains(gets[0].Stack, "buffer_test.go") {
+		t.Fatalf("get stack should reference buffer_test.go, got: %s", gets[0].Stack)
+	}
+	if !strings.Contains(puts[0].Stack, "buffer_test.go") {
+		t.Fatalf("put stack should reference buffer_test.go, got: %s", puts[0].Stack)
+	}
 }

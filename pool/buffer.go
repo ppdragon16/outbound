@@ -4,6 +4,11 @@ package pool
 
 import (
 	"math/bits"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -80,11 +85,20 @@ type classPool struct {
 	poolHit atomic.Uint64 // served by the sync.Pool fallback
 	alloc   atomic.Uint64 // both tiers missed: served by a fresh make
 	demoted atomic.Uint64 // ring entries evicted to sync.Pool by the sweeper
+
+	// trace records caller stacks of outstanding GetBuffer calls (see
+	// EnableTrackingStack). It is inert unless tracking is enabled.
+	trace traceTracker
 }
 
 var (
 	pools      [num]sync.Pool // sync.Pool fallback: overflow, cleared by the GC
 	classPools [num]classPool // bounded, GC-surviving primary
+
+	// EnableTrackingStack records the caller stack of every GetBuffer and
+	// offsets it on PutBuffer, so PoolStackTrace can report leaked buffers.
+	// It is off by default and should only be enabled for leak diagnosis.
+	EnableTrackingStack atomic.Bool
 )
 
 func init() {
@@ -138,6 +152,9 @@ func GetBuffer(size int) []byte {
 		i := bits.Len32(uint32(size - 1))
 		class := 1 << i
 		classPools[i].gets.Add(1)
+		if EnableTrackingStack.Load() {
+			classPools[i].trace.get(captureStack())
+		}
 		if class > smallClassSize {
 			if b := classPools[i].get(class, size); b != nil {
 				classPools[i].ringHit.Add(1)
@@ -163,6 +180,9 @@ func PutBuffer(buf []byte) {
 		i := bits.Len32(uint32(size - 1))
 		class := 1 << i
 		classPools[i].puts.Add(1)
+		if EnableTrackingStack.Load() {
+			classPools[i].trace.put(captureStack())
+		}
 		ptr := unsafe.SliceData(buf)
 		if class <= smallClassSize {
 			// Tiny class: no ring, straight to the GC-cleared pool.
@@ -305,4 +325,109 @@ func (p *classPool) stats() Stats {
 		Occupancy: n,
 		Max:       c,
 	}
+}
+
+// StackTraceEntry is one caller stack recorded for a GetBuffer or PutBuffer,
+// with its count.
+type StackTraceEntry struct {
+	Stack string
+	Count int
+}
+
+// traceTracker records the caller stacks of GetBuffer and PutBuffer calls for
+// one size class, each counted independently. A leaked buffer shows up as a get
+// stack with a higher count than the matching put stack.
+type traceTracker struct {
+	mu        sync.Mutex
+	getTraces map[string]int
+	putTraces map[string]int
+}
+
+func (t *traceTracker) get(stack string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.getTraces == nil {
+		t.getTraces = make(map[string]int)
+	}
+	t.getTraces[stack]++
+}
+
+func (t *traceTracker) put(stack string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.putTraces == nil {
+		t.putTraces = make(map[string]int)
+	}
+	t.putTraces[stack]++
+}
+
+func (t *traceTracker) snapshot() (gets, puts []StackTraceEntry) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	gets = make([]StackTraceEntry, 0, len(t.getTraces))
+	for stack, count := range t.getTraces {
+		gets = append(gets, StackTraceEntry{Stack: stack, Count: count})
+	}
+	sort.Slice(gets, func(i, j int) bool { return gets[i].Count > gets[j].Count })
+	puts = make([]StackTraceEntry, 0, len(t.putTraces))
+	for stack, count := range t.putTraces {
+		puts = append(puts, StackTraceEntry{Stack: stack, Count: count})
+	}
+	sort.Slice(puts, func(i, j int) bool { return puts[i].Count > puts[j].Count })
+	return gets, puts
+}
+
+// captureStack returns the caller stack with one frame per line, skipping
+// runtime frames and the pool's own frames so it starts at the caller.
+func captureStack() string {
+	var pcs [16]uintptr
+	n := runtime.Callers(3, pcs[:])
+	frames := runtime.CallersFrames(pcs[:n])
+	var sb strings.Builder
+	depth := 0
+	for {
+		frame, more := frames.Next()
+		if strings.HasPrefix(frame.Function, "runtime.") {
+			if !more {
+				break
+			}
+			continue
+		}
+		if depth > 0 {
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(shortFile(frame.File))
+		sb.WriteString(":")
+		sb.WriteString(strconv.Itoa(frame.Line))
+		depth++
+		if depth >= 5 || !more {
+			break
+		}
+	}
+	return sb.String()
+}
+
+// shortFile renders a frame's file path as its last two components
+// (dir/file.go) so a module-cache path like
+// "github.com/.../outbound@v0.0.0-.../protocol/anytls/session.go" becomes
+// "anytls/session.go".
+func shortFile(f string) string {
+	base := filepath.Base(f)
+	dir := filepath.Base(filepath.Dir(f))
+	if dir == "." || dir == "/" || dir == "" {
+		return base
+	}
+	return dir + "/" + base
+}
+
+// PoolStackTrace reports the GetBuffer and PutBuffer caller stacks for one
+// size class, as two lists each sorted by count descending. class is the class
+// size (1, 2, 4, ... 65536), e.g. 1024 for the 1K bucket. Both are empty unless
+// EnableTrackingStack was set while the buffers were acquired.
+func PoolStackTrace(class int) (gets, puts []StackTraceEntry) {
+	if class < 1 || class > maxsize {
+		return nil, nil
+	}
+	i := bits.Len32(uint32(class - 1))
+	return classPools[i].trace.snapshot()
 }
