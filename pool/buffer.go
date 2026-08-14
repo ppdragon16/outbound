@@ -75,6 +75,7 @@ type classPool struct {
 	// atomics so they never contend with the ring mutex. Reuse efficiency is
 	// the ratio of hits (ringHit+poolHit) to gets.
 	gets    atomic.Uint64 // GetBuffer calls for this class (poolable sizes)
+	puts    atomic.Uint64 // PutBuffer calls that pooled a buffer in this class
 	ringHit atomic.Uint64 // served directly by the ring
 	poolHit atomic.Uint64 // served by the sync.Pool fallback
 	alloc   atomic.Uint64 // both tiers missed: served by a fresh make
@@ -161,6 +162,7 @@ func PutBuffer(buf []byte) {
 	if size := cap(buf); size >= 1 && size <= maxsize && size&(size-1) == 0 {
 		i := bits.Len32(uint32(size - 1))
 		class := 1 << i
+		classPools[i].puts.Add(1)
 		ptr := unsafe.SliceData(buf)
 		if class <= smallClassSize {
 			// Tiny class: no ring, straight to the GC-cleared pool.
@@ -245,6 +247,7 @@ func (p *classPool) grow() {
 // HitRate and RingHitRate) rather than stored.
 type Stats struct {
 	Gets      uint64 // GetBuffer calls for this class (poolable sizes)
+	Puts      uint64 // PutBuffer calls that pooled a buffer in this class
 	RingHit   uint64 // served directly by the ring
 	PoolHit   uint64 // served by the sync.Pool fallback
 	Alloc     uint64 // both tiers missed: served by a fresh make
@@ -294,6 +297,7 @@ func (p *classPool) stats() Stats {
 	p.mu.Unlock()
 	return Stats{
 		Gets:      p.gets.Load(),
+		Puts:      p.puts.Load(),
 		RingHit:   p.ringHit.Load(),
 		PoolHit:   p.poolHit.Load(),
 		Alloc:     p.alloc.Load(),
