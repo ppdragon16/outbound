@@ -31,6 +31,11 @@ const (
 	// GC-cleared sync.Pool is enough and avoids committing a ring for them.
 	smallClassSize = 16
 
+	// initialRingSize is the starting capacity of a class ring. It grows by
+	// doubling on overflow (see grow) up to the byte-budget cap, so a lightly
+	// used class never commits a full-size ring entry array.
+	initialRingSize = 32
+
 	// bucketTTL is how long an idle buffer may sit in a pool before a
 	// background sweeper releases it, so an idle process does not hold onto
 	// peak memory forever.
@@ -59,11 +64,12 @@ type bufEntry struct {
 // and the sweeper evicts expired entries from the head in O(1).
 type classPool struct {
 	mu   sync.Mutex
-	buf  []bufEntry // fixed size == max, allocated lazily on first put
+	buf  []bufEntry // fixed size == cap, grown on demand (see grow)
 	head int        // index of the oldest entry
 	n    int        // number of live entries
-	max  int        // max live buffers (see bucketMax)
-	mask int        // max - 1; max is a power of two, so & mask == % max
+	cap  int        // current ring capacity (power of two, grows toward max)
+	mask int        // cap - 1
+	max  int        // hard cap (bucketMax), immutable after init
 
 	// Cumulative counters surfaced via PoolStats (see Stats). Updated with
 	// atomics so they never contend with the ring mutex. Reuse efficiency is
@@ -84,7 +90,8 @@ func init() {
 	for i := range num {
 		size := 1 << i
 		classPools[i].max = bucketMax(size)
-		classPools[i].mask = classPools[i].max - 1
+		classPools[i].cap = min(initialRingSize, classPools[i].max)
+		classPools[i].mask = classPools[i].cap - 1
 		// sync.Pool is a best-effort recycle bin only: with no New, Get returns
 		// nil on a miss so GetBuffer can count a real allocation (see Alloc).
 	}
@@ -196,20 +203,39 @@ func (p *classPool) put(ptr *byte) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.buf == nil {
-		p.buf = make([]bufEntry, p.max)
+		p.buf = make([]bufEntry, p.cap)
 	}
-	if p.n == p.max {
-		if now.Sub(p.buf[p.head].putTime) <= bucketTTL {
+	if p.n == p.cap {
+		if now.Sub(p.buf[p.head].putTime) > bucketTTL {
+			// Reuse the expired head slot (no growth needed).
+			p.buf[p.head] = bufEntry{ptr: ptr, putTime: now}
+			p.head = (p.head + 1) & p.mask
+			return true
+		}
+		// Ring full and head fresh: grow if below the hard cap, else overflow.
+		if p.cap < p.max {
+			p.grow()
+		} else {
 			return false
 		}
-		// Reuse the expired head slot.
-		p.buf[p.head] = bufEntry{ptr: ptr, putTime: now}
-		p.head = (p.head + 1) & p.mask
-	} else {
-		p.buf[(p.head+p.n)&p.mask] = bufEntry{ptr: ptr, putTime: now}
-		p.n++
 	}
+	p.buf[(p.head+p.n)&p.mask] = bufEntry{ptr: ptr, putTime: now}
+	p.n++
 	return true
+}
+
+// grow doubles the ring capacity (up to max), re-lining the live entries so
+// head becomes 0. Callers hold p.mu.
+func (p *classPool) grow() {
+	newCap := min(p.cap*2, p.max)
+	buf := make([]bufEntry, newCap)
+	for i := 0; i < p.n; i++ {
+		buf[i] = p.buf[(p.head+i)&p.mask]
+	}
+	p.buf = buf
+	p.head = 0
+	p.mask = newCap - 1
+	p.cap = newCap
 }
 
 // Stats is a per-class snapshot filled by PoolStats into a StatsSnapshot. The
@@ -224,7 +250,7 @@ type Stats struct {
 	Alloc     uint64 // both tiers missed: served by a fresh make
 	Demoted   uint64 // ring entries evicted to sync.Pool by the sweeper
 	Occupancy int    // live buffers currently held by the ring
-	Max       int    // ring capacity (bucketMax)
+	Max       int    // current ring capacity (grows from initialRingSize)
 }
 
 // HitRate is the overall reuse efficiency: the fraction of GetBuffer calls
@@ -264,6 +290,7 @@ func PoolStats(dst *StatsSnapshot) {
 func (p *classPool) stats() Stats {
 	p.mu.Lock()
 	n := p.n
+	c := p.cap
 	p.mu.Unlock()
 	return Stats{
 		Gets:      p.gets.Load(),
@@ -272,6 +299,6 @@ func (p *classPool) stats() Stats {
 		Alloc:     p.alloc.Load(),
 		Demoted:   p.demoted.Load(),
 		Occupancy: n,
-		Max:       p.max,
+		Max:       c,
 	}
 }

@@ -8,15 +8,16 @@ import (
 
 func classIndex(size int) int { return bits.Len32(uint32(size - 1)) }
 
-// resetClass empties a class pool so tests start from a clean slate.
+// resetClass empties a class pool and shrinks its ring back to the initial
+// size, so tests start from a clean slate.
 func resetClass(i int) {
 	p := &classPools[i]
 	p.mu.Lock()
-	for p.n > 0 {
-		p.buf[p.head] = bufEntry{}
-		p.head = (p.head + 1) & p.mask
-		p.n--
-	}
+	p.buf = nil
+	p.head = 0
+	p.n = 0
+	p.cap = min(initialRingSize, p.max)
+	p.mask = p.cap - 1
 	p.mu.Unlock()
 }
 
@@ -150,8 +151,8 @@ func TestClassPoolRingReuse(t *testing.T) {
 	b := GetBuffer(class)
 	PutBuffer(b)
 	p := &classPools[i]
-	if p.buf == nil || len(p.buf) != p.max {
-		t.Fatalf("ring not allocated to max on first put: len(buf)=%d, max=%d", len(p.buf), p.max)
+	if p.buf == nil || len(p.buf) != p.cap {
+		t.Fatalf("ring not allocated on first put: len(buf)=%d, cap=%d", len(p.buf), p.cap)
 	}
 
 	for range 1000 {
@@ -159,8 +160,8 @@ func TestClassPoolRingReuse(t *testing.T) {
 		got[0] = 'x'
 		PutBuffer(got)
 	}
-	if len(p.buf) != p.max {
-		t.Fatalf("ring backing array changed size after churn: len(buf)=%d, max=%d", len(p.buf), p.max)
+	if len(p.buf) != p.cap {
+		t.Fatalf("ring backing array changed size after churn: len(buf)=%d, cap=%d", len(p.buf), p.cap)
 	}
 	if p.n != 1 {
 		t.Fatalf("ring held %d live entries after churn, want 1", p.n)
@@ -182,8 +183,8 @@ func TestPoolStatsOccupancy(t *testing.T) {
 	var snap StatsSnapshot
 	PoolStats(&snap)
 	s := snap[i]
-	if s.Occupancy != 3 || s.Max != p.max {
-		t.Fatalf("Occupancy=%d Max=%d, want 3 / %d", s.Occupancy, s.Max, p.max)
+	if s.Occupancy != 3 || s.Max != p.cap {
+		t.Fatalf("Occupancy=%d Max=%d, want 3 / %d", s.Occupancy, s.Max, p.cap)
 	}
 	resetClass(i)
 }
@@ -255,6 +256,29 @@ func TestTinyClassBypassesRing(t *testing.T) {
 	}
 	if classPools[i].buf != nil {
 		t.Fatalf("tiny class %d should not allocate a ring", class)
+	}
+	resetClass(i)
+}
+
+// TestRingGrowsOnOverflow verifies the ring grows from initialRingSize by
+// doubling when filled, instead of committing a full-size array up front.
+func TestRingGrowsOnOverflow(t *testing.T) {
+	const class = 4096
+	i := classIndex(class)
+	resetClass(i)
+
+	p := &classPools[i]
+	if p.cap != initialRingSize {
+		t.Fatalf("initial cap = %d, want %d", p.cap, initialRingSize)
+	}
+	for n := 0; n < initialRingSize+1; n++ {
+		PutBuffer(make([]byte, class))
+	}
+	if p.cap != initialRingSize*2 {
+		t.Fatalf("cap = %d, want %d after overflow", p.cap, initialRingSize*2)
+	}
+	if p.n != initialRingSize+1 {
+		t.Fatalf("n = %d, want %d", p.n, initialRingSize+1)
 	}
 	resetClass(i)
 }
