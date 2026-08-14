@@ -179,16 +179,18 @@ func (c *stream) Read(b []byte) (n int, err error) {
 // The caller must not use chunk after this call.
 func (c *stream) pushData(chunk []byte) {
 	c.readMu.Lock()
-	for !c.readRing.push(chunk) {
+	defer c.readMu.Unlock()
+	for {
 		if c.readEOF || c.readErr != nil {
 			pool.PutBuffer(chunk)
-			c.readMu.Unlock()
+			return
+		}
+		if c.readRing.push(chunk) {
+			c.readCond.Signal()
 			return
 		}
 		c.readCond.Wait()
 	}
-	c.readCond.Signal()
-	c.readMu.Unlock()
 }
 
 // terminate drains queued chunks and signals fatal error.
