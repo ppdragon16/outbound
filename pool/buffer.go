@@ -57,7 +57,7 @@ type bufEntry struct {
 	putTime time.Time
 }
 
-// classPool is a bounded, GC-surviving, TTL-aware FIFO ring for one size class.
+// classPool is a bounded, GC-surviving, TTL-aware LIFO ring for one size class.
 //
 // Unlike sync.Pool it is not cleared by the GC, so it survives the GC pressure
 // that otherwise causes an allocation spiral. The ring is a fixed buf[max]
@@ -66,6 +66,12 @@ type bufEntry struct {
 // reallocate the backing array once the drift exhausted its capacity. The ring
 // is allocated lazily on first put (only for classes that are actually used),
 // and the sweeper evicts expired entries from the head in O(1).
+//
+// get pops the newest entry (LIFO) for cache locality and so a low-rate trickle
+// only keeps the few most-recent buffers warm: a FIFO would rotate the trickle
+// through every slot and refresh each entry's putTime, so the ring never looked
+// idle and the sweeper could never release peak memory. With LIFO the deeper
+// (oldest) entries age out untouched and are reclaimed by the sweeper.
 type classPool struct {
 	mu   sync.Mutex
 	buf  []bufEntry // fixed size == cap, grown on demand (see grow)
@@ -83,7 +89,7 @@ type classPool struct {
 	ringHit atomic.Uint64 // served directly by the ring
 	poolHit atomic.Uint64 // served by the sync.Pool fallback
 	alloc   atomic.Uint64 // both tiers missed: served by a fresh make
-	demoted atomic.Uint64 // ring entries evicted to sync.Pool by the sweeper
+	demoted atomic.Uint64 // ring entries evicted to sync.Pool (sweeper or expired-head reuse in put)
 
 	// trace records caller stacks of outstanding GetBuffer calls (see
 	// EnableTrackingStack). It is inert unless tracking is enabled.
@@ -188,7 +194,7 @@ func PutBuffer(buf []byte) {
 			pools[i].Put(ptr)
 			return
 		}
-		if !classPools[i].put(ptr) {
+		if !classPools[i].put(i, ptr) {
 			// Ring full: fall back to sync.Pool. It is cleared by the GC,
 			// so overflow buffers are only kept best-effort.
 			pools[i].Put(ptr)
@@ -196,21 +202,21 @@ func PutBuffer(buf []byte) {
 	}
 }
 
-// get pops the oldest buffer, or nil if the pool is empty. It deliberately does
-// not check the entry's TTL: an expired buffer is still valid memory and get is
-// the reuse path — reusing it is what avoids an allocation. Idle memory is
-// released by the sweeper instead.
+// get pops the newest buffer (LIFO), or nil if the pool is empty. It
+// deliberately does not check the entry's TTL: an expired buffer is still valid
+// memory and get is the reuse path — reusing it is what avoids an allocation.
+// Idle memory is released by the sweeper instead.
 func (p *classPool) get(class, req int) []byte {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.n == 0 {
 		return nil
 	}
-	e := p.buf[p.head]
-	p.buf[p.head] = bufEntry{}
-	p.head = (p.head + 1) & p.mask
+	idx := (p.head + p.n - 1) & p.mask
+	ptr := p.buf[idx].ptr
+	p.buf[idx] = bufEntry{}
 	p.n--
-	return unsafe.Slice(e.ptr, class)[:req]
+	return unsafe.Slice(ptr, class)[:req]
 }
 
 // put appends ptr to the ring unless it is full. It reports whether the buffer
@@ -219,7 +225,7 @@ func (p *classPool) get(class, req int) []byte {
 // entries are inserted in time order so the head is the oldest, and if it is not
 // expired then nothing is. Bulk expiry is the sweeper's job; put evicts at most
 // one entry to keep the hot path O(1).
-func (p *classPool) put(ptr *byte) bool {
+func (p *classPool) put(i int, ptr *byte) bool {
 	now := time.Now()
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -228,7 +234,12 @@ func (p *classPool) put(ptr *byte) bool {
 	}
 	if p.n == p.cap {
 		if now.Sub(p.buf[p.head].putTime) > bucketTTL {
-			// Reuse the expired head slot (no growth needed).
+			// Reuse the expired head slot (no growth needed). The expired
+			// buffer it replaces is demoted to the GC-cleared fallback, same
+			// as the sweeper, so it stays reusable until GC and demoted remains
+			// an exact count of ring evictions.
+			pools[i].Put(p.buf[p.head].ptr)
+			p.demoted.Add(1)
 			p.buf[p.head] = bufEntry{ptr: ptr, putTime: now}
 			p.head = (p.head + 1) & p.mask
 			return true

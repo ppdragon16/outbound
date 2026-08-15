@@ -47,8 +47,8 @@ func TestClassPoolByteBudget(t *testing.T) {
 	resetClass(i)
 }
 
-// TestClassPoolFIFO verifies buffers are returned in insertion order.
-func TestClassPoolFIFO(t *testing.T) {
+// TestClassPoolLIFO verifies buffers are returned in most-recent-first order.
+func TestClassPoolLIFO(t *testing.T) {
 	const class = 2048
 	i := classIndex(class)
 	resetClass(i)
@@ -58,11 +58,11 @@ func TestClassPoolFIFO(t *testing.T) {
 	PutBuffer(a)
 	PutBuffer(b)
 
-	if got := GetBuffer(class); got[0] != 'a' {
-		t.Fatalf("FIFO: first buffer byte = %q, want 'a'", got[0])
-	}
 	if got := GetBuffer(class); got[0] != 'b' {
-		t.Fatalf("FIFO: second buffer byte = %q, want 'b'", got[0])
+		t.Fatalf("LIFO: first buffer byte = %q, want 'b'", got[0])
+	}
+	if got := GetBuffer(class); got[0] != 'a' {
+		t.Fatalf("LIFO: second buffer byte = %q, want 'a'", got[0])
 	}
 	resetClass(i)
 }
@@ -113,12 +113,16 @@ func TestClassPoolPutReusesExpiredHead(t *testing.T) {
 	p.buf[p.head].putTime = time.Now().Add(-2 * bucketTTL)
 	p.mu.Unlock()
 
+	before := p.demoted.Load()
 	PutBuffer(make([]byte, class))
 	if p.n != p.max {
 		t.Fatalf("ring size changed after put: n=%d want %d", p.n, p.max)
 	}
 	if p.head != (oldHead+1)&p.mask {
 		t.Fatalf("head did not advance past the expired slot: got %d want %d", p.head, (oldHead+1)&p.mask)
+	}
+	if p.demoted.Load() != before+1 {
+		t.Fatalf("demoted = %d, want %d after expired-head reuse", p.demoted.Load(), before+1)
 	}
 	resetClass(i)
 }
