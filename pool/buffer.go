@@ -22,13 +22,12 @@ const (
 
 	// bucketByteBudget caps how many bytes each size class may retain. The
 	// per-class buffer count is derived from it, so a 4 KiB class holds up to
-	// 512 buffers and a 32 KiB class holds up to 64 (2 MiB each).
-	bucketByteBudget = 2 << 20 // 2 MiB per size class
+	// 2048 buffers and a 32 KiB class holds up to 256 (8 MiB each).
+	bucketByteBudget = 2 << 22 // 8 MiB per size class
 
 	// maxBucketCount additionally caps the number of buffers per size class,
-	// so the tiniest classes don't retain an absurd number of entries (the
-	// byte budget alone would allow ~2M one-byte buffers).
-	maxBucketCount = 2048
+	// so the tiniest classes don't retain an absurd number of entries.
+	maxBucketCount = 4096
 
 	// smallClassSize is the largest size class served directly by sync.Pool
 	// instead of the GC-surviving ring. A ring entry is 32 bytes, so for
