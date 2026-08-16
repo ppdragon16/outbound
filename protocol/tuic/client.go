@@ -413,7 +413,12 @@ func (t *clientImpl) ListenPacketWithDialer(ctx context.Context, metadata *proto
 		udpRelayMode:          t.UdpRelayMode,
 		maxUdpRelayPacketSize: t.MaxUdpRelayPacketSize,
 		deferQuicConnFn:       t.deferQuicConn,
-		closeDeferFn:          nil,
+		// Remove the packet queue from the map when the association closes, so
+		// idle/finished UDP associations don't leak their Packets (and channel)
+		// for the lifetime of the QUIC connection.
+		closeDeferFn: func() {
+			t.udpIncomingPacketsMap.LoadAndDelete(connId)
+		},
 		// deFraggers is lazily initialized on first fragmented packet.
 	}
 	return pc, nil
