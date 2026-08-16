@@ -189,7 +189,13 @@ func (t *clientImpl) handleUniStream(quicConn quic.Connection) (err error) {
 					if val, ok := t.udpIncomingPacketsMap.Load(assocId); ok {
 						packets := val.(*Packets)
 						packets.PushBack(packet)
+					} else {
+						// Association already closed: release the pool-backed packet.
+						packet.Release()
 					}
+				} else {
+					// Not dispatching to a UDP association: release the packet.
+					packet.Release()
 				}
 			}
 			return nil
