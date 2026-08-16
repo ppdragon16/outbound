@@ -111,44 +111,26 @@ func (r *RingBuffer[T]) grow() {
 	r.headPos, r.tailPos, r.full = 0, len(oldRing), false
 }
 
-// ShrinkIfUnderutilized halves the ring capacity when the buffer is less than
-// a quarter full, down to minSize. It preserves every live element, so it is
-// safe to call at any time. Returns true if the capacity changed.
+// ShrinkIfEmpty resets the ring to its initial capacity when it holds no
+// elements. It is safe to call at any time and returns true if the capacity
+// changed.
 //
 // grow() only ever doubles the capacity, so a transient burst of in-flight
 // packets permanently pins the buffer at its peak size. The bandwidth
 // sampler's connectionStateMap grows this way and, without shrinking, would
-// hold the peak memory for the rest of the connection. This reclaims that
-// memory once the tracked-packet count drops back down.
-func (r *RingBuffer[T]) ShrinkIfUnderutilized() bool {
-	if r.full || len(r.ring) <= r.minSize {
+// hold the peak memory for the rest of the connection.
+//
+// Shrinking is deliberately restricted to the empty case: during active
+// congestion control the in-flight count oscillates freely, so any
+// utilization threshold would repeatedly shrink-and-regrow (allocation
+// thrash). The empty case corresponds to a genuinely idle connection, at
+// which point the peak can be reclaimed in one step with no element copy.
+func (r *RingBuffer[T]) ShrinkIfEmpty() bool {
+	if r.Len() != 0 || len(r.ring) <= r.minSize {
 		return false
 	}
-	n := r.Len()
-	// Only shrink below a quarter full, so brief dips don't cause grow/shrink
-	// churn (grow would double us right back up on the next burst).
-	if n*4 > len(r.ring) {
-		return false
-	}
-	newSize := max(r.minSize, len(r.ring)/2)
-	if newSize >= len(r.ring) {
-		return false
-	}
-	if n >= newSize {
-		return false // never drop live elements
-	}
-	oldRing := r.ring
-	r.ring = make([]T, newSize)
-	// Linearize the live window (which may wrap) into the front of the new ring.
-	first := len(oldRing) - r.headPos
-	if first > n {
-		first = n
-	}
-	copy(r.ring, oldRing[r.headPos:r.headPos+first])
-	copy(r.ring[first:], oldRing[:n-first])
-	r.headPos = 0
-	r.tailPos = n
-	r.full = false
+	r.ring = make([]T, r.minSize)
+	r.headPos, r.tailPos, r.full = 0, 0, false
 	return true
 }
 

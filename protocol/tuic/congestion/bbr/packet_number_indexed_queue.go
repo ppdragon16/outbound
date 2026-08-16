@@ -132,8 +132,6 @@ func (p *packetNumberIndexedQueue[T]) RemoveUpTo(packetNumber congestion.PacketN
 		p.firstPacket++
 	}
 	p.clearup()
-
-	return
 }
 
 // IsEmpty return if queue is empty.
@@ -175,10 +173,12 @@ func (p *packetNumberIndexedQueue[T]) clearup() {
 	}
 	if p.entries.Empty() {
 		p.firstPacket = invalidPacketNumber
+		// Reclaim peak capacity once the tracked-packet count drops to zero. The
+		// ring only ever grows; without this the sampler holds its burst-time
+		// memory forever. ShrinkIfEmpty only acts when the queue is fully drained,
+		// so it cannot thrash against grow() during active congestion control.
+		p.entries.ShrinkIfEmpty()
 	}
-	// Reclaim peak capacity after the tracked-packet count drops. The ring only
-	// ever grows; without this the sampler holds its burst-time memory forever.
-	p.entries.ShrinkIfUnderutilized()
 }
 
 func (p *packetNumberIndexedQueue[T]) getEntryWraper(packetNumber congestion.PacketNumber) *entryWrapper[T] {
