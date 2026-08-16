@@ -1,7 +1,6 @@
 package tuic
 
 import (
-	"errors"
 	"net"
 	"net/netip"
 	"sync"
@@ -284,8 +283,10 @@ func (q *quicStreamPacketConn) WriteToAddrPort(p []byte, ap netip.AddrPort) (n i
 			buf := buildPacketBuf(q.connId, pktId, 1, 0, p, ap)
 			err = q.quicConn.SendDatagram(buf)
 			pool.PutBuffer(buf)
-			var tooLarge *quic.DatagramTooLargeError
-			if errors.As(err, &tooLarge) {
+			// SendDatagram returns *DatagramTooLargeError directly (unwrapped);
+			// use a type assertion instead of errors.As to avoid the per-send
+			// interface-boxing allocation that errors.As(err, &target) incurs.
+			if tooLarge, ok := err.(*quic.DatagramTooLargeError); ok {
 				err = fragWriteNative(q.quicConn, q.connId, pktId, ap, p, int(tooLarge.MaxDataLen)-PacketOverHead)
 			}
 			if err != nil {
