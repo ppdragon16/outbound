@@ -176,6 +176,9 @@ func (p *packetNumberIndexedQueue[T]) clearup() {
 	if p.entries.Empty() {
 		p.firstPacket = invalidPacketNumber
 	}
+	// Reclaim peak capacity after the tracked-packet count drops. The ring only
+	// ever grows; without this the sampler holds its burst-time memory forever.
+	p.entries.ShrinkIfUnderutilized()
 }
 
 func (p *packetNumberIndexedQueue[T]) getEntryWraper(packetNumber congestion.PacketNumber) *entryWrapper[T] {
