@@ -118,8 +118,9 @@ func (u *udpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (n int, err error
 		return 0, io.ErrClosedPipe
 	default:
 	}
-	// Try no frag first
-	msg := &protocol.UDPMessage{
+	// Try no frag first. msg is a stack value: the whole serialize/fragment
+	// chain takes UDPMessage by value (read-only), so it never escapes.
+	msg := protocol.UDPMessage{
 		SessionID: u.ID,
 		PacketID:  0,
 		FragID:    0,
@@ -135,7 +136,7 @@ func (u *udpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (n int, err error
 		msg.PacketID = uint16(rand.Intn(0xFFFF)) + 1
 		fMsgs := frag.FragUDPMessage(msg, int(errTooLarge.MaxDataLen))
 		for _, fMsg := range fMsgs {
-			err := u.WritePacket(buf, &fMsg)
+			err := u.WritePacket(buf, fMsg)
 			if err != nil {
 				return 0, oops.Wrapf(err, "failed to send fragment")
 			}
@@ -145,7 +146,7 @@ func (u *udpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (n int, err error
 	return len(b), oops.Wrapf(err, "failed to SendDatagram")
 }
 
-func (u *udpConn) WritePacket(buf []byte, msg *protocol.UDPMessage) error {
+func (u *udpConn) WritePacket(buf []byte, msg protocol.UDPMessage) error {
 	msgN := msg.Serialize(buf)
 	if msgN < 0 {
 		return &quic.DatagramTooLargeError{MaxDataLen: int64(len(buf))}

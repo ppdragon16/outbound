@@ -180,16 +180,16 @@ type UDPMessage struct {
 	DataBuf []byte
 }
 
-func (m *UDPMessage) HeaderSize() int {
+func (m UDPMessage) HeaderSize() int {
 	lAddr := addrPortStrLen(m.AddrPort)
 	return 4 + 2 + 1 + 1 + int(quicvarint.Len(uint64(lAddr))) + lAddr
 }
 
-func (m *UDPMessage) Size() int {
+func (m UDPMessage) Size() int {
 	return m.HeaderSize() + len(m.Data)
 }
 
-func (m *UDPMessage) Serialize(buf []byte) int {
+func (m UDPMessage) Serialize(buf []byte) int {
 	// Make sure the buffer is big enough
 	if len(buf) < m.Size() {
 		return -1
