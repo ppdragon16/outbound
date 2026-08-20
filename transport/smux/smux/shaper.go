@@ -23,7 +23,6 @@
 package smux
 
 import (
-	"container/list"
 	"sync"
 	"sync/atomic"
 )
@@ -89,15 +88,14 @@ var streamQueuePool = sync.Pool{
 type shaperQueue struct {
 	count   int64 // atomic counter for fast Len() and IsEmpty()
 	streams map[uint32]*streamQueue
-	rrList  *list.List    // list of sid (RR queue)
-	next    *list.Element // next node to pop
+	rr      []uint32 // round-robin order of sids; 0 = drained (tombstone)
+	rrPos   int      // next index to pop
 	mu      sync.Mutex
 }
 
 func NewShaperQueue() *shaperQueue {
 	return &shaperQueue{
 		streams: make(map[uint32]*streamQueue),
-		rrList:  list.New(),
 	}
 }
 
@@ -111,10 +109,7 @@ func (sq *shaperQueue) Push(req writeRequest) {
 		q := streamQueuePool.Get().(*streamQueue)
 		q.reset()
 		sq.streams[sid] = q
-		elem := sq.rrList.PushBack(sid)
-		if sq.next == nil {
-			sq.next = elem
-		}
+		sq.rr = append(sq.rr, sid)
 	}
 
 	sq.streams[sid].push(req)
@@ -126,50 +121,59 @@ func (sq *shaperQueue) Pop() (req writeRequest, ok bool) {
 	sq.mu.Lock()
 	defer sq.mu.Unlock()
 
-	if sq.next == nil || atomic.LoadInt64(&sq.count) == 0 {
+	if atomic.LoadInt64(&sq.count) == 0 {
 		return writeRequest{}, false
 	}
 
-	start := sq.next
-	current := start
+	// Compact tombstones when more than half of rr is dead, keeping the scan
+	// bounded. Round-robin order is approximate, so resetting the cursor is fine.
+	if len(sq.rr) > 2*len(sq.streams)+16 {
+		sq.compact()
+	}
 
-	for {
-		sid := current.Value.(uint32)
+	n := len(sq.rr)
+	if n == 0 {
+		return writeRequest{}, false
+	}
+
+	for i := 0; i < n; i++ {
+		idx := (sq.rrPos + i) % n
+		sid := sq.rr[idx]
+		if sid == 0 {
+			continue
+		}
 		q := sq.streams[sid]
-
-		if !q.empty() {
-			req, _ := q.pop()
-			atomic.AddInt64(&sq.count, -1)
-
-			// advance round-robin cursor
-			next := current.Next()
-			if next == nil {
-				next = sq.rrList.Front()
-			}
-			sq.next = next
-
-			if q.empty() {
-				delete(sq.streams, sid)
-				sq.rrList.Remove(current)
-				q.reset()
-				streamQueuePool.Put(q)
-				if sq.rrList.Len() == 0 {
-					sq.next = nil
-				}
-			}
-			return req, true
+		if q == nil || q.empty() {
+			continue
 		}
 
-		current = current.Next()
-		if current == nil {
-			current = sq.rrList.Front()
+		req, _ = q.pop()
+		atomic.AddInt64(&sq.count, -1)
+		sq.rrPos = (idx + 1) % n
+
+		if q.empty() {
+			delete(sq.streams, sid)
+			sq.rr[idx] = 0 // tombstone
+			q.reset()
+			streamQueuePool.Put(q)
 		}
-		if current == start {
-			break
-		}
+		return req, true
 	}
 
 	return writeRequest{}, false
+}
+
+// compact drops tombstoned entries and resets the round-robin cursor.
+func (sq *shaperQueue) compact() {
+	j := 0
+	for _, sid := range sq.rr {
+		if sid != 0 {
+			sq.rr[j] = sid
+			j++
+		}
+	}
+	sq.rr = sq.rr[:j]
+	sq.rrPos = 0
 }
 
 // IsEmpty checks if the shaperQueue is empty.
