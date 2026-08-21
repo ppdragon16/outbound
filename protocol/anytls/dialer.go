@@ -333,9 +333,10 @@ func (d *Dialer) idleCleanupLoop() {
 func (d *Dialer) cleanupIdleSessions() {
 	expireTime := time.Now().Add(-d.idleSessionTimeout)
 
+	// Collect expired and non-expired sessions under the lock, then release it
+	// before the slow work (sorting, closing) so a burst of closes doesn't
+	// hold d.mu and starve manageSession / removeStream.
 	d.mu.Lock()
-
-	// Collect expired sessions and count non-expired; clean dead entries.
 	var expired []*session
 	nonExpired := 0
 	for seq, s := range d.idleSessions {
@@ -352,19 +353,16 @@ func (d *Dialer) cleanupIdleSessions() {
 			nonExpired++
 		}
 	}
+	d.mu.Unlock()
 
-	if d.minIdleSession <= 0 || nonExpired >= d.minIdleSession {
-		// Enough non-expired — close all expired.
-		for _, s := range expired {
-			delete(d.idleSessions, s.seq)
-		}
-		d.mu.Unlock()
-		for _, s := range expired {
-			s.Close()
-		}
-	} else {
-		// Need to keep some expired; protect the lowest-latency ones
-		// so the pool skews toward faster connections over time.
+	if len(expired) == 0 {
+		return
+	}
+
+	// Decide which expired sessions to keep (protect the lowest-latency ones)
+	// when the pool would otherwise fall below minIdleSession.
+	var toKeep []*session
+	if d.minIdleSession > 0 && nonExpired < d.minIdleSession {
 		slices.SortFunc(expired, func(a, b *session) int {
 			if a.dialLatency < b.dialLatency {
 				return -1
@@ -375,17 +373,24 @@ func (d *Dialer) cleanupIdleSessions() {
 			return 0
 		})
 		n := min(d.minIdleSession-nonExpired, len(expired))
-		for i, s := range expired {
-			if i < n {
-				s.idleSince = time.Now() // protect the fastest
-			} else {
-				delete(d.idleSessions, s.seq)
-			}
-		}
-		d.mu.Unlock()
-		for _, s := range expired[n:] {
-			s.Close()
-		}
+		toKeep = expired[:n]
+		expired = expired[n:]
+	}
+
+	// Remove the closing sessions from the pool and refresh the kept ones'
+	// idle timestamps under a brief lock.
+	d.mu.Lock()
+	for _, s := range expired {
+		delete(d.idleSessions, s.seq)
+	}
+	for _, s := range toKeep {
+		s.idleSince = time.Now() // protect the fastest
+	}
+	d.mu.Unlock()
+
+	// Close outside the lock.
+	for _, s := range expired {
+		s.Close()
 	}
 }
 

@@ -141,10 +141,11 @@ func (s *session) removeStream(sid uint32) {
 	if s.closed.Load() {
 		return
 	}
-	select {
-	case s.closeStreamChan <- sid:
-	default:
-	}
+	// Blocking send: a dropped notification would leave the session idle but
+	// untracked (never added to idleSessions), so cleanupIdleSessions would
+	// never reap it. manageSession is always draining, so this never blocks
+	// for long.
+	s.closeStreamChan <- sid
 }
 
 func (s *session) run() error {
