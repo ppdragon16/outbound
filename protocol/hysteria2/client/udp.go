@@ -169,7 +169,18 @@ func (u *udpConn) Close() error {
 	u.receiveMu.Lock()
 	u.D.Close()
 	u.receiveMu.Unlock()
-	return nil
+	// Drain datagrams still queued for this session and return their pooled
+	// buffers. connMap.Delete happened above, so no new feed() can target this
+	// session; anything left in ReceiveCh will never be read again and would
+	// otherwise leak its pool buffer (up to udpMessageChanSize per session).
+	for {
+		select {
+		case buf := <-u.ReceiveCh:
+			pool.PutBuffer(buf)
+		default:
+			return nil
+		}
+	}
 }
 
 func (u *udpConn) SetDeadline(t time.Time) error {
