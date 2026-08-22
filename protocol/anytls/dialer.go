@@ -31,7 +31,8 @@ type Dialer struct {
 	sessionCounter atomic.Uint64
 
 	mu           sync.Mutex
-	idleSessions map[uint64]*session
+	sessions     map[uint64]*session // all live sessions (idle + active)
+	idleSessions map[uint64]*session // idle pool, a subset of sessions
 
 	idleSessionCheckInterval time.Duration
 	idleSessionTimeout       time.Duration
@@ -93,6 +94,7 @@ func NewDialer(ParentDialer netproxy.Dialer, header protocol.Header) (netproxy.D
 			// obfuscation layer; security comes from the anytls key.
 			CurvePreferences: []utls.CurveID{utls.X25519},
 		},
+		sessions:                 make(map[uint64]*session),
 		idleSessions:             make(map[uint64]*session),
 		idleSessionCheckInterval: checkInterval,
 		idleSessionTimeout:       idleTimeout,
@@ -226,6 +228,10 @@ func (d *Dialer) createSession(ctx context.Context) (*session, error) {
 	s.idleSince = time.Now()
 	s.dialLatency = time.Since(start)
 
+	d.mu.Lock()
+	d.sessions[seq] = s
+	d.mu.Unlock()
+
 	go d.manageSession(s, seq)
 	go s.run()
 	s.startHeartbeat()
@@ -311,6 +317,7 @@ func (d *Dialer) manageSession(s *session, seq uint64) {
 	// closeStreamChan was closed → session is dead, clean up.
 	d.mu.Lock()
 	delete(d.idleSessions, seq)
+	delete(d.sessions, seq)
 	d.mu.Unlock()
 }
 
@@ -399,9 +406,17 @@ func (d *Dialer) cleanupIdleSessions() {
 func (d *Dialer) Disconnect() error {
 	d.cancel()
 
+	// Close every live session — idle AND active. Closing only idleSessions
+	// leaked sessions that still had open streams when the dialer was removed
+	// (e.g. via update-sub): AbortConns closes the streams, but the session's
+	// idleSessions insertion happens on the manageSession goroutine, so it can
+	// race with this loop.
 	d.mu.Lock()
-	for seq, s := range d.idleSessions {
+	for seq, s := range d.sessions {
 		s.Close()
+		delete(d.sessions, seq)
+	}
+	for seq := range d.idleSessions {
 		delete(d.idleSessions, seq)
 	}
 	d.mu.Unlock()
