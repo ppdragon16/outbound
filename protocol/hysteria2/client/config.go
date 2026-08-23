@@ -24,7 +24,12 @@ const (
 )
 
 type Config struct {
-	Addr            net.Addr
+	// Addrs is the list of candidate server addresses (all resolved IPs for
+	// the server host, sorted IPv4-first). The Client races a QUIC handshake
+	// across them and keeps the first that succeeds. All entries share the
+	// same concrete type: *net.UDPAddr for a single port, or
+	// *udphop.UDPHopAddr for a port-hopping range.
+	Addrs           []net.Addr
 	NextDialer      netproxy.Dialer
 	Auth            string
 	TLSConfig       utls.Config
@@ -45,6 +50,9 @@ func (c *Config) verifyAndFill() error {
 	}
 	if c.NextDialer == nil {
 		return oops.In("Hysteria2 Config Verify").With("field", "NextDialer").With("reason", "must be set").New("invalid config")
+	}
+	if len(c.Addrs) == 0 {
+		return oops.In("Hysteria2 Config Verify").With("field", "Addrs").With("reason", "must be non-empty").New("invalid config")
 	}
 	if c.QUICConfig.InitialStreamReceiveWindow == 0 {
 		c.QUICConfig.InitialStreamReceiveWindow = defaultStreamReceiveWindow

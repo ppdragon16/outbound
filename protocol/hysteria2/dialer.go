@@ -57,9 +57,9 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 
 	var err error
 	if isPortHoppingPort(port) {
-		config.Addr, err = udphop.ResolveUDPHopAddr(net.JoinHostPort(host, port))
+		config.Addrs, err = udphop.ResolveUDPHopAddrs(net.JoinHostPort(host, port))
 	} else {
-		config.Addr, err = common.ResolveUDPAddr(net.JoinHostPort(host, port))
+		config.Addrs, err = common.ResolveUDPAddrs(net.JoinHostPort(host, port))
 	}
 	if err != nil {
 		return nil, err

@@ -94,6 +94,34 @@ func ResolveUDPHopAddr(addr string) (*UDPHopAddr, error) {
 	}, nil
 }
 
+// ResolveUDPHopAddrs resolves addr (host:port-range) to all of its IPs as
+// UDPHopAddr candidates, sorted IPv4-first. Used for happy-eyeballs racing of
+// a port-hopping dialer: each candidate races its own random-port handshake.
+func ResolveUDPHopAddrs(addr string) ([]net.Addr, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := common.ResolveIPAddrs(host)
+	if err != nil {
+		return nil, err
+	}
+
+	pu := ParsePortUnion(portStr)
+	if pu == nil {
+		return nil, InvalidPortError{portStr}
+	}
+	out := make([]net.Addr, 0, len(ips))
+	for i := range ips {
+		out = append(out, &UDPHopAddr{
+			IP:      ips[i].IP,
+			Ranges:  pu,
+			PortStr: portStr,
+		})
+	}
+	return out, nil
+}
+
 // PortUnion is a collection of multiple port ranges.
 type PortUnion []PortRange
 

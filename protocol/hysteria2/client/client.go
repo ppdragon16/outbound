@@ -172,6 +172,88 @@ const (
 	handshakeAttemptTimeout = 2500 * time.Millisecond
 )
 
+// dialOutcome is the result of dialing a single candidate address.
+type dialOutcome struct {
+	pktConn net.PacketConn
+	conn    quic.EarlyConnection
+	resp    *http.Response // non-nil on success; consumed by applyPostHandshake or teardown
+	err     error
+}
+
+// raceDial runs dial for every candidate address concurrently (happy-eyeballs)
+// and returns the first success. A single unbuffered channel carries results:
+// the first success read wins. Every other candidate either fails (its dial
+// closes its own pktConn on error) or succeeds-and-loses — in which case its
+// goroutine self-tears-down via the raceCtx.Done() branch, because once the
+// winner returns nobody is left to receive from the unbuffered channel.
+//
+// raceCtx is derived from ctx (the dial budget) so the losers are also
+// cancelled if the budget expires; the extra derivation is what lets us signal
+// "the race is over" as soon as a winner is found, independent of when the
+// caller cancels ctx. Using ctx.Done() directly would leave a loser blocked
+// forever if ctx has no deadline (e.g. context.Background()).
+func raceDial(ctx context.Context, addrs []net.Addr, dial func(context.Context, net.Addr) dialOutcome) dialOutcome {
+	if len(addrs) == 1 {
+		return dial(ctx, addrs[0])
+	}
+
+	raceCtx, raceCancel := context.WithCancel(ctx)
+	defer raceCancel()
+
+	results := make(chan dialOutcome) // unbuffered: a loser with no receiver self-tears-down
+	for _, addr := range addrs {
+		go func(addr net.Addr) {
+			r := dial(raceCtx, addr)
+			select {
+			case results <- r:
+			case <-raceCtx.Done():
+				// A winner already emerged (or the budget expired); nobody
+				// will receive r, so tear down a successful candidate.
+				if r.err == nil {
+					teardownDialOutcome(r)
+				}
+			}
+		}(addr)
+	}
+
+	var firstErr error
+	for range addrs {
+		select {
+		case r := <-results:
+			if r.err == nil {
+				// Winner. Return immediately; defer raceCancel() unblocks the
+				// remaining candidates, which self-tear-down.
+				return r
+			}
+			if firstErr == nil {
+				firstErr = r.err
+			}
+		case <-ctx.Done():
+			if firstErr != nil {
+				return dialOutcome{err: firstErr}
+			}
+			return dialOutcome{err: ctx.Err()}
+		}
+	}
+	if firstErr != nil {
+		return dialOutcome{err: firstErr}
+	}
+	return dialOutcome{err: ctx.Err()}
+}
+
+// teardownDialOutcome closes a successful-but-unused dial outcome.
+func teardownDialOutcome(r dialOutcome) {
+	if r.resp != nil {
+		r.resp.Body.Close()
+	}
+	if r.conn != nil {
+		r.conn.CloseWithError(closeErrCodeProtocolError, "")
+	}
+	if r.pktConn != nil {
+		r.pktConn.Close()
+	}
+}
+
 func (c *Client) Connect() (err error) {
 	// Tear down any existing connection while holding the lock.
 	c.mu.Lock()
@@ -196,84 +278,104 @@ func (c *Client) Connect() (err error) {
 		c.mu.Unlock()
 	}()
 
-	var pktConn net.PacketConn
-	var conn quic.EarlyConnection
-	if c.config.Addr.Network() != "udphop" {
-		pktConn, conn, err = c.connectSinglePort(ctx)
+	var outcome dialOutcome
+	if c.config.Addrs[0].Network() != "udphop" {
+		outcome = c.connectSinglePort(ctx)
 	} else {
-		pktConn, conn, err = c.connectPortHopping(ctx)
+		outcome = c.connectPortHopping(ctx)
 	}
-	if err != nil {
+	if outcome.err != nil {
+		err = outcome.err
 		return err
 	}
 
-	// Commit the new connection state under the lock.
+	// Apply post-handshake config to the single winner. This runs outside the
+	// race so it's only ever applied to the winner, never by concurrent losers.
+	udpSM, aerr := c.applyPostHandshake(outcome.resp, outcome.conn)
+	if aerr != nil {
+		outcome.pktConn.Close()
+		outcome.conn.CloseWithError(closeErrCodeProtocolError, "")
+		err = aerr
+		return err
+	}
+
+	// Commit the new connection state atomically under the lock, so a
+	// concurrent Alive/Disconnect never observes a half-committed state.
 	c.mu.Lock()
-	c.pktConn = pktConn
-	c.conn = conn
+	c.pktConn = outcome.pktConn
+	c.conn = outcome.conn
+	c.udpSM = udpSM
 	c.mu.Unlock()
 
 	return nil
 }
 
-// connectSinglePort performs one handshake on a non-port-hopping address.
-// No retry: if the single port doesn't work, the user must fix the URL.
-// On success returns the live pktConn and quic connection; the caller
-// commits them under the Client lock.
-func (c *Client) connectSinglePort(ctx context.Context) (pktConn net.PacketConn, conn quic.EarlyConnection, err error) {
+// connectSinglePort races a single handshake across all candidate addresses
+// (happy-eyeballs). No retry per address: if a single port doesn't work on any
+// address, the user must fix the URL. On success returns the winner's pktConn
+// and quic connection; the caller commits them under the Client lock.
+func (c *Client) connectSinglePort(ctx context.Context) dialOutcome {
+	return raceDial(ctx, c.config.Addrs, c.dialSinglePortAddr)
+}
+
+// dialSinglePortAddr performs one handshake on one non-port-hopping address.
+// On error it closes its own pktConn before returning.
+func (c *Client) dialSinglePortAddr(ctx context.Context, addr net.Addr) dialOutcome {
 	attemptCtx, attemptCancel := context.WithTimeout(ctx, handshakeAttemptTimeout)
 	defer attemptCancel()
 
-	pktConn, err = c.config.NextDialer.ListenPacket(attemptCtx, c.config.Addr.String())
+	pktConn, err := c.config.NextDialer.ListenPacket(attemptCtx, addr.String())
 	if err != nil {
-		return nil, nil, err
+		return dialOutcome{err: err}
 	}
 	if c.config.ObfsPassword != "" {
-		pktConn, err = obfs.WrapPacketConnSalamander(pktConn, []byte(c.config.ObfsPassword))
-		if err != nil {
-			return nil, nil, err
+		wrapped, werr := obfs.WrapPacketConnSalamander(pktConn, []byte(c.config.ObfsPassword))
+		if werr != nil {
+			pktConn.Close()
+			return dialOutcome{err: werr}
 		}
+		pktConn = wrapped
 	}
-	// Capture pktConn in a local so the deferred cleanup is immune to
-	// named-return-value reassignment (e.g. "return nil, nil, herr"
-	// sets pktConn=nil before the defer runs).
-	cleanupPktConn := pktConn
-	defer func() {
-		if err != nil {
-			cleanupPktConn.Close()
-		}
-	}()
 
-	conn, resp, herr := c.tryHandshake(attemptCtx, pktConn, c.config.Addr)
+	conn, resp, herr := c.tryHandshake(attemptCtx, pktConn, addr)
 	if herr != nil {
-		return nil, nil, herr
+		pktConn.Close()
+		return dialOutcome{err: herr}
 	}
 
-	return pktConn, conn, c.applyPostHandshake(resp, conn)
+	return dialOutcome{pktConn: pktConn, conn: conn, resp: resp}
 }
 
-// connectPortHopping retries the QUIC handshake up to handshakeMaxAttempts
-// times, each on a freshly-constructed udphop (which re-rolls a random
-// port from the range). The first attempt that completes wins; on failure
-// we close the previous pktConn (releasing its UDP socket and terminating
-// its QUIC connection) before the next attempt.
-// On success returns the live pktConn and quic connection; the caller
-// commits them under the Client lock.
-func (c *Client) connectPortHopping(ctx context.Context) (pktConn net.PacketConn, conn quic.EarlyConnection, err error) {
-	udpHopAddr, ok := c.config.Addr.(*udphop.UDPHopAddr)
-	if !ok {
-		return nil, nil, oops.In("HTTP3 Handshake").
-			New("hysteria2: port-hopping address has unexpected type")
-	}
+// connectPortHopping races the port-hopping handshake across all candidate
+// addresses (happy-eyeballs). Each address runs the retry loop independently,
+// re-rolling a random port on every attempt. The first address whose handshake
+// completes wins; the others are torn down.
+func (c *Client) connectPortHopping(ctx context.Context) dialOutcome {
+	return raceDial(ctx, c.config.Addrs, func(ctx context.Context, addr net.Addr) dialOutcome {
+		udpHopAddr, ok := addr.(*udphop.UDPHopAddr)
+		if !ok {
+			return dialOutcome{err: oops.In("HTTP3 Handshake").
+				New("hysteria2: port-hopping address has unexpected type")}
+		}
+		return c.dialPortHoppingAddr(ctx, udpHopAddr)
+	})
+}
 
-	// The dialFunc captured by udphop outlives a single attempt: the
-	// hop goroutine invokes it on every periodic hop, so it uses the
-	// outer ctx rather than any per-attempt budget. The QUIC handshake
-	// itself is bounded by attemptCtx below.
+// dialPortHoppingAddr retries the QUIC handshake up to handshakeMaxAttempts
+// times on a single port-hopping address, each attempt re-rolling a random
+// port from the range. On error it closes its own pktConn before returning.
+func (c *Client) dialPortHoppingAddr(ctx context.Context, udpHopAddr *udphop.UDPHopAddr) dialOutcome {
+	// The dialFunc captured by udphop outlives the handshake budget: the hop
+	// goroutine invokes it on every periodic hop for the lifetime of the
+	// connection. It must NOT capture ctx (the race/dial budget), which is
+	// cancelled as soon as the race concludes — that would silently stop all
+	// future port hops. UDP dialing is non-blocking, so a background context
+	// is safe: the hop loop itself is bounded by the udphop's own ctx.
 	dialFunc := func(addr net.Addr) (net.Conn, error) {
-		return c.config.NextDialer.DialContext(ctx, "udp", addr.String())
+		return c.config.NextDialer.DialContext(context.Background(), "udp", addr.String())
 	}
 
+	var pktConn net.PacketConn
 	var lastErr error
 	for range handshakeMaxAttempts {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -291,6 +393,7 @@ func (c *Client) connectPortHopping(ctx context.Context) (pktConn net.PacketConn
 
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, handshakeAttemptTimeout)
 
+		var err error
 		pktConn, err = udphop.NewUDPHopPacketConn(
 			udpHopAddr,
 			c.config.UDPHopInterval,
@@ -306,13 +409,14 @@ func (c *Client) connectPortHopping(ctx context.Context) (pktConn net.PacketConn
 			if oerr != nil {
 				attemptCancel()
 				pktConn.Close()
+				pktConn = nil
 				lastErr = oerr
 				continue
 			}
 			pktConn = opc
 		}
 
-		conn, resp, herr := c.tryHandshake(attemptCtx, pktConn, c.config.Addr)
+		conn, resp, herr := c.tryHandshake(attemptCtx, pktConn, udpHopAddr)
 		attemptCancel()
 		if herr != nil {
 			lastErr = herr
@@ -321,20 +425,22 @@ func (c *Client) connectPortHopping(ctx context.Context) (pktConn net.PacketConn
 			continue
 		}
 
-		// Handshake succeeded — commit and apply post-handshake config.
-		return pktConn, conn, c.applyPostHandshake(resp, conn)
+		// Handshake succeeded — return the outcome. applyPostHandshake runs
+		// once on the race winner (outside the race) to avoid concurrent
+		// access to c.udpSM.
+		return dialOutcome{pktConn: pktConn, conn: conn, resp: resp}
 	}
 
 	if lastErr != nil {
-		return nil, nil, oops.In("HTTP3 Handshake").
+		return dialOutcome{err: oops.In("HTTP3 Handshake").
 			With("attempts", handshakeMaxAttempts).
 			With("portHopping", true).
-			Wrap(lastErr)
+			Wrap(lastErr)}
 	}
-	return nil, nil, oops.In("HTTP3 Handshake").
+	return dialOutcome{err: oops.In("HTTP3 Handshake").
 		With("attempts", handshakeMaxAttempts).
 		With("portHopping", true).
-		New("hysteria2: no port in range responded within dial budget")
+		New("hysteria2: no port in range responded within dial budget")}
 }
 
 // tryHandshake performs one QUIC dial + auth HTTP roundtrip on the given
@@ -383,9 +489,11 @@ func (c *Client) tryHandshake(ctx context.Context, pktConn net.PacketConn, remot
 }
 
 // applyPostHandshake configures congestion control and the optional UDP
-// session manager based on the auth response. Called after a successful
-// handshake before c.conn has been committed.
-func (c *Client) applyPostHandshake(resp *http.Response, conn quic.Connection) error {
+// session manager based on the auth response. It returns the newly-created
+// session manager (nil when UDP is disabled) so the caller can commit it
+// atomically with the connection under the client lock — writing c.udpSM here
+// would race with Alive/Disconnect/ListenPacket, which read it under the lock.
+func (c *Client) applyPostHandshake(resp *http.Response, conn quic.Connection) (udpSM *udpSessionManager, err error) {
 	authResp := protocol.AuthResponseFromHeader(resp.Header)
 	var actualTx uint64
 	if authResp.RxAuto {
@@ -409,10 +517,9 @@ func (c *Client) applyPostHandshake(resp *http.Response, conn quic.Connection) e
 	resp.Body.Close()
 
 	if authResp.UDPEnabled {
-		c.udpSM = newUDPSessionManager(conn)
+		udpSM = newUDPSessionManager(conn)
 	}
-
-	return nil
+	return udpSM, nil
 }
 
 func (c *Client) Disconnect() error {
