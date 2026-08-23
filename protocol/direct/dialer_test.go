@@ -103,20 +103,18 @@ func TestTryCachedIPs_FallbackToNextIP(t *testing.T) {
 	cacheKey := "test.example.com:" + fmt.Sprint(goodPort)
 	d.dnsCache[cacheKey] = entry
 
-	// tryCachedIPs should fail on ips[0], fall back to ips[1], succeed.
+	// tryCachedIPs races both addrs; the reachable one wins.
 	ctx := context.Background()
-	conn, err := d.tryCachedIPs(ctx, "tcp", entry)
+	conn, err := d.tryCachedIPs(ctx, "tcp", cacheKey, entry)
 	if err != nil {
-		t.Fatalf("tryCachedIPs should have succeeded via fallback addr: %v", err)
+		t.Fatalf("tryCachedIPs should have succeeded via the reachable addr: %v", err)
 	}
 	conn.Close()
 
-	// Failed addr trimmed; ips[0] is now the working addr.
-	if entry.ips[0] != goodAddr {
-		t.Errorf("expected ips[0]=%s, got %s", goodAddr, entry.ips[0])
-	}
-	if len(entry.ips) != 1 {
-		t.Errorf("expected 1 remaining addr after trim, got %d: %v", len(entry.ips), entry.ips)
+	// Winner reordered first (the failed addr remains as fallback).
+	cached := d.dnsCache[cacheKey]
+	if cached == nil || cached.ips[0] != goodAddr {
+		t.Errorf("expected ips[0]=%s, got %v", goodAddr, cached)
 	}
 }
 
@@ -135,7 +133,7 @@ func TestTryCachedIPs_AllFailInvalidates(t *testing.T) {
 
 	entry := d.dnsCache["bad.example.com:443"]
 	ctx := context.Background()
-	_, err := d.tryCachedIPs(ctx, "tcp", entry)
+	_, err := d.tryCachedIPs(ctx, "tcp", "bad.example.com:443", entry)
 	if err == nil {
 		t.Fatal("expected all cached addrs to fail")
 	}

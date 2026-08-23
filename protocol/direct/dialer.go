@@ -2,7 +2,6 @@ package direct
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -10,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 )
 
@@ -36,13 +36,6 @@ type directDialer struct {
 	dnsCache         map[string]*dnsCacheEntry // keyed by "host:port"
 	dnsCacheMu       sync.RWMutex
 }
-
-const (
-	// perIpDialTimeout is the timeout for each fallback IP dial attempt.
-	// The first (cached) IP uses the full context deadline; subsequent
-	// fallback attempts use this shorter timeout to fail fast on blocked IPs.
-	perIpDialTimeout = 3 * time.Second
-)
 
 type dnsCacheEntry struct {
 	ips      []string // remaining "ip:port" addrs to try; ips[0] is next
@@ -113,9 +106,9 @@ func (d *directDialer) Disconnect() error {
 }
 
 // DialContext dials a network address. If the address is a domain name, it
-// resolves all IPs and tries them sequentially until one succeeds. The first
-// working IP is cached so that subsequent calls use the same IP (important for
-// mux and for consistency with connectivity checks).
+// resolves all IPs and races them concurrently (happy-eyeballs) until one
+// succeeds. The winning IP is cached first so subsequent calls prefer it
+// (important for mux and for consistency with connectivity checks).
 func (d *directDialer) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
 	if network != "tcp" && network != "udp" {
 		return nil, fmt.Errorf("%w: %v", netproxy.UnsupportedTunnelTypeError, network)
@@ -134,7 +127,7 @@ func (d *directDialer) DialContext(ctx context.Context, network, addr string) (c
 	return d.dialDomain(ctx, network, addr)
 }
 
-// dialDomain tries to dial addr (a "host:port" string). Phase 1 attempts
+// dialDomain tries to dial addr (a "host:port" string). Phase 1 races the
 // cached IPs; if they all fail the cache is invalidated and Phase 2
 // re-resolves DNS.
 func (d *directDialer) dialDomain(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -144,7 +137,7 @@ func (d *directDialer) dialDomain(ctx context.Context, network, addr string) (ne
 
 	if ok {
 		if time.Now().Before(entry.expireAt) {
-			if conn, err := d.tryCachedIPs(ctx, network, entry); err == nil {
+			if conn, err := d.tryCachedIPs(ctx, network, addr, entry); err == nil {
 				return conn, nil
 			}
 		}
@@ -153,44 +146,14 @@ func (d *directDialer) dialDomain(ctx context.Context, network, addr string) (ne
 	return d.resolveAndDial(ctx, network, addr)
 }
 
-// dialContextWithTimeout dials with an optional per-attempt timeout. When
-// timeout would extend beyond the existing context deadline it is ignored,
-// so the caller's deadline is always respected.
-func (d *directDialer) dialContextWithTimeout(ctx context.Context, network, addr string, timeout time.Duration) (net.Conn, error) {
-	existingDeadline, _ := ctx.Deadline()
-	if timeout > 0 && time.Now().Add(timeout).Before(existingDeadline) {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-	return d.dialer.DialContext(ctx, network, addr)
+// tryCachedIPs races the cached ip:port addrs concurrently; the winner is
+// re-cached first by raceIPs.
+func (d *directDialer) tryCachedIPs(ctx context.Context, network, addr string, entry *dnsCacheEntry) (net.Conn, error) {
+	return d.raceIPs(ctx, network, addr, entry.ips)
 }
 
-// tryCachedIPs tries each ip:port in the cached entry sequentially.
-func (d *directDialer) tryCachedIPs(ctx context.Context, network string, entry *dnsCacheEntry) (conn net.Conn, err error) {
-	var netErr net.Error
-	for i, ipAddr := range entry.ips {
-		if i == 0 {
-			conn, err = d.dialer.DialContext(ctx, network, ipAddr)
-		} else {
-			conn, err = d.dialContextWithTimeout(ctx, network, ipAddr, perIpDialTimeout)
-		}
-		if err == nil {
-			// Trim failed addrs; ips[0] is now the working addr.
-			d.dnsCacheMu.Lock()
-			entry.ips = entry.ips[i:]
-			entry.expireAt = time.Now().Add(d.option.CacheTTL)
-			d.dnsCacheMu.Unlock()
-			break
-		} else if !errors.As(err, &netErr) {
-			break
-		}
-	}
-	return conn, err
-}
-
-// resolveAndDial resolves the host in addr to all IPs and tries each
-// ip:port sequentially.
+// resolveAndDial resolves the host in addr to all IPs and races the dial
+// across them.
 func (d *directDialer) resolveAndDial(ctx context.Context, network, addr string) (conn net.Conn, err error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -205,23 +168,56 @@ func (d *directDialer) resolveAndDial(ctx context.Context, network, addr string)
 		ips[i] = net.JoinHostPort(ip, port)
 	}
 
-	for i, ipAddr := range ips {
-		if i == 0 {
-			conn, err = d.dialer.DialContext(ctx, network, ipAddr)
-		} else {
-			conn, err = d.dialContextWithTimeout(ctx, network, ipAddr, perIpDialTimeout)
+	return d.raceIPs(ctx, network, addr, ips)
+}
+
+// raceIPs races the TCP/UDP dial across all candidate ip:port addrs
+// concurrently (happy-eyeballs) and caches the winner first, so subsequent
+// dials of the same addr prefer the previously-working IP (important for mux
+// and connectivity-check consistency).
+func (d *directDialer) raceIPs(ctx context.Context, network, addr string, ips []string) (net.Conn, error) {
+	addrs := make([]net.Addr, 0, len(ips))
+	for _, s := range ips {
+		a, err := net.ResolveUDPAddr("udp", s)
+		if err != nil {
+			return nil, err
 		}
-		if err == nil {
-			d.dnsCacheMu.Lock()
-			d.dnsCache[addr] = &dnsCacheEntry{
-				ips:      ips[i:], // working addr + remaining untried
-				expireAt: time.Now().Add(d.option.CacheTTL),
-			}
-			d.dnsCacheMu.Unlock()
-			break
+		addrs = append(addrs, a)
+	}
+
+	type dialResult struct {
+		conn net.Conn
+		addr string
+	}
+	outcome, err := common.Race(ctx, addrs, func(ctx context.Context, a net.Addr) (dialResult, error) {
+		conn, err := d.dialer.DialContext(ctx, network, a.String())
+		if err != nil {
+			return dialResult{}, err
+		}
+		return dialResult{conn: conn, addr: a.String()}, nil
+	}, func(r dialResult) {
+		_ = r.conn.Close()
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Reorder: winner first, then the rest as fallback.
+	ordered := make([]string, 0, len(ips))
+	ordered = append(ordered, outcome.addr)
+	for _, s := range ips {
+		if s != outcome.addr {
+			ordered = append(ordered, s)
 		}
 	}
-	return conn, err
+	d.dnsCacheMu.Lock()
+	d.dnsCache[addr] = &dnsCacheEntry{
+		ips:      ordered,
+		expireAt: time.Now().Add(d.option.CacheTTL),
+	}
+	d.dnsCacheMu.Unlock()
+
+	return outcome.conn, nil
 }
 
 // resolveAllIPs resolves host to all IP addresses, preferring IPv4 first.
