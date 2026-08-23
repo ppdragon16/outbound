@@ -16,7 +16,7 @@ var (
 	ErrHoldOn             = errors.New("hold on")
 )
 
-type DialFunc func(ctx context.Context, dialer netproxy.Dialer) (transport *quic.Transport, addr net.Addr, err error)
+type DialFunc func(ctx context.Context, dialer netproxy.Dialer) (transport *quic.Transport, addrs []net.Addr, err error)
 
 type Client interface {
 	DialContextWithDialer(ctx context.Context, metadata *protocol.Metadata, dialer netproxy.Dialer, dialFn DialFunc) (net.Conn, error)

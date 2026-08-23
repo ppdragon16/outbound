@@ -26,7 +26,7 @@ type Dialer struct {
 	clientRing *clientRing
 
 	proxyAddress    string
-	proxyAddr       *net.UDPAddr    // cached resolved proxy address
+	proxyAddrs      []net.Addr      // cached resolved proxy addresses (IPv4-first)
 	dialFn          common.DialFunc // cached dial function, avoids per-call closure allocation
 	sharedTransport *quic.Transport // shared QUIC transport across all clientImpls; created on first use
 	transportMu     sync.Mutex      // protects sharedTransport
@@ -49,20 +49,21 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	if reservedStreamsCapability > 5 {
 		reservedStreamsCapability = 5
 	}
-	// Pre-resolve proxy address to avoid per-call DNS lookups.
-	proxyAddr, err := C.ResolveUDPAddr(header.ProxyAddress)
+	// Pre-resolve proxy addresses (IPv4-first) to avoid per-call DNS lookups
+	// and to race the QUIC handshake across them.
+	proxyAddrs, err := C.ResolveUDPAddrs(header.ProxyAddress)
 	if err != nil {
 		return nil, fmt.Errorf("resolve proxy address: %w", err)
 	}
 	d := &Dialer{
 		proxyAddress: header.ProxyAddress,
-		proxyAddr:    proxyAddr,
+		proxyAddrs:   proxyAddrs,
 		nextDialer:   nextDialer,
 	}
 	// Pre-create the dial function to avoid per-call closure allocation.
 	// The first call creates a UDP socket + Transport; subsequent calls return the
 	// cached transport, so all clientImpls share one UDP socket and Transport.
-	d.dialFn = func(ctx context.Context, dialer netproxy.Dialer) (transport *quic.Transport, addr net.Addr, err error) {
+	d.dialFn = func(ctx context.Context, dialer netproxy.Dialer) (transport *quic.Transport, addrs []net.Addr, err error) {
 		d.transportMu.Lock()
 		defer d.transportMu.Unlock()
 		if d.sharedTransport == nil {
@@ -72,7 +73,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 			}
 			d.sharedTransport = &quic.Transport{Conn: pc}
 		}
-		return d.sharedTransport, d.proxyAddr, nil
+		return d.sharedTransport, d.proxyAddrs, nil
 	}
 	d.clientRing = newClientRing(func(capabilityCallback func(n int64)) *clientImpl {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -94,7 +95,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 					// that would be immediately replaced via SetCongestionControl.
 					InitialCongestionControl: bbr.NewBbrSender(
 						bbr.DefaultClock{},
-						bbr.GetInitialPacketSize(d.proxyAddr),
+						bbr.GetInitialPacketSize(d.proxyAddrs[0]),
 					),
 				},
 				Uuid:                 id,
@@ -105,7 +106,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 				UnderlayAuth:         make(chan *UnderlayAuth, 64),
 			},
 			sharedTransportPtr: &d.sharedTransport,
-			sharedProxyAddr:    d.proxyAddr,
+			sharedProxyAddrs:   d.proxyAddrs,
 		}
 	}, reservedStreamsCapability)
 	return d, nil
@@ -140,7 +141,7 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 				}
 				pktConn := &TransportPacketConn{
 					Transport: transport,
-					proxyAddr: d.proxyAddr,
+					proxyAddr: d.proxyAddrs[0].(*net.UDPAddr),
 					tgt:       innerAddr.AddrPort(),
 					masterKey: psk,
 					firstIv:   iv,

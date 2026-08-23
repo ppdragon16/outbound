@@ -12,6 +12,7 @@ import (
 	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/ciphers"
+	C "github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
@@ -92,7 +93,7 @@ type clientImpl struct {
 	// Shared transport support: when non-nil, points to Dialer.sharedTransport.
 	// clientImpls share one UDP socket + Transport instead of creating one each.
 	sharedTransportPtr **quic.Transport
-	sharedProxyAddr    *net.UDPAddr
+	sharedProxyAddrs   []net.Addr
 }
 
 func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, dialFn common.DialFunc) (quic.Connection, error) {
@@ -112,21 +113,26 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 	}
 	// Try the shared transport first (nil means this clientImpl manages its own).
 	var transport *quic.Transport
-	var addr net.Addr
+	var addrs []net.Addr
 	var err error
 	if t.sharedTransportPtr != nil {
 		if st := *t.sharedTransportPtr; st != nil {
 			transport = st
-			addr = t.sharedProxyAddr
+			addrs = t.sharedProxyAddrs
 		}
 	}
 	if transport == nil {
-		transport, addr, err = dialFn(ctx, dialer)
+		transport, addrs, err = dialFn(ctx, dialer)
 		if err != nil {
 			return nil, err
 		}
 	}
-	quicConn, err := transport.Dial(ctx, addr, t.TlsConfig, t.QuicConfig)
+	// Race the QUIC handshake across all resolved addresses (happy-eyeballs).
+	quicConn, err := C.Race(ctx, addrs, func(ctx context.Context, addr net.Addr) (quic.Connection, error) {
+		return transport.Dial(ctx, addr, t.TlsConfig, t.QuicConfig)
+	}, func(qc quic.Connection) {
+		_ = qc.CloseWithError(0, "")
+	})
 	if err != nil {
 		// Only close the transport if we own it (not shared).
 		if t.sharedTransportPtr == nil {
