@@ -7,15 +7,18 @@ package common
 
 import (
 	"context"
-	"net"
 )
 
-// Race runs dial for every candidate address concurrently (happy-eyeballs) and
-// returns the first success. A single unbuffered channel carries results: the
-// first success read wins. Every other candidate either fails (dial must close
-// its own resources on error) or succeeds-and-loses — in which case its
-// goroutine self-tears-down via teardown, because once the winner returns
-// nobody is left to receive from the unbuffered channel.
+// Race runs dial for every candidate concurrently (happy-eyeballs) and returns
+// the first success. A single unbuffered channel carries results: the first
+// success read wins. Every other candidate either fails (dial must close its
+// own resources on error) or succeeds-and-loses — in which case its goroutine
+// self-tears-down via teardown, because once the winner returns nobody is left
+// to receive from the unbuffered channel.
+//
+// C is the candidate type: net.Addr for the QUIC protocols, or a "host:port"
+// string for the direct dialer. dial receives each candidate verbatim, so a
+// caller whose candidate is already the value it dials avoids any conversion.
 //
 // ctx is the dial budget; the derived raceCtx lets losers know the race ended
 // as soon as a winner is found, independent of when (or whether) the caller
@@ -24,13 +27,13 @@ import (
 //
 // teardown is called only on a successful-but-lost result, exactly once per
 // loser. It must NOT be called for the winner.
-func Race[T any](ctx context.Context, addrs []net.Addr, dial func(context.Context, net.Addr) (T, error), teardown func(T)) (T, error) {
+func Race[C any, T any](ctx context.Context, candidates []C, dial func(context.Context, C) (T, error), teardown func(T)) (T, error) {
 	var zero T
-	if len(addrs) == 0 {
+	if len(candidates) == 0 {
 		return zero, ctx.Err()
 	}
-	if len(addrs) == 1 {
-		return dial(ctx, addrs[0])
+	if len(candidates) == 1 {
+		return dial(ctx, candidates[0])
 	}
 
 	raceCtx, raceCancel := context.WithCancel(ctx)
@@ -41,9 +44,9 @@ func Race[T any](ctx context.Context, addrs []net.Addr, dial func(context.Contex
 		err error
 	}
 	results := make(chan result) // unbuffered: a loser with no receiver self-tears-down
-	for _, addr := range addrs {
-		go func(addr net.Addr) {
-			val, err := dial(raceCtx, addr)
+	for _, c := range candidates {
+		go func(c C) {
+			val, err := dial(raceCtx, c)
 			select {
 			case results <- result{val, err}:
 			case <-raceCtx.Done():
@@ -53,11 +56,11 @@ func Race[T any](ctx context.Context, addrs []net.Addr, dial func(context.Contex
 					teardown(val)
 				}
 			}
-		}(addr)
+		}(c)
 	}
 
 	var firstErr error
-	for range addrs {
+	for range candidates {
 		select {
 		case r := <-results:
 			if r.err == nil {

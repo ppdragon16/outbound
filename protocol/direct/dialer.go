@@ -176,25 +176,16 @@ func (d *directDialer) resolveAndDial(ctx context.Context, network, addr string)
 // dials of the same addr prefer the previously-working IP (important for mux
 // and connectivity-check consistency).
 func (d *directDialer) raceIPs(ctx context.Context, network, addr string, ips []string) (net.Conn, error) {
-	addrs := make([]net.Addr, 0, len(ips))
-	for _, s := range ips {
-		a, err := net.ResolveUDPAddr("udp", s)
-		if err != nil {
-			return nil, err
-		}
-		addrs = append(addrs, a)
-	}
-
 	type dialResult struct {
 		conn net.Conn
 		addr string
 	}
-	outcome, err := common.Race(ctx, addrs, func(ctx context.Context, a net.Addr) (dialResult, error) {
-		conn, err := d.dialer.DialContext(ctx, network, a.String())
+	outcome, err := common.Race(ctx, ips, func(ctx context.Context, s string) (dialResult, error) {
+		conn, err := d.dialer.DialContext(ctx, network, s)
 		if err != nil {
 			return dialResult{}, err
 		}
-		return dialResult{conn: conn, addr: a.String()}, nil
+		return dialResult{conn: conn, addr: s}, nil
 	}, func(r dialResult) {
 		_ = r.conn.Close()
 	})
