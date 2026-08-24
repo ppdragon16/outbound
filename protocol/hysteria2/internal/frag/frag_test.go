@@ -325,3 +325,47 @@ func TestDefragger(t *testing.T) {
 		})
 	}
 }
+
+func TestDefraggerCloseTerminal(t *testing.T) {
+	var released []string
+	d := &Defragger{
+		ReleaseFn: func(b []byte) { released = append(released, string(b)) },
+	}
+	buf := make([]byte, 1024)
+
+	// A first fragment starts reassembly and retains its full-cap buffer.
+	m0 := &protocol.UDPMessage{
+		PacketID:  1,
+		FragID:    0,
+		FragCount: 2,
+		Data:      []byte("hello"),
+		DataBuf:   []byte("buf-0"),
+	}
+	if _, ok := d.Feed(m0, buf); ok {
+		t.Fatalf("first fragment unexpectedly assembled")
+	}
+
+	// Close releases the retained fragment.
+	if err := d.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if len(released) != 1 || released[0] != "buf-0" {
+		t.Fatalf("Close released %v, want [buf-0]", released)
+	}
+
+	// A delayed Feed after Close must release its buffer and refuse to
+	// reassemble, never repopulating the closed Defragger.
+	m1 := &protocol.UDPMessage{
+		PacketID:  1,
+		FragID:    1,
+		FragCount: 2,
+		Data:      []byte("world"),
+		DataBuf:   []byte("buf-1"),
+	}
+	if n, ok := d.Feed(m1, buf); ok || n != 0 {
+		t.Fatalf("Feed after Close = (%d, %v), want (0, false)", n, ok)
+	}
+	if len(released) != 2 || released[1] != "buf-1" {
+		t.Fatalf("after Close Feed released %v, want [buf-0 buf-1]", released)
+	}
+}

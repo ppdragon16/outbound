@@ -48,6 +48,13 @@ type Defragger struct {
 	frags     []fragPiece
 	count     uint8
 	ReleaseFn func([]byte) // injected by caller: releases a quic-go datagram buffer
+
+	// closed is set once Close has run. A delayed Feed arriving after Close
+	// must release its datagram buffer and never repopulate reassembly state:
+	// the session is gone, so nothing will ever call releaseAll again and the
+	// buffer would otherwise be retained until the Defragger is garbage
+	// collected.
+	closed bool
 }
 
 // releaseAll calls ReleaseFn on every stored full-cap buffer and resets
@@ -63,6 +70,14 @@ func (d *Defragger) releaseAll() {
 }
 
 func (d *Defragger) Feed(m *protocol.UDPMessage, p []byte) (int, bool) {
+	if d.closed {
+		// Terminal: release the incoming buffer and refuse to reassemble.
+		if d.ReleaseFn != nil && m.DataBuf != nil {
+			d.ReleaseFn(m.DataBuf)
+		}
+		m.DataBuf = nil
+		return 0, false
+	}
 	if m.FragCount <= 1 {
 		// Single fragment: release the buffer immediately.
 		n := copy(p, m.Data)
@@ -121,6 +136,7 @@ func (d *Defragger) Feed(m *protocol.UDPMessage, p []byte) (int, bool) {
 }
 
 func (d *Defragger) Close() error {
+	d.closed = true
 	d.releaseAll()
 	return nil
 }
