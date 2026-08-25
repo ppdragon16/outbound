@@ -7,9 +7,9 @@ import (
 	"net/netip"
 	"unsafe"
 
+	"github.com/daeuniverse/outbound/pkg/oops"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/quic-go/quicvarint"
-	"github.com/samber/oops"
 )
 
 const (

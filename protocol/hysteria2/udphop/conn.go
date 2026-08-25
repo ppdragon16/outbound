@@ -8,8 +8,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/daeuniverse/outbound/pkg/oops"
 	"github.com/daeuniverse/outbound/pool"
-	"github.com/samber/oops"
 )
 
 const (

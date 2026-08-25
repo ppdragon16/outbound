@@ -4,9 +4,9 @@ import (
 	"net"
 	"time"
 
+	"github.com/daeuniverse/outbound/pkg/oops"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/utils"
-	"github.com/samber/oops"
 )
 
 type tcpConn struct {

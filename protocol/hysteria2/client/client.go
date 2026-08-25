@@ -9,7 +9,7 @@ import (
 
 	utls "github.com/refraction-networking/utls"
 
-	"github.com/samber/oops"
+	"github.com/daeuniverse/outbound/pkg/oops"
 
 	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"

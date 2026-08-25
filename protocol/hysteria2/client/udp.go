@@ -13,8 +13,8 @@ import (
 	"time"
 
 	rand "github.com/daeuniverse/outbound/pkg/fastrand"
+	"github.com/daeuniverse/outbound/pkg/oops"
 	"github.com/daeuniverse/outbound/pool"
-	"github.com/samber/oops"
 
 	"github.com/daeuniverse/quic-go"
 

@@ -8,9 +8,9 @@ import (
 	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/pkg/oops"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/pmtud"
 	"github.com/daeuniverse/quic-go"
-	"github.com/samber/oops"
 )
 
 const (

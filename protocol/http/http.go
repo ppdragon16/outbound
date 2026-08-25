@@ -9,9 +9,9 @@ import (
 
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/pkg/oops"
 	"github.com/daeuniverse/outbound/protocol"
 	tls2 "github.com/daeuniverse/outbound/transport/tls"
-	"github.com/samber/oops"
 )
 
 // HttpProxy is an HTTP/HTTPS proxy.

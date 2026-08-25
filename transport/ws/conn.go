@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"time"
 
+	"github.com/daeuniverse/outbound/pkg/oops"
 	"github.com/gorilla/websocket"
-	"github.com/samber/oops"
 )
 
 type conn struct {
