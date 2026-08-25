@@ -252,7 +252,7 @@ func (t *clientImpl) DialContext(ctx context.Context, metadata *Metadata, dialer
 		if isStreamLimitReached(err) {
 			return nil, common.ErrTooManyOpenStreams
 		}
-		if t.handleIfConnectionClosed(err) {
+		if t.handleIfConnectionClosed(err, quicConn) {
 			return nil, common.ErrClientClosed
 		}
 		return nil, fmt.Errorf("OpenStream: %w", err)
@@ -298,7 +298,7 @@ func (t *clientImpl) DialAuth(ctx context.Context, metadata *Metadata, dialer ne
 	select {
 	case t.UnderlayAuth <- auth:
 	case <-quicConn.Context().Done():
-		if t.handleIfConnectionClosed(quicContextErr(quicConn.Context())) {
+		if t.handleIfConnectionClosed(quicContextErr(quicConn.Context()), quicConn) {
 			return nil, nil, common.ErrClientClosed
 		}
 		return nil, nil, quicContextErr(quicConn.Context())
@@ -313,7 +313,9 @@ func (t *clientImpl) DialAuth(ctx context.Context, metadata *Metadata, dialer ne
 // handleIfConnectionClosed detaches the connection from the client pool and
 // closes it when a permanent error (non-temporary) is encountered. Transient
 // net.Error.Temporary() failures are skipped — the connection may recover.
-func (t *clientImpl) handleIfConnectionClosed(err error) bool {
+// originConn is the connection that produced err; a stale failure from a
+// connection that was already replaced must not tear down the replacement.
+func (t *clientImpl) handleIfConnectionClosed(err error, originConn quic.Connection) bool {
 	if err == nil {
 		return false
 	}
@@ -322,6 +324,9 @@ func (t *clientImpl) handleIfConnectionClosed(err error) bool {
 	}
 	t.connMutex.Lock()
 	defer t.connMutex.Unlock()
+	if t.quicConn != originConn {
+		return false
+	}
 	t.closeConnectionLocked(err)
 	return true
 }
