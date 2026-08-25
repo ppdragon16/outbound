@@ -279,6 +279,7 @@ func (c *ServerConn) SetWriteDeadline(t time.Time) error {
 
 type Server struct {
 	*grpc.Server
+	proto.UnimplementedGunServiceServer
 	LocalAddr  net.Addr
 	HandleConn func(conn net.Conn) error
 }
