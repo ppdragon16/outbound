@@ -2,6 +2,7 @@ package v2ray
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -22,7 +23,6 @@ import (
 	"github.com/daeuniverse/outbound/transport/smux"
 	"github.com/daeuniverse/outbound/transport/tls"
 	"github.com/daeuniverse/outbound/transport/ws"
-	jsoniter "github.com/json-iterator/go"
 )
 
 func init() {
@@ -31,30 +31,30 @@ func init() {
 }
 
 type V2Ray struct {
-	Ps             string `json:"ps"`
-	Add            string `json:"add"`
-	Port           string `json:"port"`
-	ID             string `json:"id"`
-	Aid            string `json:"aid"`
-	Net            string `json:"net"`
-	Type           string `json:"type"`
-	Host           string `json:"host"`
-	SNI            string `json:"sni"`
-	Path           string `json:"path"`
-	TLS            string `json:"tls"`
-	Flow           string `json:"flow,omitempty"`
-	Alpn           string `json:"alpn,omitempty"`
-	AllowInsecure  bool   `json:"allowInsecure"`
-	Fingerprint    string `json:"fp,omitempty"`
-	PublicKey      string `json:"pbk,omitempty"`
-	ShortId        string `json:"sid,omitempty"`
-	SpiderX        string `json:"spx,omitempty"`
-	V              string `json:"v"`
-	Protocol       string `json:"protocol"`
-	Mux            bool   `json:"mux,omitempty"`
-	MuxConcurrency int    `json:"muxConcurrency,omitempty"`
-	MuxIdleTimeout int    `json:"muxIdleTimeout,omitempty"`
-	Smux           bool   `json:"smux,omitempty"`
+	Ps             string         `json:"ps"`
+	Add            string         `json:"add"`
+	Port           FlexibleString `json:"port"`
+	ID             string         `json:"id"`
+	Aid            FlexibleString `json:"aid"`
+	Net            string         `json:"net"`
+	Type           string         `json:"type"`
+	Host           string         `json:"host"`
+	SNI            string         `json:"sni"`
+	Path           string         `json:"path"`
+	TLS            string         `json:"tls"`
+	Flow           string         `json:"flow,omitempty"`
+	Alpn           string         `json:"alpn,omitempty"`
+	AllowInsecure  FlexibleBool   `json:"allowInsecure"`
+	Fingerprint    string         `json:"fp,omitempty"`
+	PublicKey      string         `json:"pbk,omitempty"`
+	ShortId        string         `json:"sid,omitempty"`
+	SpiderX        string         `json:"spx,omitempty"`
+	V              string         `json:"v"`
+	Protocol       string         `json:"protocol"`
+	Mux            FlexibleBool   `json:"mux,omitempty"`
+	MuxConcurrency FlexibleInt    `json:"muxConcurrency,omitempty"`
+	MuxIdleTimeout FlexibleInt    `json:"muxIdleTimeout,omitempty"`
+	Smux           FlexibleBool   `json:"smux,omitempty"`
 }
 
 func NewV2Ray(link string) (dialer.Dialer, *dialer.Property, error) {
@@ -81,7 +81,7 @@ func NewV2Ray(link string) (dialer.Dialer, *dialer.Property, error) {
 	}
 	return s, &dialer.Property{
 		Name:     s.Ps,
-		Address:  net.JoinHostPort(s.Add, s.Port),
+		Address:  net.JoinHostPort(s.Add, string(s.Port)),
 		Protocol: s.Protocol,
 		Link:     s.ExportToURL(),
 	}, nil
@@ -114,11 +114,11 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 		}
 		wsConfig := &ws.WsConfig{
 			Scheme:        scheme,
-			Host:          net.JoinHostPort(s.Add, s.Port),
+			Host:          net.JoinHostPort(s.Add, string(s.Port)),
 			Path:          s.Path,
 			Hostname:      s.Host,
 			Sni:           sni,
-			AllowInsecure: s.AllowInsecure || option.AllowInsecure,
+			AllowInsecure: bool(s.AllowInsecure) || option.AllowInsecure,
 		}
 		d, err = wsConfig.Dialer(option, d)
 		if err != nil {
@@ -133,7 +133,7 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 			if s.TLS == "reality" {
 				u := url.URL{
 					Scheme: "reality",
-					Host:   net.JoinHostPort(s.Add, s.Port),
+					Host:   net.JoinHostPort(s.Add, string(s.Port)),
 					RawQuery: url.Values{
 						"sni": []string{sni},
 						"fp":  []string{s.Fingerprint},
@@ -145,9 +145,9 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 				d, err = tls.NewReality(u.String(), d)
 			} else {
 				tlsConfig := &tls.TLSConfig{
-					Host:          net.JoinHostPort(s.Add, s.Port),
+					Host:          net.JoinHostPort(s.Add, string(s.Port)),
 					Sni:           sni,
-					AllowInsecure: s.AllowInsecure || option.AllowInsecure,
+					AllowInsecure: bool(s.AllowInsecure) || option.AllowInsecure,
 				}
 				d, err = tlsConfig.Dialer(option, d)
 			}
@@ -171,7 +171,7 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 			StatelessDialer: protocol.StatelessDialer{ParentDialer: d},
 			ServiceName:     serviceName,
 			ServerName:      sni,
-			AllowInsecure:   s.AllowInsecure || option.AllowInsecure,
+			AllowInsecure:   bool(s.AllowInsecure) || option.AllowInsecure,
 		}
 	case "http", "http2", "h2":
 		sni := s.SNI
@@ -184,11 +184,11 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 		}
 		u := url.URL{
 			Scheme: scheme,
-			Host:   net.JoinHostPort(s.Add, s.Port),
+			Host:   net.JoinHostPort(s.Add, string(s.Port)),
 			Path:   s.Path,
 			RawQuery: url.Values{
 				"sni":           []string{sni},
-				"allowInsecure": []string{common.BoolToString(s.AllowInsecure || option.AllowInsecure)},
+				"allowInsecure": []string{common.BoolToString(bool(s.AllowInsecure) || option.AllowInsecure)},
 				"host":          []string{s.Host},
 				"alpn":          []string{s.Alpn},
 				"transport":     []string{"1"},
@@ -205,12 +205,12 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 
 		u := url.URL{
 			Scheme: "meek",
-			Host:   net.JoinHostPort(s.Add, s.Port),
+			Host:   net.JoinHostPort(s.Add, string(s.Port)),
 			RawQuery: url.Values{
 				"url":           []string{s.Path},
 				"alpn":          []string{s.Alpn},
 				"serverName":    []string{s.SNI},
-				"allowInsecure": []string{common.BoolToString(s.AllowInsecure || option.AllowInsecure)},
+				"allowInsecure": []string{common.BoolToString(bool(s.AllowInsecure) || option.AllowInsecure)},
 			}.Encode(),
 		}
 
@@ -225,11 +225,11 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 		}
 		u := url.URL{
 			Scheme: scheme,
-			Host:   net.JoinHostPort(s.Add, s.Port),
+			Host:   net.JoinHostPort(s.Add, string(s.Port)),
 			RawQuery: url.Values{
 				"host":          []string{s.Host},
 				"path":          []string{s.Path},
-				"allowInsecure": []string{common.BoolToString(s.AllowInsecure || option.AllowInsecure)},
+				"allowInsecure": []string{common.BoolToString(bool(s.AllowInsecure) || option.AllowInsecure)},
 				"serverName":    []string{s.SNI},
 			}.Encode(),
 		}
@@ -242,7 +242,7 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 	}
 
 	if d, err = protocol.NewDialer(s.Protocol, d, protocol.Header{
-		ProxyAddress: net.JoinHostPort(s.Add, s.Port),
+		ProxyAddress: net.JoinHostPort(s.Add, string(s.Port)),
 		Cipher:       getAutoCipher(),
 		Password:     s.ID,
 		Feature1:     s.Flow,
@@ -260,11 +260,11 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 		if s.Flow != "" {
 			return nil, fmt.Errorf("smux is incompatible with flow: %s", s.Flow)
 		}
-		concurrency := s.MuxConcurrency
+		concurrency := int(s.MuxConcurrency)
 		if concurrency <= 0 {
 			concurrency = 8
 		}
-		idleTimeout := s.MuxIdleTimeout
+		idleTimeout := int(s.MuxIdleTimeout)
 		if idleTimeout <= 0 {
 			idleTimeout = 300
 		}
@@ -279,17 +279,17 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 		if s.Flow != "" {
 			return nil, fmt.Errorf("mux is incompatible with flow: %s", s.Flow)
 		}
-		concurrency := s.MuxConcurrency
+		concurrency := int(s.MuxConcurrency)
 		if concurrency <= 0 {
 			concurrency = 8
 		}
-		idleTimeout := s.MuxIdleTimeout
+		idleTimeout := int(s.MuxIdleTimeout)
 		if idleTimeout <= 0 {
 			idleTimeout = 300
 		}
 		return &mux.Mux{
 			StatelessDialer: protocol.StatelessDialer{ParentDialer: d},
-			Addr:            net.JoinHostPort(s.Add, s.Port),
+			Addr:            net.JoinHostPort(s.Add, string(s.Port)),
 			PassthroughUdp:  true,
 			Concurrency:     concurrency,
 			IdleTimeout:     time.Duration(idleTimeout) * time.Second,
@@ -306,7 +306,7 @@ func ParseVlessURL(vless string) (data *V2Ray, err error) {
 	data = &V2Ray{
 		Ps:            u.Fragment,
 		Add:           u.Hostname(),
-		Port:          u.Port(),
+		Port:          FlexibleString(u.Port()),
 		ID:            u.User.String(),
 		Net:           u.Query().Get("type"),
 		Type:          u.Query().Get("headerType"),
@@ -316,7 +316,7 @@ func ParseVlessURL(vless string) (data *V2Ray, err error) {
 		TLS:           u.Query().Get("security"),
 		Flow:          u.Query().Get("flow"),
 		Alpn:          u.Query().Get("alpn"),
-		AllowInsecure: parseAllowInsecure(u.Query()),
+		AllowInsecure: FlexibleBool(parseAllowInsecure(u.Query())),
 		Fingerprint:   u.Query().Get("fp"),
 		PublicKey:     u.Query().Get("pbk"),
 		ShortId:       u.Query().Get("sid"),
@@ -324,13 +324,13 @@ func ParseVlessURL(vless string) (data *V2Ray, err error) {
 		V:             "2",
 		Protocol:      "vless",
 	}
-	data.Mux, _ = strconv.ParseBool(u.Query().Get("mux"))
+	data.Mux = parseFlexibleBool(u.Query().Get("mux"))
 	if !data.Mux {
-		data.Mux, _ = strconv.ParseBool(u.Query().Get("multiplex"))
+		data.Mux = parseFlexibleBool(u.Query().Get("multiplex"))
 	}
-	data.Smux, _ = strconv.ParseBool(u.Query().Get("smux"))
-	data.MuxConcurrency, _ = strconv.Atoi(u.Query().Get("mux_concurrency"))
-	data.MuxIdleTimeout, _ = strconv.Atoi(u.Query().Get("mux_idle_timeout"))
+	data.Smux = parseFlexibleBool(u.Query().Get("smux"))
+	data.MuxConcurrency = parseFlexibleInt(u.Query().Get("mux_concurrency"))
+	data.MuxIdleTimeout = parseFlexibleInt(u.Query().Get("mux_idle_timeout"))
 	if data.Net == "" {
 		data.Net = "tcp"
 	}
@@ -388,7 +388,7 @@ func ParseVmessURL(vmess string) (data *V2Ray, err error) {
 		if obfs == "kcp" || obfs == "mkcp" {
 			m := make(map[string]string)
 			//cater to v2rayN definition
-			_ = jsoniter.Unmarshal([]byte(obfsParam), &m)
+			_ = json.Unmarshal([]byte(obfsParam), &m)
 			path = m["seed"]
 			obfsParam = ""
 		}
@@ -400,28 +400,28 @@ func ParseVmessURL(vmess string) (data *V2Ray, err error) {
 		info = V2Ray{
 			ID:            subMatch[1],
 			Add:           subMatch[2],
-			Port:          subMatch[3],
+			Port:          FlexibleString(subMatch[3]),
 			Ps:            ps,
-			Host:          jsoniter.Get([]byte(obfsParam), "host").ToString(),
+			Host:          jsonStringField([]byte(obfsParam), "host"),
 			Path:          path,
 			Net:           obfs,
-			Aid:           aid,
+			Aid:           FlexibleString(aid),
 			TLS:           map[string]string{"1": "tls"}[q.Get("tls")],
 			SNI:           sni,
-			AllowInsecure: parseAllowInsecure(q),
+			AllowInsecure: FlexibleBool(parseAllowInsecure(q)),
 		}
-		info.Mux, _ = strconv.ParseBool(q.Get("mux"))
+		info.Mux = parseFlexibleBool(q.Get("mux"))
 		if !info.Mux {
-			info.Mux, _ = strconv.ParseBool(q.Get("multiplex"))
+			info.Mux = parseFlexibleBool(q.Get("multiplex"))
 		}
-		info.Smux, _ = strconv.ParseBool(q.Get("smux"))
-		info.MuxConcurrency, _ = strconv.Atoi(q.Get("mux_concurrency"))
-		info.MuxIdleTimeout, _ = strconv.Atoi(q.Get("mux_idle_timeout"))
+		info.Smux = parseFlexibleBool(q.Get("smux"))
+		info.MuxConcurrency = parseFlexibleInt(q.Get("mux_concurrency"))
+		info.MuxIdleTimeout = parseFlexibleInt(q.Get("mux_idle_timeout"))
 		if info.Net == "websocket" {
 			info.Net = "ws"
 		}
 	} else {
-		err = jsoniter.Unmarshal([]byte(raw), &info)
+		err = json.Unmarshal([]byte(raw), &info)
 		if err != nil {
 			return
 		}
@@ -491,10 +491,10 @@ func (s *V2Ray) ExportToURL() string {
 			if s.Mux && !s.Smux {
 				common.SetValue(&query, "mux", "1")
 				if s.MuxConcurrency > 0 {
-					common.SetValue(&query, "mux_concurrency", strconv.Itoa(s.MuxConcurrency))
-				if s.MuxIdleTimeout > 0 {
-					common.SetValue(&query, "mux_idle_timeout", strconv.Itoa(s.MuxIdleTimeout))
-				}
+					common.SetValue(&query, "mux_concurrency", strconv.Itoa(int(s.MuxConcurrency)))
+					if s.MuxIdleTimeout > 0 {
+						common.SetValue(&query, "mux_idle_timeout", strconv.Itoa(int(s.MuxIdleTimeout)))
+					}
 				}
 			}
 		}
@@ -505,16 +505,27 @@ func (s *V2Ray) ExportToURL() string {
 		U := url.URL{
 			Scheme:   "vless",
 			User:     url.User(s.ID),
-			Host:     net.JoinHostPort(s.Add, s.Port),
+			Host:     net.JoinHostPort(s.Add, string(s.Port)),
 			RawQuery: query.Encode(),
 			Fragment: s.Ps,
 		}
 		return U.String()
 	case "vmess":
 		s.V = "2"
-		b, _ := jsoniter.Marshal(s)
+		b, _ := json.Marshal(s)
 		return "vmess://" + strings.TrimSuffix(base64.StdEncoding.EncodeToString(b), "=")
 	}
 	//log.Warn("unexpected protocol: %v", v.Protocol)
 	return ""
+}
+
+// jsonStringField extracts a string field from a JSON object, returning "" if
+// the field is absent or not a string. It replaces jsoniter.Get(...).ToString().
+func jsonStringField(data []byte, key string) string {
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return ""
+	}
+	v, _ := m[key].(string)
+	return v
 }
