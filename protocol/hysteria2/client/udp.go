@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"runtime"
 	"sync"
 	"time"
 
@@ -25,11 +24,6 @@ import (
 
 const (
 	udpMessageChanSize = 128
-
-	// maxDemuxGoroutines caps how many receive goroutines may drain the shared
-	// datagram queue. Every goroutine parks on ReceiveDatagram most of the
-	// time, so the cap only guards against pathological GOMAXPROCS values.
-	maxDemuxGoroutines = 8
 )
 
 type udpConn struct {
@@ -221,14 +215,14 @@ func newUDPSessionManager(conn quic.Connection) *udpSessionManager {
 		ctx:    ctx,
 		cancel: cancel,
 	}
-	// Parallel demux: a single run() goroutine caps aggregate packet rate at
-	// one core (parse + session lookup + copy + channel handoff per datagram).
-	// ReceiveDatagram is safe for concurrent consumers, so run one loop per
-	// CPU (capped) and let different sessions progress in parallel.
-	n := min(runtime.GOMAXPROCS(0), maxDemuxGoroutines)
-	for range n {
-		go m.run()
-	}
+	// Single receive goroutine on purpose. The per-session Defragger is
+	// single-slot (one PacketID at a time) and assumes fragments arrive in
+	// wire order: a parallel demux reorders datagram delivery, which (a) makes
+	// fragments of different packets interleave and get discarded, and (b)
+	// reorders non-fragmented datagrams beyond QUIC's kPacketThreshold (3),
+	// triggering spurious loss at the inner QUIC sender. Do not parallelize
+	// this loop without first making the Defragger reassemble by PacketID.
+	go m.run()
 	return m
 }
 
