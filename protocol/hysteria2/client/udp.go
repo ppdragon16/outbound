@@ -49,19 +49,13 @@ type udpConn struct {
 
 	// deFraggers reassembles fragmented datagrams by PacketID. Guarded by
 	// receiveMu (same as the old single Defragger's Feed/Close).
-	deFraggers map[uint16]*defragEntry
+	deFraggers map[uint16]*frag.Defragger
 	// lastSweep bounds how often ReadFromAddrPort scans deFraggers for
 	// abandoned reassemblies. Guarded by receiveMu.
 	lastSweep time.Time
 
 	receiveMu    sync.Mutex
 	readDeadline P.Deadline
-}
-
-// defragEntry pairs a per-PacketID Defragger with its abandonment deadline.
-type defragEntry struct {
-	d         *frag.Defragger
-	expiresAt time.Time
 }
 
 func ToAddrPort(addr net.Addr) (netip.AddrPort, error) {
@@ -134,26 +128,26 @@ func (u *udpConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err erro
 // completion. Caller must hold receiveMu.
 func (u *udpConn) feedDefrag(m *protocol.UDPMessage, p []byte) (int, bool) {
 	now := time.Now()
-	entry := u.deFraggers[m.PacketID]
-	if entry == nil {
+	d := u.deFraggers[m.PacketID]
+	if d == nil {
 		if u.deFraggers == nil {
-			u.deFraggers = make(map[uint16]*defragEntry, 2)
+			u.deFraggers = make(map[uint16]*frag.Defragger, 2)
 		}
-		entry = &defragEntry{
-			d:         &frag.Defragger{ReleaseFn: pool.PutBuffer},
-			expiresAt: now.Add(defraggerTimeout),
-		}
-		u.deFraggers[m.PacketID] = entry
-	} else if now.After(entry.expiresAt) {
+		d = frag.GetDefragger(pool.PutBuffer)
+		d.ExpiresAt = now.Add(defraggerTimeout)
+		u.deFraggers[m.PacketID] = d
+	} else if now.After(d.ExpiresAt) {
 		// Previous reassembly was abandoned (a fragment was lost); replace
-		// the stale entry, releasing its retained buffers.
-		entry.d.Close()
-		entry.d = &frag.Defragger{ReleaseFn: pool.PutBuffer}
-		entry.expiresAt = now.Add(defraggerTimeout)
+		// the stale Defragger, releasing its retained buffers.
+		d.Put()
+		d = frag.GetDefragger(pool.PutBuffer)
+		d.ExpiresAt = now.Add(defraggerTimeout)
+		u.deFraggers[m.PacketID] = d
 	}
-	n, assembled := entry.d.Feed(m, p)
+	n, assembled := d.Feed(m, p)
 	if assembled {
 		delete(u.deFraggers, m.PacketID)
+		d.Put()
 	}
 	return n, assembled
 }
@@ -161,9 +155,9 @@ func (u *udpConn) feedDefrag(m *protocol.UDPMessage, p []byte) (int, bool) {
 // sweepDeFraggers releases and removes abandoned reassemblies. Caller must
 // hold receiveMu.
 func (u *udpConn) sweepDeFraggers(now time.Time) {
-	for pktID, entry := range u.deFraggers {
-		if now.After(entry.expiresAt) {
-			entry.d.Close()
+	for pktID, d := range u.deFraggers {
+		if now.After(d.ExpiresAt) {
+			d.Put()
 			delete(u.deFraggers, pktID)
 		}
 	}
@@ -172,8 +166,8 @@ func (u *udpConn) sweepDeFraggers(now time.Time) {
 // releaseDeFraggers releases every in-flight reassembly. Called on Close so
 // pooled buffers are returned even if the read loop is never resumed.
 func (u *udpConn) releaseDeFraggers() {
-	for pktID, entry := range u.deFraggers {
-		entry.d.Close()
+	for pktID, d := range u.deFraggers {
+		d.Put()
 		delete(u.deFraggers, pktID)
 	}
 }

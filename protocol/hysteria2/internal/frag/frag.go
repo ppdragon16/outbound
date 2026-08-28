@@ -1,6 +1,9 @@
 package frag
 
 import (
+	"sync"
+	"time"
+
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
 )
 
@@ -39,26 +42,66 @@ type fragPiece struct {
 	buf  []byte // full-cap buffer from quic-go's ReceiveDatagram
 }
 
-// Defragger handles the defragmentation of UDP messages.
-// The current implementation can only handle one packet ID at a time.
-// If another packet arrives before a packet has received all fragments
-// in their entirety, any previous state is discarded.
+// defragInlineSize is the number of fragment slots stored inline. A QUIC
+// datagram (~1.2-1.5 KB payload) splits into 2 fragments in the common case,
+// and MaxUDPSize (4 KB) needs at most ~4, so 8 inline slots cover it without
+// a per-packet heap allocation on the hot path.
+const defragInlineSize = 8
+
+var defraggerPool = sync.Pool{
+	New: func() any { return &Defragger{} },
+}
+
+// Defragger reassembles one fragmented UDP message (a single PacketID) from
+// its fragments. The caller keeps one Defragger per in-flight PacketID; reuse
+// it via GetDefragger/Put to avoid per-packet allocations.
 type Defragger struct {
 	pktID     uint16
 	frags     []fragPiece
 	count     uint8
 	ReleaseFn func([]byte) // injected by caller: releases a quic-go datagram buffer
 
-	// closed is set once Close has run. A delayed Feed arriving after Close
-	// must release its datagram buffer and never repopulate reassembly state:
-	// the session is gone, so nothing will ever call releaseAll again and the
-	// buffer would otherwise be retained until the Defragger is garbage
-	// collected.
+	// closed is set once Put/Close has run. A delayed Feed arriving after
+	// release must not repopulate reassembly state: the session is gone, so
+	// nothing will ever call releaseAll again and the buffer would otherwise
+	// be retained until the Defragger is garbage collected.
 	closed bool
+
+	// inline backs frags for FRAG_TOTAL <= defragInlineSize, avoiding a heap
+	// allocation on the hot path.
+	inline [defragInlineSize]fragPiece
+
+	// ExpiresAt is when an incomplete reassembly is abandoned (a fragment was
+	// lost and never arrived). Managed by the caller for lost-fragment cleanup.
+	ExpiresAt time.Time
 }
 
-// releaseAll calls ReleaseFn on every stored full-cap buffer and resets
-// the frags slice to zero values. Safe to call when no fragments are stored.
+// GetDefragger returns a reset Defragger from the pool with releaseFn wired.
+func GetDefragger(releaseFn func([]byte)) *Defragger {
+	d := defraggerPool.Get().(*Defragger)
+	d.pktID = 0
+	d.frags = nil
+	d.count = 0
+	d.closed = false
+	d.ReleaseFn = releaseFn
+	d.ExpiresAt = time.Time{}
+	for i := range d.inline {
+		d.inline[i] = fragPiece{}
+	}
+	return d
+}
+
+// Put releases any held fragment buffers and returns d to the pool.
+func (d *Defragger) Put() {
+	d.releaseAll()
+	d.closed = true
+	d.ReleaseFn = nil
+	d.ExpiresAt = time.Time{}
+	defraggerPool.Put(d)
+}
+
+// releaseAll calls ReleaseFn on every stored full-cap buffer and resets the
+// reassembly state. Safe to call when no fragments are stored.
 func (d *Defragger) releaseAll() {
 	for i := range d.frags {
 		if d.frags[i].buf != nil {
@@ -66,6 +109,11 @@ func (d *Defragger) releaseAll() {
 			d.frags[i].buf = nil
 		}
 		d.frags[i].data = nil
+	}
+	d.frags = nil
+	d.count = 0
+	for i := range d.inline {
+		d.inline[i] = fragPiece{}
 	}
 }
 
@@ -99,9 +147,8 @@ func (d *Defragger) Feed(m *protocol.UDPMessage, p []byte) (int, bool) {
 		// New packet: release previously held fragments before overwriting.
 		d.releaseAll()
 		d.pktID = m.PacketID
-		// reuse existing slice if capacity allows
-		if int(m.FragCount) <= cap(d.frags) {
-			d.frags = d.frags[:m.FragCount]
+		if int(m.FragCount) <= defragInlineSize {
+			d.frags = d.inline[:m.FragCount]
 		} else {
 			d.frags = make([]fragPiece, m.FragCount)
 		}
