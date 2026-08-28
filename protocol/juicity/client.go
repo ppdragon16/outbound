@@ -319,6 +319,12 @@ func (t *clientImpl) handleIfConnectionClosed(err error, originConn quic.Connect
 	if err == nil {
 		return false
 	}
+	// A stream-scoped error (RESET_STREAM / STOP_SENDING on one stream) is not
+	// a connection failure: tearing down the shared tunnel would kill every
+	// other live stream on it.
+	if _, ok := errors.AsType[*quic.StreamError](err); ok {
+		return false
+	}
 	if netErr, ok := err.(net.Error); ok && netErr.Temporary() { // nolint:staticcheck
 		return false
 	}
