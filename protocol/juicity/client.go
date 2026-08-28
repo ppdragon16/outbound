@@ -380,12 +380,11 @@ func (t *clientImpl) closeConnectionLocked(err error) {
 // error. The client ring should retry on the next connection rather than
 // destroying this one.
 func isStreamLimitReached(err error) bool {
-	var streamLimitPtr *quic.StreamLimitReachedError
-	if errors.As(err, &streamLimitPtr) {
+	if _, ok := errors.AsType[*quic.StreamLimitReachedError](err); ok {
 		return true
 	}
-	var streamLimit quic.StreamLimitReachedError
-	return errors.As(err, &streamLimit)
+	_, ok := errors.AsType[quic.StreamLimitReachedError](err)
+	return ok
 }
 
 func (t *clientImpl) setOnClose(f func()) {

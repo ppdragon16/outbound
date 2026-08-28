@@ -199,8 +199,8 @@ func (u *udpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (n int, err error
 	buf := pool.GetBuffer(protocol.MaxUDPSize)
 	defer pool.PutBuffer(buf)
 	err = u.WritePacket(buf, msg)
-	var errTooLarge *quic.DatagramTooLargeError
-	if errors.As(err, &errTooLarge) {
+	errTooLarge, ok := errors.AsType[*quic.DatagramTooLargeError](err)
+	if ok {
 		msg.PacketID = uint16(rand.Intn(0xFFFF)) + 1
 		fMsgs := frag.FragUDPMessage(msg, int(errTooLarge.MaxDataLen))
 		for _, fMsg := range fMsgs {
