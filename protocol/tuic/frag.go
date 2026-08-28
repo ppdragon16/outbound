@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/quic-go"
@@ -121,6 +122,16 @@ func fragWriteNative(quicConn quic.Connection, connId, pktId uint16, addr netip.
 // for the common case while falling back to a heap slice for larger FRAG_TOTAL.
 const deFraggerInlineSize = 8
 
+// deFraggerTimeout is how long an incomplete reassembly may retain its
+// fragments before being abandoned. QUIC datagrams are unreliable, so a lost
+// fragment can never arrive; without a timeout the deFragger (and the pooled
+// buffers it holds) would leak until the association closes.
+const deFraggerTimeout = 5 * time.Second
+
+// deFraggerSweepInterval bounds how often ReadFromAddrPort scans for abandoned
+// reassemblies, keeping the per-packet hot path cheap.
+const deFraggerSweepInterval = deFraggerTimeout
+
 var deFraggerPool = sync.Pool{
 	New: func() any { return &deFragger{} },
 }
@@ -130,6 +141,9 @@ type deFragger struct {
 	pkgID uint16
 	frags []*Packet
 	count uint8
+	// expiresAt is when an incomplete reassembly is abandoned (see
+	// deFraggerTimeout). Set by the caller when the deFragger is created.
+	expiresAt time.Time
 	// inline stores fragment pointers for FRAG_TOTAL <= deFraggerInlineSize.
 	// When frags is backed by inline, no heap allocation occurs for the slice.
 	inline [deFraggerInlineSize]*Packet
@@ -180,6 +194,24 @@ func (d *deFragger) Feed(m *Packet, p []byte) (n int, addrPort netip.AddrPort, a
 		}
 	}
 	return
+}
+
+// releaseAll releases any stored fragments and resets the deFragger so it can
+// be reused or returned to the pool. Called when an incomplete reassembly is
+// abandoned (a fragment was lost and never arrived).
+func (d *deFragger) releaseAll() {
+	for _, frag := range d.frags {
+		if frag != nil {
+			frag.Release()
+		}
+	}
+	d.frags = nil
+	d.count = 0
+	// Clear inline so a reused deFragger (FRAG_TOTAL <= inline size) does not
+	// expose stale pointers before Feed overwrites each slot.
+	for i := range d.inline {
+		d.inline[i] = nil
+	}
 }
 
 // getDeFragger returns a deFragger from the pool, ready for use.

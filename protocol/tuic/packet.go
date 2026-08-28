@@ -91,6 +91,9 @@ type quicStreamPacketConn struct {
 	// Only accessed from the single ReadFromAddrPort reader goroutine;
 	// a plain map is sufficient (no concurrent reads).
 	deFraggers map[uint16]*deFragger
+	// lastSweep bounds how often ReadFromAddrPort scans deFraggers for
+	// abandoned reassemblies. Same single-goroutine domain as deFraggers.
+	lastSweep time.Time
 
 	muTimer       sync.Mutex
 	deadlineTimer *time.Timer
@@ -205,9 +208,11 @@ func (q *quicStreamPacketConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrP
 	incomingPackets := q.incomingPackets
 	q.mu.Unlock()
 	if incomingPackets != nil {
+		q.sweepDeFraggersIfDue()
 		for {
 			packet, closed := incomingPackets.PopFrontBlock()
 			if closed {
+				q.releaseDeFraggers()
 				err = net.ErrClosed
 				return
 			}
@@ -225,11 +230,18 @@ func (q *quicStreamPacketConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrP
 			var d *deFragger
 			if v, ok := q.deFraggers[packet.PKT_ID]; ok {
 				d = v
+				if time.Now().After(d.expiresAt) {
+					// Previous reassembly was abandoned (a fragment was
+					// lost); start over with this fragment.
+					d.releaseAll()
+					d.expiresAt = time.Now().Add(deFraggerTimeout)
+				}
 			} else {
 				if q.deFraggers == nil {
 					q.deFraggers = make(map[uint16]*deFragger, 2)
 				}
 				d = getDeFragger()
+				d.expiresAt = time.Now().Add(deFraggerTimeout)
 				q.deFraggers[packet.PKT_ID] = d
 			}
 			var assembled bool
@@ -238,12 +250,41 @@ func (q *quicStreamPacketConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrP
 				putDeFragger(d)
 				return
 			}
-			// FIXME: Timeout to clean deFraggers.
 		}
 	} else {
 		err = net.ErrClosed
 	}
 	return
+}
+
+// sweepDeFraggersIfDue releases abandoned reassemblies whose fragments never
+// completed (a fragment was lost). Runs at most once per deFraggerSweepInterval
+// to keep the hot path cheap; deFraggers is only touched from the single
+// ReadFromAddrPort goroutine, so no synchronization is needed.
+func (q *quicStreamPacketConn) sweepDeFraggersIfDue() {
+	now := time.Now()
+	if now.Sub(q.lastSweep) < deFraggerSweepInterval {
+		return
+	}
+	q.lastSweep = now
+	for pktID, d := range q.deFraggers {
+		if now.After(d.expiresAt) {
+			d.releaseAll()
+			delete(q.deFraggers, pktID)
+			putDeFragger(d)
+		}
+	}
+}
+
+// releaseDeFraggers releases every in-flight reassembly. Called when the
+// association closes so pooled buffers are returned even if the read loop is
+// never resumed.
+func (q *quicStreamPacketConn) releaseDeFraggers() {
+	for pktID, d := range q.deFraggers {
+		d.releaseAll()
+		putDeFragger(d)
+		delete(q.deFraggers, pktID)
+	}
 }
 
 // WriteToAddrPort writes a packet to the given netip.AddrPort.
