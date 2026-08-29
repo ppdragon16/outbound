@@ -8,7 +8,9 @@
 package obfs
 
 import (
+	"errors"
 	"net"
+	"net/netip"
 	"sync"
 	"syscall"
 	"time"
@@ -93,6 +95,47 @@ func (c *obfsPacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
 	}
 }
 
+// ReadFromAddrPort forwards the quic-go fork's allocation-free read fast path
+// through the obfuscation layer; without this forward the type assertion on
+// the wrapper would fail and quic-go would fall back to the ReadFrom path.
+// The returned addr must be valid on success — quic-go treats an invalid one
+// as "fast path unsupported" and re-reads the socket via ReadFrom, silently
+// dropping the packet.
+func (c *obfsPacketConnUDP) ReadFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error) {
+	apc, ok := c.Conn.(interface {
+		ReadFromAddrPort([]byte) (int, netip.AddrPort, error)
+	})
+	if !ok {
+		// Inner conn has no fast path; degrade to ReadFrom and convert.
+		// Fail fast on unconvertible addresses: returning n>0 with an
+		// invalid AddrPort would make quic-go drop the packet and re-read
+		// the socket via ReadFrom.
+		nn, a, rerr := c.ReadFrom(p)
+		if rerr != nil {
+			return 0, netip.AddrPort{}, rerr
+		}
+		ua, ok := a.(*net.UDPAddr)
+		if !ok {
+			return 0, netip.AddrPort{}, errors.New("obfs: inner conn returned a non-UDPAddr address")
+		}
+		return nn, ua.AddrPort(), nil
+	}
+	for {
+		c.readMutex.Lock()
+		nn, ap, rerr := apc.ReadFromAddrPort(c.readBuf)
+		if nn <= 0 {
+			c.readMutex.Unlock()
+			return nn, ap, rerr
+		}
+		n = c.Obfs.Deobfuscate(c.readBuf[:nn], p)
+		c.readMutex.Unlock()
+		if n > 0 || rerr != nil {
+			return n, ap, rerr
+		}
+		// Invalid packet, try again
+	}
+}
+
 func (c *obfsPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 	c.writeMutex.Lock()
 	nn := c.Obfs.Obfuscate(p, c.writeBuf)
@@ -102,6 +145,25 @@ func (c *obfsPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 		n = len(p)
 	}
 	return n, err
+}
+
+// WriteToAddrPort forwards the AddrPort-flavored write through the obfuscation
+// layer so wrapper-wrapped conns satisfy the full PacketConnAddrPort shape.
+func (c *obfsPacketConnUDP) WriteToAddrPort(p []byte, addr netip.AddrPort) (n int, err error) {
+	if apc, ok := c.Conn.(interface {
+		WriteToAddrPort([]byte, netip.AddrPort) (int, error)
+	}); ok {
+		c.writeMutex.Lock()
+		nn := c.Obfs.Obfuscate(p, c.writeBuf)
+		_, err = apc.WriteToAddrPort(c.writeBuf[:nn], addr)
+		c.writeMutex.Unlock()
+		if err == nil {
+			n = len(p)
+		}
+		return n, err
+	}
+	// Inner conn has no fast path; degrade to the net.Addr write.
+	return c.WriteTo(p, net.UDPAddrFromAddrPort(addr))
 }
 
 func (c *obfsPacketConn) Close() error {

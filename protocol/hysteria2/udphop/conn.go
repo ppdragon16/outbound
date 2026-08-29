@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"sync"
 	"syscall"
 	"time"
@@ -36,17 +37,22 @@ type udpHopPacketConn struct {
 	readBufferSize  int
 	writeBufferSize int
 
-	recvQueue chan *udpPacket
+	// udpPacket travels by VALUE: a pointer channel would force one 64B heap
+	// allocation per received packet (~680 allocs/s measured in production,
+	// 34% of the process's total alloc_space), while a buffered channel send
+	// memmoves the struct into the ring buffer with zero heap traffic.
+	recvQueue chan udpPacket
 
 	ctx    context.Context
 	cancel context.CancelFunc
 }
 
 type udpPacket struct {
-	Buf  []byte
-	N    int
-	Addr net.Addr
-	Err  error
+	Buf      []byte
+	N        int
+	Addr     net.Addr
+	AddrPort netip.AddrPort
+	Err      error
 }
 
 type dialFunc = func(addr net.Addr) (net.Conn, error)
@@ -71,7 +77,7 @@ func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc d
 		addr:        addr,
 		dialFunc:    dialFunc,
 		currentConn: curConn,
-		recvQueue:   make(chan *udpPacket, packetQueueSize),
+		recvQueue:   make(chan udpPacket, packetQueueSize),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
@@ -81,6 +87,13 @@ func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc d
 }
 
 func (u *udpHopPacketConn) recvLoop(conn net.Conn) {
+	// The underlying socket is connected, so the remote is fixed for this
+	// recvLoop's lifetime — resolve both addr forms once instead of per packet.
+	remoteAddr := conn.RemoteAddr()
+	var remoteAddrPort netip.AddrPort
+	if ua, ok := remoteAddr.(*net.UDPAddr); ok {
+		remoteAddrPort = ua.AddrPort()
+	}
 	for {
 		buf := pool.GetBuffer(udpBufferSize)
 		n, err := conn.Read(buf)
@@ -91,12 +104,18 @@ func (u *udpHopPacketConn) recvLoop(conn net.Conn) {
 				// Only pass through timeout errors here, not permanent errors
 				// like connection closed. Connection close is normal as we close
 				// the old connection to exit this loop every time we hop.
-				u.recvQueue <- &udpPacket{nil, 0, nil, netErr}
+				// A blocking send could park here forever on a full queue —
+				// Close() unblocks conn.Read but not this send — so give the
+				// notification a ctx.Done exit: at shutdown dropping it is fine.
+				select {
+				case u.recvQueue <- udpPacket{nil, 0, nil, netip.AddrPort{}, netErr}:
+				case <-u.ctx.Done():
+				}
 			}
 			return
 		}
 		select {
-		case u.recvQueue <- &udpPacket{buf, n, conn.RemoteAddr(), nil}:
+		case u.recvQueue <- udpPacket{buf, n, remoteAddr, remoteAddrPort, nil}:
 			// Packet successfully queued
 		default:
 			// Queue is full, drop the packet
@@ -165,15 +184,45 @@ func (u *udpHopPacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) 
 	}
 }
 
+// ReadFromAddrPort is the allocation-free read path consumed by the quic-go
+// fork's basicConn.ReadPacket (it type-asserts this exact signature before
+// falling back to ReadFrom). A successful return must carry a valid AddrPort:
+// quic-go treats an invalid one as "fast path unsupported" and re-reads the
+// socket via ReadFrom, silently dropping the packet. This holds because the
+// underlying socket is dialed as "udp" — direct dialers always yield a
+// *net.UDPAddr RemoteAddr. (Chained dialers that return custom Addr types
+// never reach this code as valid UDP anyway.)
+func (u *udpHopPacketConn) ReadFromAddrPort(b []byte) (n int, addr netip.AddrPort, err error) {
+	select {
+	case <-u.ctx.Done():
+		return 0, netip.AddrPort{}, net.ErrClosed
+	case p := <-u.recvQueue:
+		if p.Err != nil {
+			return 0, netip.AddrPort{}, p.Err
+		}
+		n := copy(b, p.Buf[:p.N])
+		pool.PutBuffer(p.Buf)
+		return n, p.AddrPort, nil
+	}
+}
+
 func (u *udpHopPacketConn) WriteTo(b []byte, _ net.Addr) (n int, err error) {
 	if u.ctx.Err() != nil {
 		return 0, net.ErrClosed
 	}
 	u.connMutex.RLock()
 	defer u.connMutex.RUnlock()
-	// Skip the check for now, always write to the server,
+	// Skip the remote check for now, always write to the connected server,
 	// for the same reason as in ReadFrom.
 	return u.currentConn.Write(b)
+}
+
+// WriteToAddrPort mirrors WriteTo: the underlying socket is connected, so the
+// address is ignored and the packet goes to the connected peer. Together with
+// ReadFromAddrPort it completes the AddrPort-flavored PacketConn shape
+// (dae's PacketConnAddrPort; the quic-go fork may grow a write fast path).
+func (u *udpHopPacketConn) WriteToAddrPort(b []byte, _ netip.AddrPort) (n int, err error) {
+	return u.WriteTo(b, nil)
 }
 
 func (u *udpHopPacketConn) Close() error {
