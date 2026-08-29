@@ -42,7 +42,11 @@ type Config struct {
 	KeepAliveInterval time.Duration
 
 	// KeepAliveTimeout is how long the session
-	// will be closed if no data has arrived
+	// will be closed if no data has arrived.
+	// 0 disables this idle-kill: NOP writes still probe
+	// the link (a failed write tears the session down),
+	// but a silent peer can no longer get healthy idle
+	// sessions reaped.
 	KeepAliveTimeout time.Duration
 
 	// MaxFrameSize is used to control the maximum
@@ -77,7 +81,9 @@ func VerifyConfig(config *Config) error {
 		if config.KeepAliveInterval == 0 {
 			return errors.New("keep-alive interval must be positive")
 		}
-		if config.KeepAliveTimeout < config.KeepAliveInterval {
+		// KeepAliveTimeout == 0 disables the idle-kill; any positive value
+		// must still be larger than the ping interval.
+		if config.KeepAliveTimeout != 0 && config.KeepAliveTimeout < config.KeepAliveInterval {
 			return fmt.Errorf("keep-alive timeout must be larger than keep-alive interval")
 		}
 	}

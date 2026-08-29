@@ -546,15 +546,23 @@ func (s *Session) recvLoop() {
 // keepalive sends NOP frames periodically to keep the connection alive
 func (s *Session) keepalive() {
 	tickerPing := time.NewTicker(s.config.KeepAliveInterval)
-	tickerTimeout := time.NewTicker(s.config.KeepAliveTimeout)
 	defer tickerPing.Stop()
-	defer tickerTimeout.Stop()
+	// KeepAliveTimeout == 0 disables the idle-kill: an smux v1 peer never
+	// replies to NOP and is free to stay silent on an idle session, so "no
+	// frame received" does not imply a dead link. NOP writes still probe the
+	// link — a failed write tears the session down via notifyWriteError.
+	var timeoutC <-chan time.Time
+	if s.config.KeepAliveTimeout > 0 {
+		tickerTimeout := time.NewTicker(s.config.KeepAliveTimeout)
+		defer tickerTimeout.Stop()
+		timeoutC = tickerTimeout.C
+	}
 	for {
 		select {
 		case <-tickerPing.C:
 			s.writeFrameInternal(newFrame(byte(s.config.Version), cmdNOP, 0), tickerPing.C, CLSCTRL)
 			s.notifyBucket() // force a wakeup signal to the recvLoop
-		case <-tickerTimeout.C:
+		case <-timeoutC:
 			if !atomic.CompareAndSwapInt32(&s.sessionIsActive, 1, 0) {
 				// recvLoop may block while bucket is 0, in this case,
 				// session should not be closed.

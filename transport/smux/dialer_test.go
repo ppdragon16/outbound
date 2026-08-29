@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	smuxcore "github.com/daeuniverse/outbound/transport/smux/smux"
 )
 
 // discardServer accepts TCP connections and discards everything, so the smux
@@ -219,4 +221,51 @@ func TestSmuxDisconnectDuringSpike(t *testing.T) {
 	time.Sleep(time.Millisecond) // let some dials get in flight
 	_ = s.Disconnect()
 	wg.Wait()
+}
+
+// TestOpenStreamFailureReleasesReservation pins the contract of failOpenStream:
+// a failed OpenStream must both drop the session from the pool AND retire its
+// reservation. handleIdle skips sessions with reserved>0 forever, so a leaked
+// reservation would keep the removed session (underlying conn + recvLoop and
+// keepalive goroutines) alive indefinitely.
+func TestOpenStreamFailureReleasesReservation(t *testing.T) {
+	c1, c2 := net.Pipe()
+	srv, err := smuxcore.Server(c2, nil)
+	if err != nil {
+		t.Fatalf("Server: %v", err)
+	}
+	defer srv.Close()
+	cli, err := smuxcore.Client(c1, nil)
+	if err != nil {
+		t.Fatalf("Client: %v", err)
+	}
+	defer cli.Close()
+
+	s := &Smux{Concurrency: 10}
+	ps := &pooledSession{Session: cli}
+
+	// The failing caller is the only reservation holder: the leak scenario.
+	ps.reserved = 1
+	s.sessions = append(s.sessions, ps)
+	s.failOpenStream(ps)
+
+	s.mu.Lock()
+	idx := s.findSession(ps)
+	res := ps.reserved
+	s.mu.Unlock()
+	if idx != -1 {
+		t.Fatalf("failed session still in pool at index %d", idx)
+	}
+	if res != 0 {
+		t.Fatalf("reserved = %d after failOpenStream, want 0 (leaked reservation keeps the session alive forever)", res)
+	}
+
+	// Other callers' in-flight reservations are not ours to retire: exactly
+	// one reservation is released per failed OpenStream.
+	s.sessions = append(s.sessions, ps)
+	ps.reserved = 2
+	s.failOpenStream(ps)
+	if ps.reserved != 1 {
+		t.Fatalf("reserved = %d after second failOpenStream, want 1 (only the caller's own reservation is retired)", ps.reserved)
+	}
 }

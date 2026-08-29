@@ -236,7 +236,15 @@ func (s *Smux) dialSession(ctx context.Context) (*pooledSession, error) {
 		return nil, err
 	}
 
-	session, err := smuxcore.Client(conn, nil)
+	// KeepAliveTimeout must be 0 here: an smux v1 peer never replies to NOP
+	// and sing-box sends nothing on an idle session, so the default 30s
+	// "no frame received → close" check reaps healthy idle sessions. With
+	// MinSpare pre-warm that turned into a ~15 dials/min re-dial loop in
+	// production. The 10s NOP stays on as a write-error liveness probe and
+	// NAT refresh; a real peer close still arrives as FIN/RST via recvLoop.
+	cfg := *smuxcore.DefaultConfig
+	cfg.KeepAliveTimeout = 0
+	session, err := smuxcore.Client(conn, &cfg)
 	if err != nil {
 		conn.Close()
 		return nil, err
@@ -408,6 +416,21 @@ func (s *Smux) removeSessionLocked(ps *pooledSession) {
 	}
 }
 
+// failOpenStream handles a failed OpenStream: the session leaves the pool and
+// its reservation is retired. Retiring the reservation matters — handleIdle
+// skips sessions with reserved>0 forever, so leaking it would keep the removed
+// session (conn + recvLoop/keepalive goroutines) alive indefinitely.
+// A session that never registered a stream (e.g. the SYN write timed out while
+// the link stayed up) never triggers OnIdle, so nothing else would close it —
+// do it here when it is demonstrably empty.
+func (s *Smux) failOpenStream(ps *pooledSession) {
+	s.removeSession(ps)
+	s.releaseReservation(ps)
+	if ps.NumStreams() == 0 {
+		ps.Close()
+	}
+}
+
 // cancelIdleTimer stops the pending idle timeout for a session, if any.
 func (s *Smux) cancelIdleTimer(ps *pooledSession) {
 	if timer, ok := s.idleTimers.LoadAndDelete(ps); ok {
@@ -425,7 +448,7 @@ func (s *Smux) DialContext(ctx context.Context, network, addr string) (c net.Con
 		s.cancelIdleTimer(ps)
 		stream, err := ps.OpenStream()
 		if err != nil {
-			s.removeSession(ps)
+			s.failOpenStream(ps)
 			return nil, err
 		}
 		s.releaseReservation(ps)
@@ -452,7 +475,7 @@ func (s *Smux) ListenPacket(ctx context.Context, addr string) (net.PacketConn, e
 	s.cancelIdleTimer(ps)
 	stream, err := ps.OpenStream()
 	if err != nil {
-		s.removeSession(ps)
+		s.failOpenStream(ps)
 		return nil, err
 	}
 	s.releaseReservation(ps)
