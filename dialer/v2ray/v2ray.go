@@ -54,6 +54,8 @@ type V2Ray struct {
 	Mux            FlexibleBool   `json:"mux,omitempty"`
 	MuxConcurrency FlexibleInt    `json:"muxConcurrency,omitempty"`
 	MuxIdleTimeout FlexibleInt    `json:"muxIdleTimeout,omitempty"`
+	MuxMinSpare    FlexibleInt    `json:"muxMinSpare,omitempty"`
+	MuxMaxDialing  FlexibleInt    `json:"muxMaxDialing,omitempty"`
 	Smux           FlexibleBool   `json:"smux,omitempty"`
 }
 
@@ -273,6 +275,8 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 			PassthroughUdp: true,
 			Concurrency:    concurrency,
 			IdleTimeout:    time.Duration(idleTimeout) * time.Second,
+			MinSpare:       int(s.MuxMinSpare),
+			MaxDialing:     int(s.MuxMaxDialing),
 		}, nil
 	}
 	if s.Mux {
@@ -331,6 +335,8 @@ func ParseVlessURL(vless string) (data *V2Ray, err error) {
 	data.Smux = parseFlexibleBool(u.Query().Get("smux"))
 	data.MuxConcurrency = parseFlexibleInt(u.Query().Get("mux_concurrency"))
 	data.MuxIdleTimeout = parseFlexibleInt(u.Query().Get("mux_idle_timeout"))
+	data.MuxMinSpare = parseFlexibleInt(u.Query().Get("mux_min_spare"))
+	data.MuxMaxDialing = parseFlexibleInt(u.Query().Get("mux_max_dialing"))
 	if data.Net == "" {
 		data.Net = "tcp"
 	}
@@ -417,6 +423,8 @@ func ParseVmessURL(vmess string) (data *V2Ray, err error) {
 		info.Smux = parseFlexibleBool(q.Get("smux"))
 		info.MuxConcurrency = parseFlexibleInt(q.Get("mux_concurrency"))
 		info.MuxIdleTimeout = parseFlexibleInt(q.Get("mux_idle_timeout"))
+		info.MuxMinSpare = parseFlexibleInt(q.Get("mux_min_spare"))
+		info.MuxMaxDialing = parseFlexibleInt(q.Get("mux_max_dialing"))
 		if info.Net == "websocket" {
 			info.Net = "ws"
 		}
@@ -501,6 +509,18 @@ func (s *V2Ray) ExportToURL() string {
 
 		if s.Smux {
 			common.SetValue(&query, "smux", "1")
+			if s.MuxConcurrency > 0 {
+				common.SetValue(&query, "mux_concurrency", strconv.Itoa(int(s.MuxConcurrency)))
+			}
+			if s.MuxIdleTimeout > 0 {
+				common.SetValue(&query, "mux_idle_timeout", strconv.Itoa(int(s.MuxIdleTimeout)))
+			}
+			if s.MuxMinSpare > 0 {
+				common.SetValue(&query, "mux_min_spare", strconv.Itoa(int(s.MuxMinSpare)))
+			}
+			if s.MuxMaxDialing > 0 {
+				common.SetValue(&query, "mux_max_dialing", strconv.Itoa(int(s.MuxMaxDialing)))
+			}
 		}
 		U := url.URL{
 			Scheme:   "vless",
