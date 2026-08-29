@@ -62,9 +62,10 @@ type stream struct {
 	chWriteClosed   chan struct{}
 	writeClosedOnce sync.Once // Ensures chWriteClosed is closed only once
 
-	// read/write deadline
-	readDeadline  atomic.Value
-	writeDeadline atomic.Value
+	// read/write deadline (unixnano; 0 = disabled). Stored as int64 to avoid
+	// boxing a time.Time on every SetReadDeadline/SetWriteDeadline call.
+	readDeadline  atomic.Int64
+	writeDeadline atomic.Int64
 
 	// reusable timers to avoid per-call heap allocation from time.NewTimer.
 	// Each timer is used exclusively by one goroutine: readTimer by the
@@ -434,8 +435,8 @@ func resetTimer(t **time.Timer, d time.Duration) *time.Timer {
 // sendWindowUpdate sends a window update command to the peer.
 func (s *stream) sendWindowUpdate(consumed uint32) error {
 	var deadline <-chan time.Time
-	if d, ok := s.readDeadline.Load().(time.Time); ok && !d.IsZero() {
-		deadline = resetTimer(&s.readTimer, time.Until(d)).C
+	if d := s.readDeadline.Load(); d > 0 {
+		deadline = resetTimer(&s.readTimer, time.Until(time.Unix(0, d))).C
 		defer s.readTimer.Stop()
 	}
 
@@ -451,8 +452,8 @@ func (s *stream) sendWindowUpdate(consumed uint32) error {
 // waitRead blocks until a read event occurs or a deadline is reached.
 func (s *stream) waitRead() error {
 	var deadline <-chan time.Time
-	if d, ok := s.readDeadline.Load().(time.Time); ok && !d.IsZero() {
-		deadline = resetTimer(&s.readTimer, time.Until(d)).C
+	if d := s.readDeadline.Load(); d > 0 {
+		deadline = resetTimer(&s.readTimer, time.Until(time.Unix(0, d))).C
 		defer s.readTimer.Stop()
 	}
 
@@ -519,8 +520,8 @@ func (s *stream) writeV1(b []byte) (n int, err error) {
 
 	// create write deadline timer
 	var deadline <-chan time.Time
-	if d, ok := s.writeDeadline.Load().(time.Time); ok && !d.IsZero() {
-		deadline = resetTimer(&s.writeTimer, time.Until(d)).C
+	if d := s.writeDeadline.Load(); d > 0 {
+		deadline = resetTimer(&s.writeTimer, time.Until(time.Unix(0, d))).C
 		defer s.writeTimer.Stop()
 	}
 
@@ -563,28 +564,19 @@ func (s *stream) writeV2(b []byte) (n int, err error) {
 	sent := 0
 	frame := newFrame(byte(s.sess.config.Version), cmdPSH, s.id)
 
-	var deadlineTimer *time.Timer
+	// Reuse the per-stream writeTimer (like writeV1) instead of a per-call
+	// local timer, so a Write with a deadline doesn't allocate a new timer.
 	defer func() {
-		stopTimer(deadlineTimer)
+		stopTimer(s.writeTimer)
 	}()
 
 	for {
 		deadline := (<-chan time.Time)(nil)
-		if d, ok := s.writeDeadline.Load().(time.Time); ok && !d.IsZero() {
-			dur := time.Until(d)
-			if dur < 0 {
-				dur = 0
-			}
-			if deadlineTimer == nil {
-				deadlineTimer = time.NewTimer(dur)
-			} else {
-				stopTimer(deadlineTimer)
-				deadlineTimer.Reset(dur)
-			}
-			deadline = deadlineTimer.C
-		} else if deadlineTimer != nil {
-			stopTimer(deadlineTimer)
-			deadlineTimer = nil
+		if d := s.writeDeadline.Load(); d > 0 {
+			dur := max(time.Until(time.Unix(0, d)), 0)
+			deadline = resetTimer(&s.writeTimer, dur).C
+		} else {
+			stopTimer(s.writeTimer)
 		}
 
 		// per stream sliding window control
@@ -724,7 +716,7 @@ func (s *stream) GetDieCh() <-chan struct{} {
 // net.Conn.SetReadDeadline.
 // A zero time value disables the deadline.
 func (s *stream) SetReadDeadline(t time.Time) error {
-	s.readDeadline.Store(t)
+	s.readDeadline.Store(deadlineUnixNano(t))
 	s.wakeupReader()
 	return nil
 }
@@ -733,7 +725,7 @@ func (s *stream) SetReadDeadline(t time.Time) error {
 // net.Conn.SetWriteDeadline.
 // A zero time value disables the deadline.
 func (s *stream) SetWriteDeadline(t time.Time) error {
-	s.writeDeadline.Store(t)
+	s.writeDeadline.Store(deadlineUnixNano(t))
 	s.wakeupWriter()
 	return nil
 }
@@ -749,6 +741,15 @@ func (s *stream) SetDeadline(t time.Time) error {
 		return err
 	}
 	return nil
+}
+
+// deadlineUnixNano converts a net.Conn deadline to unixnano for atomic.Int64
+// storage. A zero time (deadline disabled) maps to 0.
+func deadlineUnixNano(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixNano()
 }
 
 // session closes
