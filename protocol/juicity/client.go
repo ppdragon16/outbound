@@ -93,7 +93,9 @@ type clientImpl struct {
 	// Shared transport support: when non-nil, points to Dialer.sharedTransport.
 	// clientImpls share one UDP socket + Transport instead of creating one each.
 	sharedTransportPtr **quic.Transport
-	sharedProxyAddrs   []net.Addr
+	// sharedAddrs is the Dialer's refreshable candidate cache; Get re-resolves
+	// when the list is stale or the previous connect failed.
+	sharedAddrs *C.AddrCache
 }
 
 func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, dialFn common.DialFunc) (quic.Connection, error) {
@@ -118,7 +120,12 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 	if t.sharedTransportPtr != nil {
 		if st := *t.sharedTransportPtr; st != nil {
 			transport = st
-			addrs = t.sharedProxyAddrs
+			if t.sharedAddrs != nil {
+				// Get never fails here: the cache is always seeded by
+				// NewDialer and resolution failures fall back to the cached
+				// list.
+				addrs, _ = t.sharedAddrs.Get()
+			}
 		}
 	}
 	if transport == nil {
@@ -133,6 +140,11 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 	}, func(qc quic.Connection) {
 		_ = qc.CloseWithError(0, "")
 	})
+	// Feed the outcome back so a failed connect forces re-resolution next
+	// time (e.g. rotated entry IPs).
+	if t.sharedAddrs != nil {
+		t.sharedAddrs.Report(err == nil)
+	}
 	if err != nil {
 		// Only close the transport if we own it (not shared).
 		if t.sharedTransportPtr == nil {

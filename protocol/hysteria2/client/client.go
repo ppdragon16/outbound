@@ -275,13 +275,13 @@ func (c *Client) candidates() ([]net.Addr, error) {
 	if c.addrs == nil {
 		return c.config.Addrs, nil
 	}
-	return c.addrs.get()
+	return c.addrs.Get()
 }
 
 // reportConnect feeds the connect outcome back into the candidate cache.
 func (c *Client) reportConnect(success bool) {
 	if c.addrs != nil {
-		c.addrs.report(success)
+		c.addrs.Report(success)
 	}
 }
 

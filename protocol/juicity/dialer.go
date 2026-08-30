@@ -25,8 +25,11 @@ func init() {
 type Dialer struct {
 	clientRing *clientRing
 
-	proxyAddress    string
-	proxyAddrs      []net.Addr      // cached resolved proxy addresses (IPv4-first)
+	proxyAddress string
+	// addrs is the refreshable candidate list (IPv4-first): re-resolves when
+	// stale or after a failed connect, falling back to the cached list on DNS
+	// hiccups, so rotated entry IPs heal without a daemon restart.
+	addrs           *C.AddrCache
 	dialFn          common.DialFunc // cached dial function, avoids per-call closure allocation
 	sharedTransport *quic.Transport // shared QUIC transport across all clientImpls; created on first use
 	transportMu     sync.Mutex      // protects sharedTransport
@@ -49,15 +52,16 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	if reservedStreamsCapability > 5 {
 		reservedStreamsCapability = 5
 	}
-	// Pre-resolve proxy addresses (IPv4-first) to avoid per-call DNS lookups
-	// and to race the QUIC handshake across them.
+	// Pre-resolve proxy addresses (IPv4-first) to seed the candidate cache;
+	// the cache re-resolves when stale or after a failed connect and races
+	// the QUIC handshake across the candidates.
 	proxyAddrs, err := C.ResolveUDPAddrs(header.ProxyAddress)
 	if err != nil {
 		return nil, fmt.Errorf("resolve proxy address: %w", err)
 	}
 	d := &Dialer{
 		proxyAddress: header.ProxyAddress,
-		proxyAddrs:   proxyAddrs,
+		addrs:        C.NewAddrCache(proxyAddrs, func() ([]net.Addr, error) { return C.ResolveUDPAddrs(header.ProxyAddress) }),
 		nextDialer:   nextDialer,
 	}
 	// Pre-create the dial function to avoid per-call closure allocation.
@@ -73,7 +77,11 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 			}
 			d.sharedTransport = &quic.Transport{Conn: pc}
 		}
-		return d.sharedTransport, d.proxyAddrs, nil
+		addrs, err = d.addrs.Get()
+		if err != nil {
+			return nil, nil, err
+		}
+		return d.sharedTransport, addrs, nil
 	}
 	d.clientRing = newClientRing(func(capabilityCallback func(n int64)) *clientImpl {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -95,7 +103,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 					// that would be immediately replaced via SetCongestionControl.
 					InitialCongestionControl: bbr.NewBbrSender(
 						bbr.DefaultClock{},
-						bbr.GetInitialPacketSize(d.proxyAddrs[0]),
+						bbr.GetInitialPacketSize(proxyAddrs[0]),
 					),
 				},
 				Uuid:                 id,
@@ -106,7 +114,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 				UnderlayAuth:         make(chan *UnderlayAuth, 64),
 			},
 			sharedTransportPtr: &d.sharedTransport,
-			sharedProxyAddrs:   d.proxyAddrs,
+			sharedAddrs:        d.addrs,
 		}
 	}, reservedStreamsCapability)
 	return d, nil
@@ -135,13 +143,13 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 				if err != nil {
 					return nil, err
 				}
-				transport, _, err := d.dialFn(context.TODO(), d.nextDialer)
+				transport, addrs, err := d.dialFn(context.TODO(), d.nextDialer)
 				if err != nil {
 					return nil, err
 				}
 				pktConn := &TransportPacketConn{
 					Transport: transport,
-					proxyAddr: d.proxyAddrs[0].(*net.UDPAddr),
+					proxyAddr: addrs[0].(*net.UDPAddr),
 					tgt:       innerAddr.AddrPort(),
 					masterKey: psk,
 					firstIv:   iv,
