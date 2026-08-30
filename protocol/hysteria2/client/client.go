@@ -42,6 +42,10 @@ type Client struct {
 	conn          quic.Connection
 	udpSM         *udpSessionManager
 	connectCancel context.CancelFunc // set during Connect, so Disconnect can abort the handshake
+	// connectGen increments on every Connect while holding the lock; the
+	// teardown defer compares its generation to detect that a newer
+	// overlapping connect has superseded it (CancelFunc is not comparable).
+	connectGen int
 }
 
 func NewClient(config *Config) (*Client, error) {
@@ -199,15 +203,24 @@ func teardownDialOutcome(r dialOutcome) {
 }
 
 func (c *Client) Connect() (err error) {
-	// Tear down any existing connection while holding the lock.
+	// Tear down any existing connection while holding the lock, and cancel a
+	// still-in-flight previous handshake (e.g. an overlapping Connect from
+	// another check-option loop): without the cancel it would burn its full
+	// dial budget. Its failure cleanup is generation-guarded below, so it
+	// cannot touch the tunnel this connect is about to build.
 	c.mu.Lock()
 	c.close()
+	if c.connectCancel != nil {
+		c.connectCancel()
+	}
 
 	// Create a context that combines the dial timeout (8s) with
 	// cancellation by Disconnect. The timeout still bounds the
 	// handshake when Disconnect is not called.
 	ctx, cancel := context.WithTimeout(context.Background(), netproxy.DialTimeout)
 	c.connectCancel = cancel
+	c.connectGen++
+	myGen := c.connectGen
 	c.mu.Unlock()
 
 	// Report the connect outcome so the candidate cache knows whether to
@@ -223,19 +236,30 @@ func (c *Client) Connect() (err error) {
 		return aerr
 	}
 
+	// Declared before the defer so the cleanup can do the generational
+	// pointer check against this attempt's outcome.
+	var outcome dialOutcome
+
 	defer func() {
 		cancel()
 
 		// Re-acquire the lock to commit or tear down state.
 		c.mu.Lock()
-		if err != nil {
+		// Generational guard: only tear down state this connect committed.
+		// outcome.pktConn is non-nil iff the handshake produced resources;
+		// if a newer overlapping connect has already replaced c.pktConn,
+		// closing unconditionally here would kill the newer tunnel.
+		if err != nil && outcome.pktConn != nil && c.pktConn == outcome.pktConn {
 			c.close()
 		}
-		c.connectCancel = nil
+		// Likewise only clear the cancel func while this generation is
+		// still the newest — a newer connect may have already replaced it.
+		if c.connectGen == myGen {
+			c.connectCancel = nil
+		}
 		c.mu.Unlock()
 	}()
 
-	var outcome dialOutcome
 	var derr error
 	if addrs[0].Network() != "udphop" {
 		outcome, derr = c.connectSinglePort(ctx, addrs)
