@@ -35,6 +35,7 @@ type HandshakeInfo struct {
 
 type Client struct {
 	config *Config
+	addrs  *addrsCache // nil when config.ServerAddr is empty: frozen candidates
 
 	mu            sync.Mutex
 	pktConn       net.PacketConn
@@ -47,9 +48,13 @@ func NewClient(config *Config) (*Client, error) {
 	if err := config.verifyAndFill(); err != nil {
 		return nil, err
 	}
-	return &Client{
+	c := &Client{
 		config: config,
-	}, nil
+	}
+	if config.ServerAddr != "" {
+		c.addrs = newAddrsCache(config.Addrs, config.addrResolver())
+	}
+	return c, nil
 }
 
 // openStream wraps the stream with QStream, which handles Close() properly
@@ -205,6 +210,19 @@ func (c *Client) Connect() (err error) {
 	c.connectCancel = cancel
 	c.mu.Unlock()
 
+	// Report the connect outcome so the candidate cache knows whether to
+	// keep serving the current list or force a re-resolution next time.
+	// Registered before the teardown defer, so it runs after err is final.
+	defer c.reportConnect(err == nil)
+
+	// Candidate list for this attempt: refreshed per TTL / after a failed
+	// connect when the server address is re-resolvable, otherwise the
+	// build-time snapshot.
+	addrs, aerr := c.candidates()
+	if aerr != nil {
+		return aerr
+	}
+
 	defer func() {
 		cancel()
 
@@ -219,10 +237,10 @@ func (c *Client) Connect() (err error) {
 
 	var outcome dialOutcome
 	var derr error
-	if c.config.Addrs[0].Network() != "udphop" {
-		outcome, derr = c.connectSinglePort(ctx)
+	if addrs[0].Network() != "udphop" {
+		outcome, derr = c.connectSinglePort(ctx, addrs)
 	} else {
-		outcome, derr = c.connectPortHopping(ctx)
+		outcome, derr = c.connectPortHopping(ctx, addrs)
 	}
 	if derr != nil {
 		err = derr
@@ -250,12 +268,29 @@ func (c *Client) Connect() (err error) {
 	return nil
 }
 
+// candidates returns the address list to race this connect attempt with:
+// refreshed (per TTL / after a failed connect) when the server address is
+// re-resolvable, otherwise the frozen build-time snapshot.
+func (c *Client) candidates() ([]net.Addr, error) {
+	if c.addrs == nil {
+		return c.config.Addrs, nil
+	}
+	return c.addrs.get()
+}
+
+// reportConnect feeds the connect outcome back into the candidate cache.
+func (c *Client) reportConnect(success bool) {
+	if c.addrs != nil {
+		c.addrs.report(success)
+	}
+}
+
 // connectSinglePort races a single handshake across all candidate addresses
 // (happy-eyeballs). No retry per address: if a single port doesn't work on any
 // address, the user must fix the URL. On success returns the winner's pktConn
 // and quic connection; the caller commits them under the Client lock.
-func (c *Client) connectSinglePort(ctx context.Context) (dialOutcome, error) {
-	return common.Race(ctx, c.config.Addrs, c.dialSinglePortAddr, teardownDialOutcome)
+func (c *Client) connectSinglePort(ctx context.Context, addrs []net.Addr) (dialOutcome, error) {
+	return common.Race(ctx, addrs, c.dialSinglePortAddr, teardownDialOutcome)
 }
 
 // dialSinglePortAddr performs one handshake on one non-port-hopping address.
@@ -290,8 +325,8 @@ func (c *Client) dialSinglePortAddr(ctx context.Context, addr net.Addr) (dialOut
 // addresses (happy-eyeballs). Each address runs the retry loop independently,
 // re-rolling a random port on every attempt. The first address whose handshake
 // completes wins; the others are torn down.
-func (c *Client) connectPortHopping(ctx context.Context) (dialOutcome, error) {
-	return common.Race(ctx, c.config.Addrs, func(ctx context.Context, addr net.Addr) (dialOutcome, error) {
+func (c *Client) connectPortHopping(ctx context.Context, addrs []net.Addr) (dialOutcome, error) {
+	return common.Race(ctx, addrs, func(ctx context.Context, addr net.Addr) (dialOutcome, error) {
 		udpHopAddr, ok := addr.(*udphop.UDPHopAddr)
 		if !ok {
 			return dialOutcome{}, oops.In("HTTP3 Handshake").

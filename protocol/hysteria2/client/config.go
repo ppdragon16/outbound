@@ -7,9 +7,11 @@ import (
 
 	utls "github.com/refraction-networking/utls"
 
+	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/oops"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/pmtud"
+	"github.com/daeuniverse/outbound/protocol/hysteria2/udphop"
 	"github.com/daeuniverse/quic-go"
 )
 
@@ -24,12 +26,24 @@ const (
 )
 
 type Config struct {
-	// Addrs is the list of candidate server addresses (all resolved IPs for
-	// the server host, sorted IPv4-first). The Client races a QUIC handshake
-	// across them and keeps the first that succeeds. All entries share the
-	// same concrete type: *net.UDPAddr for a single port, or
-	// *udphop.UDPHopAddr for a port-hopping range.
-	Addrs           []net.Addr
+	// Addrs is the initial list of candidate server addresses (all resolved
+	// IPs for the server host, sorted IPv4-first). The Client races a QUIC
+	// handshake across them and keeps the first that succeeds. All entries
+	// share the same concrete type: *net.UDPAddr for a single port, or
+	// *udphop.UDPHopAddr for a port-hopping range. When ServerAddr is set
+	// this list only seeds the refreshable candidate cache; otherwise it is
+	// the frozen candidate list (legacy behavior).
+	Addrs []net.Addr
+	// ServerAddr is the raw "host:port" server address (the port may be a
+	// hopping range like "60000-65530"). When non-empty the Client
+	// re-resolves it instead of dialing the Addrs snapshot forever: the
+	// candidate list refreshes when stale (TTL) or when the previous connect
+	// failed, so a rotated server entry or a dead address family heals within
+	// one reconnect instead of requiring a daemon restart.
+	ServerAddr string
+	// PortHopping reports whether ServerAddr's port is a hopping range; it
+	// selects the resolver used for refreshes.
+	PortHopping     bool
 	NextDialer      netproxy.Dialer
 	Auth            string
 	TLSConfig       utls.Config
@@ -94,6 +108,15 @@ func (c *Config) verifyAndFill() error {
 
 	c.filled = true
 	return nil
+}
+
+// addrResolver returns the function that re-resolves ServerAddr, preserving
+// the single-port / port-hopping split of the initial Addrs snapshot.
+func (c *Config) addrResolver() func() ([]net.Addr, error) {
+	if c.PortHopping {
+		return func() ([]net.Addr, error) { return udphop.ResolveUDPHopAddrs(c.ServerAddr) }
+	}
+	return func() ([]net.Addr, error) { return common.ResolveUDPAddrs(c.ServerAddr) }
 }
 
 type ConnFactory interface {

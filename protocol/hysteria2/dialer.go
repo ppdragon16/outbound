@@ -55,15 +55,23 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		config.ObfsPassword = feature.(*Feature1).ObfsPassword
 	}
 
+	serverAddr := net.JoinHostPort(host, port)
+	portHopping := isPortHoppingPort(port)
 	var err error
-	if isPortHoppingPort(port) {
-		config.Addrs, err = udphop.ResolveUDPHopAddrs(net.JoinHostPort(host, port))
+	if portHopping {
+		config.Addrs, err = udphop.ResolveUDPHopAddrs(serverAddr)
 	} else {
-		config.Addrs, err = common.ResolveUDPAddrs(net.JoinHostPort(host, port))
+		config.Addrs, err = common.ResolveUDPAddrs(serverAddr)
 	}
 	if err != nil {
 		return nil, err
 	}
+	// Let the client refresh the candidate list on later connects instead of
+	// dialing this build-time snapshot forever: providers rotate entry IPs
+	// and a dead address family (e.g. flaky v6) must heal on the next connect
+	// without a daemon restart.
+	config.ServerAddr = serverAddr
+	config.PortHopping = portHopping
 
 	client, err := client.NewClient(config)
 	if err != nil {
