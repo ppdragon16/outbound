@@ -125,10 +125,42 @@ func TestFragUDPMessage(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := FragUDPMessage(*tt.args.m, tt.args.maxSize); !reflect.DeepEqual(got, tt.want) {
+			got, err := FragUDPMessage(*tt.args.m, tt.args.maxSize)
+			if err != nil {
+				t.Fatalf("FragUDPMessage() unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("FragUDPMessage() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestFragUDPMessageIllegalCapacity pins the two capacity guards: a max size
+// that cannot hold the UDP header (previously a divide-by-zero or a negative
+// fragment count) and a payload that would need more than the 255 fragments
+// a uint8 FragCount can address (previously silently truncated, corrupting
+// every emitted fragment).
+func TestFragUDPMessageIllegalCapacity(t *testing.T) {
+	m := protocol.UDPMessage{
+		SessionID: 123,
+		PacketID:  123,
+		FragID:    0,
+		FragCount: 1,
+		AddrPort:  netip.MustParseAddrPort("1.2.3.4:1"),
+		Data:      []byte("hello"),
+	}
+
+	// maxSize smaller than the UDP header.
+	if got, err := FragUDPMessage(m, m.HeaderSize()-1); err == nil {
+		t.Fatalf("FragUDPMessage(maxSize < header) = %d frags, want error", len(got))
+	}
+
+	// A payload requiring 256 fragments.
+	big := m
+	big.Data = make([]byte, 256*(100-m.HeaderSize())+1)
+	if got, err := FragUDPMessage(big, 100); err == nil {
+		t.Fatalf("FragUDPMessage(>255 frags) = %d frags, want error", len(got))
 	}
 }
 

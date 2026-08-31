@@ -1,21 +1,28 @@
 package frag
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/protocol"
 )
 
-func FragUDPMessage(m protocol.UDPMessage, maxSize int) []protocol.UDPMessage {
+func FragUDPMessage(m protocol.UDPMessage, maxSize int) ([]protocol.UDPMessage, error) {
 	if m.Size() <= maxSize {
-		return []protocol.UDPMessage{m}
+		return []protocol.UDPMessage{m}, nil
 	}
 	fullPayload := m.Data
 	maxPayloadSize := maxSize - m.HeaderSize()
+	if maxPayloadSize <= 0 {
+		return nil, fmt.Errorf("hysteria2: datagram max size %d cannot hold UDP header of %d bytes", maxSize, m.HeaderSize())
+	}
 	off := 0
 	fragID := uint8(0)
-	fragCount := uint8((len(fullPayload) + maxPayloadSize - 1) / maxPayloadSize) // round up
+	fragCount := (len(fullPayload) + maxPayloadSize - 1) / maxPayloadSize // round up
+	if fragCount > 255 {
+		return nil, fmt.Errorf("hysteria2: datagram requires %d fragments, exceeds uint8 FragCount", fragCount)
+	}
 	frags := make([]protocol.UDPMessage, fragCount)
 	for off < len(fullPayload) {
 		payloadSize := len(fullPayload) - off
@@ -24,13 +31,13 @@ func FragUDPMessage(m protocol.UDPMessage, maxSize int) []protocol.UDPMessage {
 		}
 		frag := m
 		frag.FragID = fragID
-		frag.FragCount = fragCount
+		frag.FragCount = uint8(fragCount)
 		frag.Data = fullPayload[off : off+payloadSize]
 		frags[fragID] = frag
 		off += payloadSize
 		fragID++
 	}
-	return frags
+	return frags, nil
 }
 
 // fragPiece holds a fragment's data sub-slice together with the full-cap
