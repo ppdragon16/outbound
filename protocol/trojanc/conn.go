@@ -5,6 +5,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/daeuniverse/outbound/common/iout"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/socks5"
@@ -28,6 +29,10 @@ type Conn struct {
 
 	writeMutex sync.Mutex
 	onceWrite  bool
+	// writeBroken marks a connection whose framing is no longer trustworthy:
+	// a short write may have left a partial frame on the wire, and the peer
+	// would mis-parse anything appended after it.
+	writeBroken bool
 }
 
 func ParseNetwork(n byte) string {
@@ -71,6 +76,10 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
 
+	if c.writeBroken {
+		return 0, net.ErrClosed
+	}
+
 	if !c.onceWrite {
 		// Calculate potential header size: Pass(56) + CRLF(2) + Cmd(1) + Addr(max 259) + CRLF(2)
 		// Total max header is around 320 bytes.
@@ -100,8 +109,12 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		// 4. Write Payload (zero-copy from 'b')
 		curr += copy(buf[curr:], b)
 
-		// Send everything in one single syscall
-		if _, err := c.Conn.Write(buf[:curr]); err != nil {
+		// Send everything in one single syscall. The password hash, command
+		// and address only precede the payload in this first frame, so the
+		// handshake stays uncommitted until every byte is out: a short write
+		// must not let the next Write resend them.
+		if _, err := iout.WriteFull(c.Conn, buf[:curr]); err != nil {
+			c.writeBroken = true
 			return 0, fmt.Errorf("failed to write handshake: %w", err)
 		}
 
@@ -109,5 +122,9 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		return len(b), nil
 	}
 
-	return c.Conn.Write(b)
+	if _, err := iout.WriteFull(c.Conn, b); err != nil {
+		c.writeBroken = true
+		return 0, err
+	}
+	return len(b), nil
 }

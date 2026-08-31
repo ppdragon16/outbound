@@ -11,6 +11,7 @@ import (
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/common"
+	"github.com/daeuniverse/outbound/common/iout"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/oops"
 	"github.com/daeuniverse/outbound/pool"
@@ -43,6 +44,7 @@ type TCPConn struct {
 	cipherWrite cipher.AEAD
 	onceRead    bool
 	onceWrite   bool
+	writeBroken bool
 
 	nonceRead        [12]byte
 	nonceWrite       [12]byte
@@ -235,6 +237,10 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 	n = len(b)
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
+	if c.writeBroken {
+		return 0, net.ErrClosed
+	}
+	firstWrite := !c.onceWrite
 
 	// 1. 预计算总空间，一次性拿够
 	totalNeed := c.cipherConf.SaltLen + (len(c.pskList)-1)*16 + 2048 + len(b) + (len(b)/16384+2)*40
@@ -291,8 +297,6 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 		c.cipherWrite.Seal(buf[curr:curr], nonceWrite, vHeader[:vLen], nil)
 		curr += vLen + c.cipherConf.TagLen
 		common.BytesIncLittleEndian(nonceWrite)
-
-		c.onceWrite = true
 	}
 
 	// --- D. Data Chunks ---
@@ -316,8 +320,17 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 	}
 
 	// --- E. 发送 ---
-	_, err = c.Conn.Write(buf[:curr])
-	return n, err
+	// The salt, identity and request headers ride in this frame, so the
+	// handshake stays uncommitted until every byte is out: a short write
+	// must not let the next Write skip them.
+	if _, err = iout.WriteFull(c.Conn, buf[:curr]); err != nil {
+		c.writeBroken = true
+		return 0, err
+	}
+	if firstWrite {
+		c.onceWrite = true
+	}
+	return n, nil
 }
 
 type ReusableReader struct {

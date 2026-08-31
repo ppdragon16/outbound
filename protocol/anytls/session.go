@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/daeuniverse/outbound/common/iout"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/infra/socks"
 )
@@ -380,11 +381,11 @@ func (s *session) writeConnLocked(b []byte) (n int, err error) {
 					continue
 				}
 				if remainPayloadLen > l {
-					_, err = s.conn.Write(b[:l])
+					wn, err := iout.WriteFull(s.conn, b[:l])
+					n += wn
 					if err != nil {
-						return 0, err
+						return n, err
 					}
-					n += l
 					b = b[l:]
 				} else if remainPayloadLen > 0 {
 					paddingLen := l - remainPayloadLen - headerOverHeadSize
@@ -395,15 +396,22 @@ func (s *session) writeConnLocked(b []byte) (n int, err error) {
 						combined := pool.GetBuffer(len(b) + headerOverHeadSize + paddingLen)
 						copy(combined, b)
 						fillWasteFrame(combined[len(b):], paddingLen)
-						_, err = s.conn.Write(combined)
+						wn, err := iout.WriteFull(s.conn, combined)
 						pool.PutBuffer(combined)
+						if wn > remainPayloadLen {
+							wn = remainPayloadLen
+						}
+						n += wn
+						if err != nil {
+							return n, err
+						}
 					} else {
-						_, err = s.conn.Write(b)
+						wn, err := iout.WriteFull(s.conn, b)
+						n += wn
+						if err != nil {
+							return n, err
+						}
 					}
-					if err != nil {
-						return 0, err
-					}
-					n += remainPayloadLen
 					b = nil
 				} else {
 					if l > maxFramePayloadSize {
@@ -411,10 +419,10 @@ func (s *session) writeConnLocked(b []byte) (n int, err error) {
 					}
 					padding := pool.GetBuffer(headerOverHeadSize + l)
 					fillWasteFrame(padding, l)
-					_, err = s.conn.Write(padding)
+					_, err = iout.WriteFull(s.conn, padding)
 					pool.PutBuffer(padding)
 					if err != nil {
-						return 0, err
+						return n, err
 					}
 					b = nil
 				}
@@ -422,13 +430,13 @@ func (s *session) writeConnLocked(b []byte) (n int, err error) {
 			if len(b) == 0 {
 				return n, nil
 			}
-			n2, err := s.conn.Write(b)
+			n2, err := iout.WriteFull(s.conn, b)
 			return n + n2, err
 		}
 		s.sendPadding = false
 	}
 
-	return s.conn.Write(b)
+	return iout.WriteFull(s.conn, b)
 }
 
 func fillWasteFrame(frame []byte, payloadLen int) {
