@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
@@ -86,6 +87,11 @@ func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 				InsecureSkipVerify: m.skipVerify,
 				NextProtos:         m.alpn,
 			},
+			// Without an idle timeout the transport pins its TLS
+			// connections (and their read/write goroutines) for the
+			// process lifetime; nothing reaps transports explicitly.
+			IdleConnTimeout:     90 * time.Second,
+			TLSHandshakeTimeout: 10 * time.Second,
 		},
 	}
 	m.tripper = tripper
