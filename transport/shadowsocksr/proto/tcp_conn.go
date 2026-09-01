@@ -35,6 +35,9 @@ func NewConn(c net.Conn, proto IProtocol) (*Conn, error) {
 }
 
 func (c *Conn) Read(b []byte) (n int, err error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 	// Conn Read: obfs->ss->proto
@@ -45,9 +48,9 @@ func (c *Conn) Read(b []byte) (n int, err error) {
 		}
 		c.readLater = nil
 	}
-readAgain:
 	buf := pool.GetBuffer(2048)
 	defer pool.PutBuffer(buf)
+readAgain:
 	n, err = c.Conn.Read(buf)
 	if err != nil {
 		return 0, err
@@ -58,18 +61,23 @@ readAgain:
 
 	// append buf to c.underPostdecryptBuf
 	c.underPostdecryptBuf.Write(buf[:n])
-	// and read it to buf immediately
-	buf = c.underPostdecryptBuf.Bytes()
-	postDecryptedData, length, err := c.Protocol.Decode(buf)
+	postDecryptedData, length, err := c.Protocol.Decode(c.underPostdecryptBuf.Bytes())
 	if err != nil {
 		c.underPostdecryptBuf.Reset()
 		return 0, err
 	}
 	if length == 0 {
-		// not enough to postDecrypt
-		return 0, nil
+		// Not enough to postDecrypt yet. Keep reading so callers never see
+		// (0, nil), which many treat as EOF; the next iteration appends
+		// fresh wire bytes to the accumulator before re-decoding.
+		goto readAgain
 	} else {
 		c.underPostdecryptBuf.Next(length)
+	}
+	if len(postDecryptedData) == 0 {
+		// A consumed frame carried no payload; keep reading rather than
+		// reporting a zero-byte success.
+		goto readAgain
 	}
 
 	n = copy(b, postDecryptedData)
