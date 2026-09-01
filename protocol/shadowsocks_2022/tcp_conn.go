@@ -271,7 +271,10 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 		// --- B. Identity Headers ---
 		subKeyBuf := headerBuf[:c.cipherConf.KeyLen]
 		for i := 0; i < len(c.pskList)-1; i++ {
-			bc, _ := c.cipherConf.NewBlockCipher(GenerateSubKey(c.pskList[i], salt, Shadowsocks2022IdentityHeaderInfo, subKeyBuf))
+			bc, err := c.cipherConf.NewBlockCipher(GenerateSubKey(c.pskList[i], salt, Shadowsocks2022IdentityHeaderInfo, subKeyBuf))
+			if err != nil {
+				return 0, fmt.Errorf("failed to derive identity header cipher for PSK #%d: %w", i, err)
+			}
 			plaintext := blake3.Sum512(c.pskList[i+1])
 			bc.Encrypt(buf[curr:curr+16], plaintext[:16])
 			curr += 16

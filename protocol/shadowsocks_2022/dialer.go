@@ -40,6 +40,13 @@ func NewDialer(parentDialer netproxy.Dialer, header protocol.Header) (netproxy.D
 		}
 		pskList[i] = key
 	}
+	// EIH is defined for AES ciphers. Chacha remains available for
+	// single-PSK connections, but multi-PSK chacha has no interoperable
+	// wire format, and its cipher conf has no NewBlockCipher at all, so
+	// the calls below would nil-panic instead of failing cleanly.
+	if len(pskList) > 1 && conf.NewBlockCipher == nil {
+		return nil, fmt.Errorf("shadowsocks 2022: multi-PSK EIH requires an AES cipher")
+	}
 	uPSK := pskList[len(pskList)-1]
 	blockCipherEncrypt, err := conf.NewBlockCipher(pskList[0]) // iPSK0/uPSK
 	if err != nil {
