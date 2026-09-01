@@ -294,7 +294,7 @@ func (c *StreamCipher) Decrypt(dst, src []byte) {
 	c.dec.XORKeyStream(dst, src)
 }
 
-// Clone creates a new cipher at it's initial state.
+// Clone creates a new cipher at its initial state.
 func (c *StreamCipher) Clone() *StreamCipher {
 	// This optimization maybe not necessary. But without this function, we
 	// need to maintain a table cache for newTableCipher and use lock to
@@ -312,6 +312,11 @@ func (c *StreamCipher) Clone() *StreamCipher {
 	nc := *c
 	nc.enc = nil
 	nc.dec = nil
+	// Drop the IV too: keeping it would make InitEncrypt reuse the parent's
+	// IV, encrypting two streams under the same key/IV pair (fatal for CTR,
+	// OFB and CFB). A nil IV also stops the clone from aliasing the parent's
+	// backing array.
+	nc.iv = nil
 	return &nc
 }
 
