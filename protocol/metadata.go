@@ -71,7 +71,9 @@ func ParseMetadata(tgt string) (mdata Metadata, err error) {
 	if err != nil {
 		return mdata, fmt.Errorf("SplitHostPort: %w", err)
 	}
-	port, err := strconv.Atoi(strPort)
+	// ParseUint with an explicit 16-bit bound: Atoi followed by a uint16
+	// conversion silently wrapped -1 to 65535 and 65536 to 0.
+	port, err := strconv.ParseUint(strPort, 10, 16)
 	if err != nil {
 		return mdata, fmt.Errorf("failed to parse port: %w", err)
 	}
