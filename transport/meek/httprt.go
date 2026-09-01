@@ -3,38 +3,21 @@ package meek
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/base64"
-	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"sync"
-
-	"github.com/daeuniverse/outbound/netproxy"
 )
 
-var (
-	globalRoundTripperCacheMap    map[string]http.RoundTripper
-	globalRoundTripperCacheAccess sync.Mutex
-)
-
+// httpTripperClient round-trips meek requests over a transport that is fixed
+// at dialer construction: the meek URL, the TLS settings and the parent
+// dialer are all per-proxy configuration, so each dialer owns one transport
+// outright and no runtime cache is needed.
 type httpTripperClient struct {
-	addr       string
-	nextDialer netproxy.Dialer
-	tlsConfig  *tls.Config
-	url        string
-}
-
-func CleanGlobalRoundTripperCache() {
-	globalRoundTripperCacheAccess.Lock()
-	defer globalRoundTripperCacheAccess.Unlock()
-	globalRoundTripperCacheMap = make(map[string]http.RoundTripper)
+	url          string
+	roundTripper http.RoundTripper
 }
 
 func (c *httpTripperClient) RoundTrip(ctx context.Context, req Request) (resp Response, err error) {
-	roundTripper := c.getRoundTripper()
-
 	connectionTagStr := base64.RawURLEncoding.EncodeToString(req.ConnectionTag)
 
 	httpRequest, err := http.NewRequest("POST", c.url, bytes.NewReader(req.Data))
@@ -43,7 +26,7 @@ func (c *httpTripperClient) RoundTrip(ctx context.Context, req Request) (resp Re
 	}
 	httpRequest.Header.Set("X-Session-ID", connectionTagStr)
 
-	httpResp, err := roundTripper.RoundTrip(httpRequest)
+	httpResp, err := c.roundTripper.RoundTrip(httpRequest)
 	if err != nil {
 		return
 	}
@@ -54,25 +37,4 @@ func (c *httpTripperClient) RoundTrip(ctx context.Context, req Request) (resp Re
 		return
 	}
 	return Response{Data: result}, err
-}
-
-func (c *httpTripperClient) getRoundTripper() http.RoundTripper {
-	globalRoundTripperCacheAccess.Lock()
-	defer globalRoundTripperCacheAccess.Unlock()
-	if globalRoundTripperCacheMap == nil {
-		globalRoundTripperCacheMap = make(map[string]http.RoundTripper)
-	}
-	if _, ok := globalRoundTripperCacheMap[c.addr]; !ok {
-		globalRoundTripperCacheMap[c.addr] = &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				rc, err := c.nextDialer.DialContext(ctx, network, addr)
-				if err != nil {
-					return nil, fmt.Errorf("[Meek]: dial to %s: %w", c.addr, err)
-				}
-				return rc, nil
-			},
-			TLSClientConfig: c.tlsConfig,
-		}
-	}
-	return globalRoundTripperCacheMap[c.addr]
 }

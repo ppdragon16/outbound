@@ -2,12 +2,12 @@ package meek
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
-
-	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
@@ -15,12 +15,12 @@ import (
 
 type Dialer struct {
 	protocol.StatelessDialer
-	tlsConfig  *utls.Config
 	addr       string
 	url        string
 	serverName string
 	skipVerify bool
 	alpn       []string
+	tripper    *httpTripperClient
 }
 
 func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
@@ -67,11 +67,28 @@ func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 	if m.serverName == "" {
 		m.serverName = u.Hostname()
 	}
-	m.tlsConfig = &utls.Config{
-		ServerName:         m.serverName,
-		InsecureSkipVerify: m.skipVerify,
-		NextProtos:         m.alpn,
+
+	// The HTTP transport is built once per dialer: the meek URL, the TLS
+	// settings and the parent dialer never vary per connection, so no
+	// cross-proxy cache is needed.
+	tripper := &httpTripperClient{
+		url: m.url,
+		roundTripper: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				rc, err := d.DialContext(ctx, network, addr)
+				if err != nil {
+					return nil, fmt.Errorf("[Meek]: dial to %s: %w", addr, err)
+				}
+				return rc, nil
+			},
+			TLSClientConfig: &tls.Config{
+				ServerName:         m.serverName,
+				InsecureSkipVerify: m.skipVerify,
+				NextProtos:         m.alpn,
+			},
+		},
 	}
+	m.tripper = tripper
 
 	return m, nil
 }
@@ -79,12 +96,6 @@ func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
 func (m *Dialer) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
 	switch network {
 	case "tcp":
-		tripper := &httpTripperClient{
-			nextDialer: m.ParentDialer,
-			addr:       addr,
-			url:        m.url,
-		}
-
 		clientConfig := &config{
 			MaxWriteSize:             65536,
 			WaitSubsequentWriteMs:    10,
@@ -95,7 +106,7 @@ func (m *Dialer) DialContext(ctx context.Context, network, addr string) (c net.C
 			FailedRetryIntervalMs:    1000,
 		}
 
-		assembler := newAssemblerClient(tripper, clientConfig)
+		assembler := newAssemblerClient(m.tripper, clientConfig)
 		session, err := assembler.NewSession(context.Background())
 		if err != nil {
 			return nil, err
