@@ -96,7 +96,7 @@ func TestClassPoolGetReusesExpired(t *testing.T) {
 // TestClassPoolPutReusesExpiredHead verifies a full ring whose head is expired
 // accepts the next put by overwriting that head slot instead of falling back.
 func TestClassPoolPutReusesExpiredHead(t *testing.T) {
-	const class = 2048
+	const class = 32768 // big class: still on the fast bucketTTL decay
 	i := classIndex(class)
 	resetClass(i)
 
@@ -310,5 +310,129 @@ func TestPoolStackTrace(t *testing.T) {
 	}
 	if !strings.Contains(puts[0].Stack, "buffer_test.go") {
 		t.Fatalf("put stack should reference buffer_test.go, got: %s", puts[0].Stack)
+	}
+}
+
+// TestSweeperWarmSetKeepsLowRateClass verifies the production regression:
+// a 16K-class pool whose whole occupancy sits inside the warm set survives
+// the sweep even when every entry is idle past bucketTTL. Before the warm
+// set existed, this scenario demoted everything and pinned the 16K HIT% at
+// 71-77%.
+func TestSweeperWarmSetKeepsLowRateClass(t *testing.T) {
+	const class = 16384
+	i := classIndex(class)
+	resetClass(i)
+	defer resetClass(i)
+
+	p := &classPools[i]
+	warmCount := max(classWarmMinBytes>>i, p.cap>>1) // 32: byte floor wins at cap 32
+	for n := 0; n < warmCount; n++ {
+		PutBuffer(make([]byte, class))
+	}
+	if p.n != warmCount {
+		t.Fatalf("ring occupancy = %d, want %d", p.n, warmCount)
+	}
+
+	now := time.Now()
+	p.mu.Lock()
+	for j := 0; j < p.n; j++ {
+		p.buf[(p.head+j)&p.mask].putTime = now.Add(-2 * bucketTTL) // all idle past TTL
+	}
+	p.mu.Unlock()
+
+	p.sweepExpired(i, now)
+	if p.n != warmCount {
+		t.Fatalf("warm set demoted past fast TTL: n=%d, want %d", p.n, warmCount)
+	}
+
+	// Past the long tail the warm set does decay too: a fully idle class
+	// releases even its warm residency.
+	p.mu.Lock()
+	for j := 0; j < p.n; j++ {
+		p.buf[(p.head+j)&p.mask].putTime = now.Add(-2 * warmTTL)
+	}
+	p.mu.Unlock()
+
+	p.sweepExpired(i, now)
+	if p.n != 0 {
+		t.Fatalf("warm set retained past warmTTL: n=%d, want 0", p.n)
+	}
+}
+
+// TestSweeperDemotesAboveWarmSet verifies the other half of the contract:
+// residency above the warm set still decays on the normal clock, so a
+// traffic peak cannot pin memory forever.
+func TestSweeperDemotesAboveWarmSet(t *testing.T) {
+	const class = 16384
+	i := classIndex(class)
+	resetClass(i)
+	defer resetClass(i)
+
+	p := &classPools[i]
+	floorCount := classWarmMinBytes >> i // 32 for the 16K class
+	extra := 8
+	for n := 0; n < floorCount+extra; n++ {
+		PutBuffer(make([]byte, class))
+	}
+
+	// The 40 puts grew the ring to 64; warmCount = max(floor, cap/2) = 32.
+	warmCount := max(classWarmMinBytes>>i, p.cap>>1)
+
+	now := time.Now()
+	p.mu.Lock()
+	for j := 0; j < p.n; j++ {
+		p.buf[(p.head+j)&p.mask].putTime = now.Add(-2 * bucketTTL)
+	}
+	p.mu.Unlock()
+
+	// demoted is a per-class cumulative counter (resetClass does not clear
+	// it), so assert on the delta like TestClassPoolPutReusesExpiredHead.
+	before := p.demoted.Load()
+	p.sweepExpired(i, now)
+	if p.n != warmCount {
+		t.Fatalf("above-warm excess not decayed: n=%d, want %d", p.n, warmCount)
+	}
+	if got := p.demoted.Load() - before; got != uint64(extra) {
+		t.Fatalf("demoted delta = %d, want %d", got, extra)
+	}
+}
+
+// TestSweeperWarmCountTracksRingGrowth pins the dynamic half of the warm
+// set: a class whose ring grew (32 -> 64 -> 128 on the way to 100 buffers)
+// keeps half the grown capacity warm, because the growth itself is evidence
+// of a larger working set. A static warm floor would have let the excess
+// decay again — the exact regression seen in production when the 16K
+// working set grew past its warm cap.
+func TestSweeperWarmCountTracksRingGrowth(t *testing.T) {
+	const class = 16384
+	i := classIndex(class)
+	resetClass(i)
+	defer resetClass(i)
+
+	const count = 100 // grows the ring 32 -> 64 -> 128
+	for n := 0; n < count; n++ {
+		PutBuffer(make([]byte, class))
+	}
+	p := &classPools[i]
+	if p.cap != 128 {
+		t.Fatalf("ring cap = %d, want 128 after growth", p.cap)
+	}
+
+	now := time.Now()
+	p.mu.Lock()
+	for j := 0; j < p.n; j++ {
+		p.buf[(p.head+j)&p.mask].putTime = now.Add(-2 * bucketTTL) // idle past fast TTL
+	}
+	p.mu.Unlock()
+
+	// warmCount = max(512KiB/16KiB, 128/2) = 64: half the grown ring stays,
+	// the excess decays.
+	before := p.demoted.Load()
+	p.sweepExpired(i, now)
+	if p.n != 64 {
+		t.Fatalf("n = %d, want 64 (cap/2 warm set)", p.n)
+	}
+	if got := p.demoted.Load() - before; got != count-64 {
+		t.Fatalf("demoted delta = %d, want %d", got, count-64)
 	}
 }

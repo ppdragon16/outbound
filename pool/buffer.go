@@ -45,6 +45,38 @@ const (
 	// peak memory forever.
 	bucketTTL = 3 * time.Minute
 
+	// classWarmMinBytes is the floor for a class's warm set, expressed in
+	// bytes. The actual warm set is
+	//
+	//	warmCount = max(classWarmMinBytes/size, ringCap/2)
+	//
+	// so it grows with the ring: a ring only grows when it was full of
+	// entries young enough to be worth keeping (see grow), i.e. the cap
+	// itself is evidence of a larger working set — the warm set follows it
+	// instead of a static guess falling behind (a fixed 512KiB warm set let
+	// the 16K class decay its peak-traffic buffers again once its working
+	// set grew past 32 entries). Residency above the warm set decays on
+	// bucketTTL. The bound on idle memory is
+	//
+	//	warm set (≤ classWarmMinBytes, plus half the grown ring until the
+	//	warm set decays) + decay of the excess (bucketTTL + one GC), and
+	//	everything decays after warmTTL of full idleness.
+	//
+	// A blanket fast TTL destroys low-rate reuse chains instead of saving
+	// memory: the 16K class receives a GetBuffer every ~40min in production
+	// (utls hand and small-record rawInput per connection), so the 3min TTL
+	// demoted nearly every recycled buffer to the GC-cleared sync.Pool
+	// before its next reuse — 16K HIT% sat at 71-77% while every other
+	// class was above 94%, with hit rate tracking class frequency exactly.
+	classWarmMinBytes = 512 << 10
+
+	// warmTTL is the decay time for the warm set. It must comfortably exceed
+	// the slowest reuse interval the warm set exists to protect (16K: ~40min
+	// between GetBuffers) while still guaranteeing a fully idle class
+	// releases its warm set — and the extra warm count a grown ring added —
+	// eventually.
+	warmTTL = time.Hour
+
 	// sweepBatch caps how many expired entries the sweeper demotes from one
 	// class per pass, so it never holds a bucket's lock long enough to stall
 	// get/put. Leftover expired entries are drained on later passes.
@@ -123,18 +155,9 @@ func init() {
 		t := time.NewTicker(bucketTTL / 2)
 		defer t.Stop()
 		for range t.C {
-			expiredTime := time.Now().Add(-bucketTTL)
+			now := time.Now()
 			for i := range classPools {
-				p := &classPools[i]
-				p.mu.Lock()
-				for j := 0; j < sweepBatch && p.n > 0 && p.buf[p.head].putTime.Before(expiredTime); j++ {
-					pools[i].Put(p.buf[p.head].ptr) // demote to the GC-cleared fallback
-					p.demoted.Add(1)
-					p.buf[p.head] = bufEntry{}
-					p.head = (p.head + 1) & p.mask
-					p.n--
-				}
-				p.mu.Unlock()
+				classPools[i].sweepExpired(i, now)
 			}
 		}
 	}()
@@ -200,6 +223,42 @@ func PutBuffer(buf []byte) {
 			pools[i].Put(ptr)
 		}
 	}
+}
+
+// sweepExpired demotes ring entries idle past this class's TTL: residency
+// above the warm set (classWarmBytes) decays on bucketTTL, the warm set
+// itself on warmTTL. Up to sweepBatch per call so it never holds the bucket
+// lock long enough to stall get/put; leftover expired entries drain on
+// later passes. Entries sit in the ring in put-time order, so the head is
+// always the oldest and a single comparison decides each slot. Called
+// periodically by the background sweeper; separate method so tests can
+// drive it with a synthetic clock.
+func (p *classPool) sweepExpired(i int, now time.Time) {
+	// Warm set: the byte floor, or half the current ring capacity —
+	// whichever is larger. The cap term follows real working-set growth
+	// (see classWarmMinBytes).
+	warmCount := max(classWarmMinBytes>>i, p.cap>>1)
+	fastExpired := now.Add(-bucketTTL)
+	longExpired := now.Add(-warmTTL)
+	p.mu.Lock()
+	for j := 0; j < sweepBatch && p.n > 0; j++ {
+		head := p.buf[p.head]
+		var expired bool
+		if p.n > warmCount {
+			expired = head.putTime.Before(fastExpired) // above warm set: fast decay
+		} else {
+			expired = head.putTime.Before(longExpired) // warm set: slow decay
+		}
+		if !expired {
+			break // head is the oldest entry; nothing behind it is older
+		}
+		pools[i].Put(head.ptr) // demote to the GC-cleared fallback
+		p.demoted.Add(1)
+		p.buf[p.head] = bufEntry{}
+		p.head = (p.head + 1) & p.mask
+		p.n--
+	}
+	p.mu.Unlock()
 }
 
 // get pops the newest buffer (LIFO), or nil if the pool is empty. It
