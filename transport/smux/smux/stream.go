@@ -29,6 +29,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/daeuniverse/outbound/pool"
 )
 
 // wrapper for GC
@@ -86,7 +88,12 @@ type stream struct {
 }
 
 type bufferRing struct {
-	bufs  [][]byte
+	bufs [][]byte
+	// heads mirrors bufs with the original *[]byte acquired from the pool.
+	// consumeFront reslices the bufs copy as data is consumed, shrinking its
+	// cap; the head is never resliced, so its cap stays the original
+	// power-of-2 size class — the gate pool.PutBuffer requires to recycle
+	// the buffer. Recycle paths must Put the head, never the bufs copy.
 	heads []*[]byte
 	head  int
 	tail  int
@@ -244,7 +251,7 @@ func (s *stream) tryReadV1(b []byte) (n int, err error) {
 	s.bufferLock.Unlock()
 
 	if recycled != nil {
-		defaultAllocator.Put(recycled)
+		pool.PutBuffer(*recycled)
 	}
 
 	// return tokens to session to allow more data to be received
@@ -293,7 +300,7 @@ func (s *stream) tryReadV2(b []byte) (n int, err error) {
 	s.bufferLock.Unlock()
 
 	if recycled != nil {
-		defaultAllocator.Put(recycled)
+		pool.PutBuffer(*recycled)
 	}
 
 	if n > 0 {
@@ -347,7 +354,7 @@ func (s *stream) writeToV1(w io.Writer) (n int64, err error) {
 			nw, ew := w.Write(buf)
 			// NOTE: WriteTo is a reader, so we need to return tokens here
 			s.sess.returnTokens(len(buf))
-			defaultAllocator.Put(head)
+			pool.PutBuffer(*head)
 			if nw > 0 {
 				n += int64(nw)
 			}
@@ -394,7 +401,7 @@ func (s *stream) writeToV2(w io.Writer) (n int64, err error) {
 			nw, ew := w.Write(buf)
 			// NOTE: WriteTo is a reader, so we need to return tokens here
 			s.sess.returnTokens(len(buf))
-			defaultAllocator.Put(head)
+			pool.PutBuffer(*head)
 			if nw > 0 {
 				n += int64(nw)
 			}
@@ -789,7 +796,7 @@ func (s *stream) recycleTokens() (n int) {
 	for s.bufferRing.len() > 0 {
 		buf, head, _ := s.bufferRing.pop()
 		n += len(buf)
-		defaultAllocator.Put(head)
+		pool.PutBuffer(*head)
 	}
 	return
 }

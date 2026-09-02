@@ -488,27 +488,36 @@ func (s *Session) recvLoop() {
 				continue
 			}
 
-			// read payload from the underlying connection
-			pNewbuf := defaultAllocator.Get(int(hdr.Length()))
-			written, err := io.ReadFull(s.conn, *pNewbuf)
+			// read payload from the underlying connection.
+			// hdr.Length() is a uint16 wire field and the zero-length case is
+			// filtered above, so the size is always within [1, 65535] —
+			// pool.GetBuffer's poolable range. GetBuffer rounds up to the next
+			// power-of-2 size class and returns a slice of len == Length, so
+			// ReadFull reads exactly one frame payload. Pass the frame length
+			// here, never the class size. The *[]byte head keeps the
+			// full-capacity view: bufferRing reslices its working copy as data
+			// is consumed, and only the head still carries cap == 2^n, which
+			// pool.PutBuffer requires to recycle the buffer.
+			buf := pool.GetBuffer(int(hdr.Length()))
+			written, err := io.ReadFull(s.conn, buf)
 			if err != nil {
 				s.notifyReadError(err)
 
 				// recycle the buffer immediately.
-				defaultAllocator.Put(pNewbuf)
+				pool.PutBuffer(buf)
 				return
 			}
 
 			// push data to the corresponding stream
 			s.streamLock.Lock()
 			if stream, ok := s.streams[sid]; ok {
-				stream.pushBytes(pNewbuf)
+				stream.pushBytes(&buf)
 				// deduct tokens from the bucket
 				atomic.AddInt32(&s.bucket, -int32(written))
 				stream.wakeupReader()
 			} else {
 				// data directed to a missing/closed stream, recycle the buffer immediately.
-				defaultAllocator.Put(pNewbuf)
+				pool.PutBuffer(buf)
 			}
 			s.streamLock.Unlock()
 
