@@ -80,7 +80,6 @@ var (
 type writeRequest struct {
 	class  CLASSID
 	frame  Frame
-	seq    uint32
 	result chan writeResult
 }
 
@@ -131,7 +130,6 @@ type Session struct {
 	// active streams. It is invoked while streamLock is held.
 	OnIdle func()
 
-	requestID        uint32            // Monotonic increasing write request ID
 	shaper           chan writeRequest // a shaper for writing
 	sq               *shaperQueue
 	chShaperPending  chan struct{}
@@ -725,7 +723,6 @@ func (s *Session) writeFrameInternal(f Frame, deadline <-chan time.Time, class C
 	req := writeRequest{
 		class:  class,
 		frame:  f,
-		seq:    atomic.AddUint32(&s.requestID, 1),
 		result: resultCh,
 	}
 	select {
