@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/daeuniverse/outbound/common/iout"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks_stream"
 )
@@ -106,4 +107,13 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		return 0, err
 	}
 	return len(b), nil
+}
+
+// CloseWrite forwards the half-close to the inner conn so a relay FIN
+// propagates through the protocol layer as a transport FIN.
+func (c *Conn) CloseWrite() error {
+	if cw, ok := c.Conn.(netproxy.CloseWriter); ok {
+		return cw.CloseWrite()
+	}
+	return nil
 }

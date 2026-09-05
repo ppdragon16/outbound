@@ -306,6 +306,19 @@ func (c *Conn) Close() error {
 	return nil
 }
 
+// CloseWrite half-closes the write side of the tunneled connection. Only the
+// plain HTTP/1 CONNECT path supports a transport FIN; an h2 stream has no
+// half-close without RST semantics, so it stays a no-op there.
+func (c *Conn) CloseWrite() error {
+	if c.isH2 || c.conn == nil {
+		return nil
+	}
+	if cw, ok := c.conn.(netproxy.CloseWriter); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
 func (c *Conn) LocalAddr() net.Addr {
 	return c.conn.LocalAddr()
 }

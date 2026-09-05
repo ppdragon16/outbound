@@ -52,6 +52,15 @@ func (c *Conn) Unwrap() net.Conn {
 	return c.Conn
 }
 
+// CloseWrite forwards the half-close to the inner conn so a relay FIN
+// propagates through the tunnel as a transport FIN.
+func (c *Conn) CloseWrite() error {
+	if cw, ok := c.Conn.(netproxy.CloseWriter); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
 func NewConn(conn net.Conn, metadata Metadata, cmdKey []byte) (c *Conn, err error) {
 
 	// DO NOT use pool here because Close() cannot interrupt the reading or writing, which will modify the value of the pool buffer.

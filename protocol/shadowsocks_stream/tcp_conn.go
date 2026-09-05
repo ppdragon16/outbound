@@ -8,6 +8,7 @@ import (
 
 	"github.com/daeuniverse/outbound/ciphers"
 	"github.com/daeuniverse/outbound/common/iout"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 )
 
@@ -131,4 +132,13 @@ func (c *TcpConn) Write(b []byte) (n int, err error) {
 
 func (c *TcpConn) Cipher() *ciphers.StreamCipher {
 	return c.cipher
+}
+
+// CloseWrite forwards the half-close to the inner conn so a relay FIN
+// propagates through the tunnel as a transport FIN.
+func (c *TcpConn) CloseWrite() error {
+	if cw, ok := c.Conn.(netproxy.CloseWriter); ok {
+		return cw.CloseWrite()
+	}
+	return nil
 }

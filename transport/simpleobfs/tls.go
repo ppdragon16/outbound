@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 )
@@ -26,6 +27,15 @@ type TLSObfs struct {
 	firstResponse bool
 	rMu           sync.Mutex
 	wMu           sync.Mutex
+}
+
+// CloseWrite forwards the half-close to the inner conn so a relay FIN
+// propagates through the obfs layer as a transport FIN.
+func (to *TLSObfs) CloseWrite() error {
+	if cw, ok := to.Conn.(netproxy.CloseWriter); ok {
+		return cw.CloseWrite()
+	}
+	return nil
 }
 
 func (to *TLSObfs) read(b []byte, discardN int) (int, error) {
@@ -103,7 +113,6 @@ func (to *TLSObfs) write(b []byte) (int, error) {
 		to.firstRequest = false
 		return len(b), err
 	}
-
 	buf := pool.GetBuffer(5 + len(b))[:0]
 	buf = append(buf, 0x17, 0x03, 0x03)
 	buf = binary.BigEndian.AppendUint16(buf, uint16(len(b)))

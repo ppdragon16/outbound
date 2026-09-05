@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/daeuniverse/outbound/common"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 )
@@ -77,6 +78,15 @@ func NewConn(conn net.Conn, metadata Metadata, dialTgt string, cmdKey []byte) (c
 
 func (c *Conn) Close() error {
 	return c.Conn.Close()
+}
+
+// CloseWrite forwards the half-close to the inner conn so a relay FIN
+// propagates through the tunnel as a transport FIN.
+func (c *Conn) CloseWrite() error {
+	if cw, ok := c.Conn.(netproxy.CloseWriter); ok {
+		return cw.CloseWrite()
+	}
+	return nil
 }
 
 func (c *Conn) chunks(size int) (payloadSize int, numChunks int) {

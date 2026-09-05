@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 )
@@ -28,6 +29,15 @@ type HTTPObfs struct {
 	firstResponse bool
 	wMu           sync.Mutex
 	rMu           sync.Mutex
+}
+
+// CloseWrite forwards the half-close to the inner conn so a relay FIN
+// propagates through the obfs layer as a transport FIN.
+func (ho *HTTPObfs) CloseWrite() error {
+	if cw, ok := ho.Conn.(netproxy.CloseWriter); ok {
+		return cw.CloseWrite()
+	}
+	return nil
 }
 
 func (ho *HTTPObfs) Read(b []byte) (int, error) {

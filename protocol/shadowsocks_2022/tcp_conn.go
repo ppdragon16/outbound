@@ -88,6 +88,15 @@ func (c *TCPConn) Close() error {
 	return c.Conn.Close()
 }
 
+// CloseWrite forwards the half-close to the inner conn so a relay FIN
+// propagates through the tunnel as a transport FIN.
+func (c *TCPConn) CloseWrite() error {
+	if cw, ok := c.Conn.(netproxy.CloseWriter); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
 func (c *TCPConn) Read(b []byte) (n int, err error) {
 	c.readMutex.Lock()
 	defer c.readMutex.Unlock()

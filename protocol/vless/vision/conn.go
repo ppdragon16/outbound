@@ -17,6 +17,8 @@ import (
 	utls "github.com/refraction-networking/utls"
 
 	"crypto/tls"
+
+	"github.com/daeuniverse/outbound/netproxy"
 )
 
 var (
@@ -89,6 +91,27 @@ func (vc *Conn) Read(b []byte) (int, error) {
 		return vc.reader.Read(b)
 	}
 	return vc.read(b)
+}
+
+// CloseWrite half-closes the write side. In direct-copy mode the FIN goes
+// straight to the underlay TCP socket; otherwise it is forwarded through the
+// vless overlay conn.
+func (vc *Conn) CloseWrite() error {
+	vc.muWrite.Lock()
+	defer vc.muWrite.Unlock()
+	if vc.toWriteDirect {
+		if tcp, ok := vc.Conn.(*net.TCPConn); ok {
+			return tcp.CloseWrite()
+		}
+		return nil
+	}
+	if vc.overlayConn == nil {
+		return nil
+	}
+	if cw, ok := vc.overlayConn.(netproxy.CloseWriter); ok {
+		return cw.CloseWrite()
+	}
+	return nil
 }
 
 func isTCPConnUnixConn(conn any) bool {
