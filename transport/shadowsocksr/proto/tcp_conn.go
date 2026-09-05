@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/daeuniverse/outbound/common/iout"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/shadowsocks_stream"
 )
@@ -17,8 +18,9 @@ type Conn struct {
 	underPostdecryptBuf *bytes.Buffer
 	readLater           io.Reader
 
-	writeMu sync.Mutex
-	readMu  sync.Mutex
+	writeBroken bool
+	writeMu     sync.Mutex
+	readMu      sync.Mutex
 }
 
 func NewConn(c net.Conn, proto IProtocol) (*Conn, error) {
@@ -90,13 +92,17 @@ readAgain:
 func (c *Conn) Write(b []byte) (n int, err error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if c.writeBroken {
+		return 0, net.ErrClosed
+	}
 	// Conn Write: obfs<-ss<-proto
 	data, err := c.Protocol.Encode(b)
 	if err != nil {
+		c.writeBroken = true
 		return 0, err
 	}
-	_, err = c.Conn.Write(data)
-	if err != nil {
+	if _, err = iout.WriteFull(c.Conn, data); err != nil {
+		c.writeBroken = true
 		return 0, err
 	}
 	return len(b), nil

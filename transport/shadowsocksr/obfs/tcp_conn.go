@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/daeuniverse/outbound/ciphers"
+	"github.com/daeuniverse/outbound/common/iout"
 )
 
 type Conn struct {
@@ -16,9 +17,10 @@ type Conn struct {
 	underPostdecryptBuf *bytes.Buffer
 	readLater           io.Reader
 
-	init    bool
-	addrLen int
-	cipher  *ciphers.StreamCipher
+	init        bool
+	writeBroken bool
+	addrLen     int
+	cipher      *ciphers.StreamCipher
 
 	readMu  sync.Mutex
 	writeMu sync.Mutex
@@ -119,13 +121,17 @@ func (c *Conn) encode(b []byte) (outData []byte, err error) {
 func (c *Conn) Write(b []byte) (n int, err error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
+	if c.writeBroken {
+		return 0, net.ErrClosed
+	}
 	// Conn Write: obfs<-ss<-proto
 	data, err := c.encode(b)
 	if err != nil {
+		c.writeBroken = true
 		return 0, err
 	}
-	n, err = c.Conn.Write(data)
-	if err != nil {
+	if _, err = iout.WriteFull(c.Conn, data); err != nil {
+		c.writeBroken = true
 		return 0, err
 	}
 	return len(b), nil

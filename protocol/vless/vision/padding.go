@@ -32,6 +32,11 @@ func ApplyPaddingFromPool(p []byte, command byte, userUUID []byte, longPadding b
 
 	prefix = pool.GetBuffer(len(userUUID) + 1 + 2 + 2)
 	suffix = pool.GetBuffer(int(paddingLen))
+	if paddingLen > 0 {
+		// Pool memory is reused dirty; fill the padding so stale bytes are
+		// never leaked on the wire and the padding stays opaque.
+		_, _ = fastrand.Read(suffix)
+	}
 	start := 0
 	if userUUID != nil {
 		copy(prefix, userUUID[:])

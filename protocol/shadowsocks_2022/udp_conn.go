@@ -152,8 +152,13 @@ func (c *UdpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
 	messageLen := payloadOff + copy(msgBuf[payloadOff:], b)
 	c.writeCipher.Seal(msgBuf[:0], separateHeader[4:16], msgBuf[:messageLen], nil)
 
-	if _, err = c.Conn.Write(buf[:currPos+messageLen+c.cipherConf.TagLen]); err != nil {
+	packetLen := currPos + messageLen + c.cipherConf.TagLen
+	n, err := c.Conn.Write(buf[:packetLen])
+	if err != nil {
 		return 0, err
+	}
+	if n < packetLen {
+		return 0, io.ErrShortWrite
 	}
 	return len(b), nil
 }

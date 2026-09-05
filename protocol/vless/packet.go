@@ -2,7 +2,6 @@ package vless
 
 import (
 	"encoding/binary"
-	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -42,7 +41,12 @@ func (c *Conn) ReadFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error
 	}
 	length := int(binary.BigEndian.Uint16(bLen))
 	if len(p) < length {
-		return 0, netip.AddrPort{}, fmt.Errorf("buf size is not enough")
+		// Drain the oversized datagram so its tail cannot be mistaken for
+		// the next packet.
+		if _, discardErr := io.CopyN(io.Discard, &c.readWrapper, int64(length)); discardErr != nil {
+			return 0, netip.AddrPort{}, discardErr
+		}
+		return 0, netip.AddrPort{}, io.ErrShortBuffer
 	}
 	n, err = io.ReadFull(&c.readWrapper, p[:length])
 	return n, addr, err
