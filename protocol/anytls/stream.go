@@ -151,9 +151,6 @@ func (c *stream) Write(b []byte) (n int, err error) {
 }
 
 func (c *stream) Read(b []byte) (n int, err error) {
-	if c.closed.Load() {
-		return 0, net.ErrClosed
-	}
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 
@@ -238,7 +235,15 @@ func (c *stream) drainChunks() {
 func (c *stream) remoteClose() {
 	if c.closed.CompareAndSwap(false, true) {
 		c.session.removeStream(c.id)
-		c.closeRead()
+		// A remote FIN only ends the data stream: chunks queued before the
+		// FIN were sent before it and must stay readable. Mark EOF without
+		// draining; Read returns io.EOF once the ring runs dry. (Local Close
+		// keeps closeRead, which discards.)
+		c.readMu.Lock()
+		c.stopReadDeadlineTimer()
+		c.readEOF = true
+		c.readCond.Broadcast()
+		c.readMu.Unlock()
 	}
 }
 
