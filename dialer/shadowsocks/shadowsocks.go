@@ -36,6 +36,9 @@ type Shadowsocks struct {
 }
 
 func NewShadowsocksFromLink(link string) (dialer.Dialer, *dialer.Property, error) {
+	if len(link) < len("ss://") {
+		return nil, nil, fmt.Errorf("%w: unrecognized ss address", dialer.InvalidParameterErr)
+	}
 	s, err := ParseSSURL(link)
 	if err != nil {
 		return nil, nil, err

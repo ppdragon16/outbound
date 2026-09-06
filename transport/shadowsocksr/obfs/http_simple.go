@@ -42,7 +42,14 @@ type httpSimplePost struct {
 	rawTransReceived bool
 	userAgentIndex   int
 	methodGet        bool // true for get, false for post
+	// headerBuf accumulates response-header bytes that arrived without the
+	// "\r\n\r\n" terminator yet (the header may straddle TCP segments).
+	headerBuf []byte
 }
+
+// maxResponseHeaderSize bounds headerBuf: the peer controls how many bytes
+// it can send without a terminator.
+const maxResponseHeaderSize = 8 * 1024
 
 func init() {
 	register("http_simple", &constructor{
@@ -179,11 +186,19 @@ func (t *httpSimplePost) Decode(data []byte) (decodedData []byte, needSendBack b
 		return data, false, nil
 	}
 
-	pos := bytes.Index(data, []byte("\r\n\r\n"))
-	if pos > 0 {
-		decodedData = make([]byte, len(data)-pos-4)
-		copy(decodedData, data[pos+4:])
-		t.rawTransReceived = true
+	// A response header split across TCP reads must be reassembled:
+	// searching only the current segment loses the bytes already consumed.
+	t.headerBuf = append(t.headerBuf, data...)
+	pos := bytes.Index(t.headerBuf, []byte("\r\n\r\n"))
+	if pos < 0 {
+		if len(t.headerBuf) > maxResponseHeaderSize {
+			t.headerBuf = nil
+			return nil, false, fmt.Errorf("http_simple: response header exceeds %d bytes", maxResponseHeaderSize)
+		}
+		return nil, false, nil
 	}
+	t.rawTransReceived = true
+	decodedData = t.headerBuf[pos+4:]
+	t.headerBuf = nil
 	return decodedData, false, nil
 }

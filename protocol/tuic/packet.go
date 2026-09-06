@@ -148,17 +148,26 @@ func (q *quicStreamPacketConn) close() (err error) {
 func (q *quicStreamPacketConn) SetDeadline(t time.Time) error {
 	q.muTimer.Lock()
 	defer q.muTimer.Unlock()
-	dur := time.Until(t)
+	// Always re-arm with a fresh timer instead of Reset: Reset cannot
+	// retract a callback that already fired and is waiting on muTimer.
 	if q.deadlineTimer != nil {
-		q.deadlineTimer.Reset(dur)
-	} else {
-		q.deadlineTimer = time.AfterFunc(dur, func() {
-			q.muTimer.Lock()
-			defer q.muTimer.Unlock()
-			q.Close()
-			q.deadlineTimer = nil
-		})
+		q.deadlineTimer.Stop()
+		q.deadlineTimer = nil
 	}
+	dur := time.Until(t)
+	var timer *time.Timer
+	timer = time.AfterFunc(dur, func() {
+		q.muTimer.Lock()
+		defer q.muTimer.Unlock()
+		if q.deadlineTimer != timer {
+			// Superseded by a newer deadline armed after this callback
+			// fired; the fresh timer owns the teardown now.
+			return
+		}
+		q.Close()
+		q.deadlineTimer = nil
+	})
+	q.deadlineTimer = timer
 	return nil
 }
 

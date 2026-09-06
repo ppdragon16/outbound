@@ -35,6 +35,9 @@ type ShadowsocksR struct {
 }
 
 func NewShadowsocksR(link string) (dialer.Dialer, *dialer.Property, error) {
+	if len(link) < len("ssr://") {
+		return nil, nil, fmt.Errorf("%w: unrecognized ssr address", dialer.InvalidParameterErr)
+	}
 	s, err := ParseSSRURL(link)
 	if err != nil {
 		return nil, nil, err

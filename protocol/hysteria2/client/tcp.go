@@ -14,12 +14,21 @@ type tcpConn struct {
 	PseudoLocalAddr  net.Addr
 	PseudoRemoteAddr net.Addr
 	Established      bool
+	// dialDeadline arms the deferred fast-open response read; zero when
+	// the dial ctx had no deadline.
+	dialDeadline time.Time
 }
 
 func (c *tcpConn) Read(b []byte) (n int, err error) {
 	if !c.Established {
+		if !c.dialDeadline.IsZero() {
+			_ = c.Orig.SetDeadline(c.dialDeadline)
+		}
 		// Read response
 		ok, msg, err := protocol.ReadTCPResponse(c.Orig)
+		if !c.dialDeadline.IsZero() {
+			_ = c.Orig.SetDeadline(time.Time{})
+		}
 		if err != nil {
 			return 0, err
 		}

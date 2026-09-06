@@ -44,23 +44,33 @@ func (to *TLSObfs) read(b []byte, discardN int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	var sizeBuf [2]byte
-	_, err = io.ReadFull(to.Conn, sizeBuf[:])
-	if err != nil {
-		return 0, nil
-	}
-
-	length := int(binary.BigEndian.Uint16(sizeBuf[:]))
-	if length > len(b) {
-		n, err := to.Conn.Read(b)
-		if err != nil {
-			return n, err
+	for {
+		var sizeBuf [2]byte
+		if _, err = io.ReadFull(to.Conn, sizeBuf[:]); err != nil {
+			return 0, err
 		}
-		to.remain = length - n
-		return n, nil
-	}
 
-	return io.ReadFull(to.Conn, b[:length])
+		length := int(binary.BigEndian.Uint16(sizeBuf[:]))
+		if length == 0 {
+			// A zero-length record makes no progress; returning (0, nil)
+			// here would spin relay loops until the peer sends real data.
+			// Skip it and read the next record header instead.
+			if _, err = io.ReadFull(to.Conn, discardBuf[:3]); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		if length > len(b) {
+			n, err := to.Conn.Read(b)
+			if err != nil {
+				return n, err
+			}
+			to.remain = length - n
+			return n, nil
+		}
+
+		return io.ReadFull(to.Conn, b[:length])
+	}
 }
 
 func (to *TLSObfs) Read(b []byte) (int, error) {

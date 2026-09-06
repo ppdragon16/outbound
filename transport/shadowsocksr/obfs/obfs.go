@@ -2,17 +2,19 @@ package obfs
 
 import (
 	"strings"
+	"sync"
 )
 
 type Creator func() IObfs
 
 type constructor struct {
-	New Creator
+	New      Creator
 	Overhead int
 }
 
 var (
-	creatorMap = make(map[string]*constructor)
+	creatorMapMu sync.RWMutex
+	creatorMap   = make(map[string]*constructor)
 )
 
 type IObfs interface {
@@ -25,12 +27,16 @@ type IObfs interface {
 }
 
 func register(name string, c *constructor) {
+	creatorMapMu.Lock()
+	defer creatorMapMu.Unlock()
 	creatorMap[name] = c
 }
 
 // NewObfs create an Obfs object by name and return as an IObfs interface
 func NewObfs(name string) *constructor {
+	creatorMapMu.RLock()
 	c, ok := creatorMap[strings.ToLower(name)]
+	creatorMapMu.RUnlock()
 	if ok {
 		return c
 	}

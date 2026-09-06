@@ -104,6 +104,13 @@ func (u *udpConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err erro
 			}
 			msg.DataBuf = datagram // set after Parse; it resets to nil
 			if msg.FragCount <= 1 {
+				if len(p) < len(msg.Data) {
+					// The datagram is consumed either way; a short caller
+					// buffer must surface as ErrShortBuffer, not as a
+					// silently truncated packet.
+					pool.PutBuffer(datagram)
+					return 0, msg.AddrPort, io.ErrShortBuffer
+				}
 				// Single fragment: copy and release immediately.
 				n = copy(p, msg.Data)
 				pool.PutBuffer(datagram)

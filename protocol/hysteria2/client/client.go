@@ -76,7 +76,7 @@ func (c *Client) OpenStream(ctx context.Context) (*utils.QStream, error) {
 	return &utils.QStream{Stream: stream}, nil
 }
 
-func (c *Client) DialConn(stream *utils.QStream, addr string) (net.Conn, error) {
+func (c *Client) DialConn(stream *utils.QStream, addr string, dialDeadline time.Time) (net.Conn, error) {
 	// Send request
 	err := protocol.WriteTCPRequest(stream, addr)
 	if err != nil {
@@ -88,12 +88,14 @@ func (c *Client) DialConn(stream *utils.QStream, addr string) (net.Conn, error) 
 	if c.config.FastOpen {
 		// Don't wait for the response when fast open is enabled.
 		// Return the connection immediately, defer the response handling
-		// to the first Read() call.
+		// to the first Read() call, which re-arms the dial deadline:
+		// clearing it here would leave that read unbounded.
 		return &tcpConn{
 			Orig:             stream,
 			PseudoLocalAddr:  conn.LocalAddr(),
 			PseudoRemoteAddr: conn.RemoteAddr(),
 			Established:      false,
+			dialDeadline:     dialDeadline,
 		}, nil
 	}
 	// Read response
@@ -123,13 +125,16 @@ func (c *Client) ListenPacket(_ context.Context, _ string) (net.PacketConn, erro
 }
 
 func (c *Client) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	// dialDeadline is the dial ctx deadline, kept armed across the
+	// fast-open return so the deferred response read stays bounded.
+	dialDeadline, _ := ctx.Deadline()
 	switch network {
 	case "tcp":
 		stream, err := c.OpenStream(ctx)
 		if err != nil {
 			return nil, err
 		}
-		conn, err := c.DialConn(stream, address)
+		conn, err := c.DialConn(stream, address, dialDeadline)
 		if err != nil {
 			stream.Close()
 			return nil, err

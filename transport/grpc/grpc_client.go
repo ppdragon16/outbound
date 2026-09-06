@@ -312,21 +312,30 @@ func getGrpcClientConn(ctx context.Context, dialer netproxy.Dialer, serverName s
 	}
 	globalCCAccess.Unlock()
 
+	// Fresh-dial canceller: close the conn only while this dial still owns
+	// the cache entry (or never published it, e.g. DialContext failed). A
+	// conn that another dialer adopted from the cache is no longer ours to
+	// close -- and a stale canceller must not dereference a deleted entry.
+	var meta *clientConnMeta
 	canceller := func() {
 		globalCCAccess.Lock()
 		defer globalCCAccess.Unlock()
-		globalCCMap[address].cc.Close()
-		delete(globalCCMap, address)
+		if current, ok := globalCCMap[address]; ok && current == meta {
+			current.cc.Close()
+			delete(globalCCMap, address)
+		}
 	}
 
 	// TODO Should support chain proxy to the same destination
 	globalCCAccess.Lock()
-	if meta, found := globalCCMap[address]; found && meta.cc.GetState() != connectivity.Shutdown {
+	if cached, found := globalCCMap[address]; found && cached.cc.GetState() != connectivity.Shutdown {
 		globalCCAccess.Unlock()
-		return meta, canceller, nil
+		// Cache hits return a no-op canceller: the shared ClientConn must
+		// outlive any single borrower.
+		return cached, func() {}, nil
 	}
 	globalCCAccess.Unlock()
-	meta := &clientConnMeta{
+	meta = &clientConnMeta{
 		cc: nil,
 	}
 	meta.cc, err = grpc.DialContext(ctx, address,

@@ -27,6 +27,7 @@ type Conn struct {
 	net.Conn
 	initRead        sync.Once
 	initWrite       sync.Once
+	writeInitErr    error
 	metadata        Metadata
 	cmdKey          []byte
 	dialTgt         string
@@ -194,6 +195,7 @@ func (c *Conn) InitContext(instructionData []byte) error {
 
 func (c *Conn) WriteReqHeader() (err error) {
 	c.initWrite.Do(func() {
+		defer func() { c.writeInitErr = err }()
 		instructionData := ReqInstructionDataFromPool(c.metadata)
 		defer pool.PutBuffer(instructionData)
 
@@ -224,6 +226,11 @@ func (c *Conn) WriteReqHeader() (err error) {
 		c.writeNonceGenerator = GenerateChunkNonce(c.requestBodyIV[:], uint32(c.writeBodyCipher.NonceSize()))
 		_, err = c.Conn.Write(header)
 	})
+	// The once has already run: a failed init must surface on every call,
+	// or later writes proceed with nil cipher state and panic.
+	if err == nil {
+		err = c.writeInitErr
+	}
 	return err
 }
 
@@ -248,6 +255,7 @@ func (c *Conn) write(b []byte) (n int, err error) {
 	defer c.writeMutex.Unlock()
 	var encRespHeader []byte
 	c.initWrite.Do(func() {
+		defer func() { c.writeInitErr = err }()
 		if !c.metadata.IsClient {
 			header := RespHeaderFromPool(c.responseAuth)
 			defer pool.PutBuffer(header)
@@ -275,6 +283,9 @@ func (c *Conn) write(b []byte) (n int, err error) {
 	})
 	if len(encRespHeader) != 0 {
 		defer pool.PutBuffer(encRespHeader)
+	}
+	if err == nil {
+		err = c.writeInitErr
 	}
 	if err != nil {
 		return 0, err

@@ -3,6 +3,7 @@ package proto
 import (
 	"bytes"
 	"strings"
+	"sync"
 
 	"github.com/daeuniverse/outbound/transport/shadowsocksr/internal/crypto"
 )
@@ -10,7 +11,8 @@ import (
 type creator func() IProtocol
 
 var (
-	creatorMap = make(map[string]creator)
+	creatorMapMu sync.RWMutex
+	creatorMap   = make(map[string]creator)
 )
 
 type hmacMethod func(key []byte, data []byte) []byte
@@ -35,11 +37,15 @@ type AuthData struct {
 }
 
 func register(name string, c creator) {
+	creatorMapMu.Lock()
+	defer creatorMapMu.Unlock()
 	creatorMap[name] = c
 }
 
 func NewProtocol(name string) IProtocol {
+	creatorMapMu.RLock()
 	c, ok := creatorMap[strings.ToLower(name)]
+	creatorMapMu.RUnlock()
 	if ok {
 		return c()
 	}
