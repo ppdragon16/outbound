@@ -14,7 +14,13 @@ import (
 )
 
 const (
-	packetQueueSize = 1024
+	// packetQueueSize only has to absorb scheduling jitter between the
+	// recvLoop producer(s) and the QUIC transport reader — microseconds of
+	// work per packet on both sides. 256 slots ≈ 2.5 ms of tolerance at
+	// 100 kpps (Gbit line rate), well past any QUIC cwnd-sized burst, and
+	// keeps the eager per-conn reservation at 24 KB instead of 96 KB.
+	// Overflow is a non-blocking drop; QUIC recovers from loss on its own.
+	packetQueueSize = 256
 	udpBufferSize   = 2048 // QUIC packets are at most 1500 bytes long, so 2k should be more than enough
 
 	defaultHopInterval = 30 * time.Second
