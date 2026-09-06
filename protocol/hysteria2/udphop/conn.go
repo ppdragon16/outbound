@@ -9,8 +9,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/daeuniverse/outbound/pkg/logger"
 	"github.com/daeuniverse/outbound/pkg/oops"
 	"github.com/daeuniverse/outbound/pool"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -118,6 +120,18 @@ func (u *udpHopPacketConn) recvLoop(conn net.Conn) {
 				case <-u.ctx.Done():
 				}
 			}
+			if errors.Is(err, net.ErrClosed) {
+				// Routine hop-close of a retired socket — the per-hop
+				// release accounting.
+				if logger.Logger.IsLevelEnabled(logrus.DebugLevel) {
+					logger.Logger.WithField("local", conn.LocalAddr().String()).
+						Debug("[udphop] recvLoop exited: conn closed")
+				}
+			} else if logger.Logger.IsLevelEnabled(logrus.WarnLevel) {
+				logger.Logger.WithField("local", conn.LocalAddr().String()).
+					WithField("err", err.Error()).
+					Warn("[udphop] recvLoop exited on unexpected error")
+			}
 			return
 		}
 		select {
@@ -160,7 +174,15 @@ func (u *udpHopPacketConn) hop() {
 	// set newConn as currentConn,
 	// start recvLoop on newConn.
 	if u.prevConn != nil {
-		u.prevConn.Close() // recvLoop for this conn will exit
+		prevLocal := u.prevConn.LocalAddr().String()
+		if err := u.prevConn.Close(); err != nil {
+			// fd release is the resource that must not leak here; a failed
+			// close is the only silent way it could.
+			if logger.Logger.IsLevelEnabled(logrus.WarnLevel) {
+				logger.Logger.WithField("local", prevLocal).
+					Warn("[udphop] failed to close prev conn")
+			}
+		}
 	}
 	u.prevConn = u.currentConn
 	u.currentConn = newConn
