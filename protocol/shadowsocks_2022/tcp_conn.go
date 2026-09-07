@@ -55,8 +55,7 @@ type TCPConn struct {
 
 	bufReader *ReusableReader
 
-	bloom       *disk_bloom.FilterGroup
-	writeHasher *blake3.Hasher
+	bloom *disk_bloom.FilterGroup
 }
 
 type Key struct {

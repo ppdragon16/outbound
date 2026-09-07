@@ -61,7 +61,7 @@ func (a *authSHA1v4) packData(data []byte) (outData []byte) {
 	// 0~1, out length
 	binary.BigEndian.PutUint16(outData[0:2], uint16(outLength&0xFFFF))
 	// 2~3, crc of out length
-	crc32 := crypto.CalcCRC32(outData, 2, 0xFFFFFFFF)
+	crc32 := crypto.CalcCRC32(outData, 2)
 	binary.LittleEndian.PutUint16(outData[2:4], uint16(crc32&0xFFFF))
 	// 4, rand length
 	if randLength < 128 {
@@ -115,7 +115,7 @@ func (a *authSHA1v4) packAuthData(data []byte) (outData []byte) {
 	copy(crcData[0:2], outData[0:2])
 	copy(crcData[2:], salt)
 	copy(crcData[2+len(salt):], a.Key)
-	crc32 := crypto.CalcCRC32(crcData, len(crcData), 0xFFFFFFFF)
+	crc32 := crypto.CalcCRC32(crcData, len(crcData))
 	// 2~6, crc of out length+salt+key
 	binary.LittleEndian.PutUint32(outData[2:], crc32)
 	// 6~rand length+6, rand numbers
@@ -189,7 +189,7 @@ func (a *authSHA1v4) Decode(plainData []byte) (outData []byte, n int, err error)
 	dataLength := len(plainData)
 	plainLength := dataLength
 	for dataLength > 4 {
-		crc32 := crypto.CalcCRC32(plainData, 2, 0xFFFFFFFF)
+		crc32 := crypto.CalcCRC32(plainData, 2)
 		if binary.LittleEndian.Uint16(plainData[2:4]) != uint16(crc32&0xFFFF) {
 			//common.Error("auth_sha1_v4 post decrypt data crc32 error")
 			return nil, 0, ErrAuthSHA1v4CRC32Error

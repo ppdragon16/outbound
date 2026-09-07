@@ -92,7 +92,7 @@ func TestUdp(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			return c.(net.Conn), nil
+			return c, nil
 		},
 	}
 	ips, err := resolver.LookupNetIP(context.TODO(), "ip", "www.baidu.com")

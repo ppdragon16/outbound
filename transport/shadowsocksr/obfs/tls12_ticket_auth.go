@@ -98,7 +98,6 @@ func packData(buffer *bytes.Buffer, suffixData []byte) {
 	binary.BigEndian.PutUint16(d[3:5], uint16(len(suffixData)&0xFFFF))
 	buffer.Write(d)
 	buffer.Write(suffixData)
-	return
 }
 
 func (t *tls12TicketAuth) Encode(data []byte) ([]byte, error) {
@@ -219,14 +218,10 @@ func (t *tls12TicketAuth) Encode(data []byte) ([]byte, error) {
 		encodedData[pdata-1] = uint8(l)
 		encodedData[pdata-2] = uint8(l >> 8)
 		pdata -= 2
-		l += 2
 		encodedData[pdata-1] = 0x1
 		encodedData[pdata-2] = 0x3 // tls version
 		pdata -= 2
-		l += 2
 		encodedData[pdata-1] = 0x16 // tls handshake
-		pdata -= 1
-		l += 1
 		packData(&t.sendSaver, data)
 		t.handshakeStatus = 1
 		return encodedData, nil
