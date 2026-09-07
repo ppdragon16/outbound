@@ -101,7 +101,7 @@ func TestWriteAfterSoftResetPreservesIntegrity(t *testing.T) {
 func TestMultipleConsumeGrowCycles(t *testing.T) {
 	b := NewPooledBuffer()
 
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		payload := strings.Repeat("a", 1024)
 		b.Write([]byte(payload))
 		if b.Len() != 1024 {

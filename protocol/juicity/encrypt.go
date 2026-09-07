@@ -42,7 +42,7 @@ func computeHMACSHA1(key []byte, out []byte, data ...[]byte) {
 		copy(k0[:], key)
 	}
 
-	for i := 0; i < 64; i++ {
+	for i := range 64 {
 		ipad[i] = k0[i] ^ 0x36
 		opad[i] = k0[i] ^ 0x5c
 	}

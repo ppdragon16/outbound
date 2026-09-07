@@ -142,10 +142,7 @@ func writeDataFrames(session *session, sid uint32, data []byte, deadline time.Ti
 
 	written := 0
 	for written < len(data) {
-		end := written + maxFramePayloadSize
-		if end > len(data) {
-			end = len(data)
-		}
+		end := min(written+maxFramePayloadSize, len(data))
 		frame := newFrame(cmdPSH, sid)
 		frame.data = data[written:end]
 		if _, err := writeFrameWithDeadline(session, frame, deadline); err != nil {

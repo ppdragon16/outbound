@@ -92,10 +92,7 @@ func fragWriteNative(quicConn quic.Connection, connId, pktId uint16, addr netip.
 	fragID := uint8(0)
 	fragCount := uint8((len(fullPayload) + fragSize - 1) / fragSize)
 	for off < len(fullPayload) {
-		payloadSize := len(fullPayload) - off
-		if payloadSize > fragSize {
-			payloadSize = fragSize
-		}
+		payloadSize := min(len(fullPayload)-off, fragSize)
 		chunk := fullPayload[off : off+payloadSize]
 		off += payloadSize
 

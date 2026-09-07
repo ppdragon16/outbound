@@ -45,10 +45,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	maxOpenIncomingStreams := int64(100)
 	quicMaxOpenIncomingStreams := int64(maxOpenIncomingStreams)
 	quicMaxOpenIncomingStreams = quicMaxOpenIncomingStreams + int64(math.Ceil(float64(quicMaxOpenIncomingStreams)/10.0))
-	reservedStreamsCapability := maxOpenIncomingStreams / 5
-	if reservedStreamsCapability < 1 {
-		reservedStreamsCapability = 1
-	}
+	reservedStreamsCapability := max(maxOpenIncomingStreams/5, 1)
 	if reservedStreamsCapability > 5 {
 		reservedStreamsCapability = 5
 	}

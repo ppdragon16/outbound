@@ -47,7 +47,7 @@ func TestAddrCache_ReuseWithinTTL(t *testing.T) {
 		calls++
 		return udpAddrs("10.0.0.2"), nil
 	})
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		addrs, err := c.Get()
 		if err != nil {
 			t.Fatalf("Get() = %v", err)

@@ -5,8 +5,8 @@ import utls "github.com/refraction-networking/utls"
 type Header struct {
 	ProxyAddress string
 	SNI          string
-	Feature1     interface{}
-	Feature2     interface{}
+	Feature1     any
+	Feature2     any
 	TlsConfig    *utls.Config
 	Cipher       string
 	User         string

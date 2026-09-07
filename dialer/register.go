@@ -24,8 +24,8 @@ func FromLinkRegister(name string, creator FromLinkCreator) {
 func NewFromLink(link string) (dialers []Dialer, property *Property, err error) {
 	/// Get overwritten name.
 	overwrittenName, linklike := common.GetTagFromLinkLikePlaintext(link)
-	links := strings.Split(linklike, "->")
-	for _, link := range links {
+	links := strings.SplitSeq(linklike, "->")
+	for link := range links {
 		link = strings.TrimSpace(link)
 		u, err := url.Parse(link)
 		if err != nil {

@@ -115,10 +115,7 @@ func (s *assemblerClientSession) runOnce() {
 	pollConnection := true
 	for sendBuffer.Len() != 0 || firstRound {
 		firstRound = false
-		sendAmount := sendBuffer.Len()
-		if sendAmount > int(s.assembler.config.MaxWriteSize) {
-			sendAmount = int(s.assembler.config.MaxWriteSize)
-		}
+		sendAmount := min(sendBuffer.Len(), int(s.assembler.config.MaxWriteSize))
 		data := sendBuffer.Next(sendAmount)
 		if len(data) != 0 {
 			pollConnection = false
@@ -150,10 +147,7 @@ func (s *assemblerClientSession) runOnce() {
 		}
 	}
 	if pollConnection {
-		s.currentWriteWait = int(s.assembler.config.BackoffFactor * float32(s.currentWriteWait))
-		if s.currentWriteWait > int(s.assembler.config.MaxPollingIntervalMs) {
-			s.currentWriteWait = int(s.assembler.config.MaxPollingIntervalMs)
-		}
+		s.currentWriteWait = min(int(s.assembler.config.BackoffFactor*float32(s.currentWriteWait)), int(s.assembler.config.MaxPollingIntervalMs))
 		if s.currentWriteWait < int(s.assembler.config.MinPollingIntervalMs) {
 			s.currentWriteWait = int(s.assembler.config.MinPollingIntervalMs)
 		}

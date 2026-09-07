@@ -140,8 +140,8 @@ func ParsePortUnion(s string) PortUnion {
 		return PortUnion{PortRange{0, 65535}}
 	}
 	var result PortUnion
-	portStrs := strings.Split(s, ",")
-	for _, portStr := range portStrs {
+	portStrs := strings.SplitSeq(s, ",")
+	for portStr := range portStrs {
 		if strings.Contains(portStr, "-") {
 			// Port range
 			portRange := strings.Split(portStr, "-")

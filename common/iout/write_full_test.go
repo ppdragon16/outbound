@@ -15,10 +15,7 @@ type shortWriter struct {
 }
 
 func (w *shortWriter) Write(p []byte) (int, error) {
-	n := len(p)
-	if n > w.max {
-		n = w.max
-	}
+	n := min(len(p), w.max)
 	w.n += n
 	return n, nil
 }

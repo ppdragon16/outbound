@@ -27,7 +27,7 @@ type UdpConn struct {
 	net.Conn
 
 	sessionID [8]byte
-	packetID  uint64
+	packetID  atomic.Uint64
 
 	cipherConf         *ciphers.CipherConf2022
 	blockCipherEncrypt cipher.Block
@@ -114,7 +114,7 @@ func (c *UdpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (int, error) {
 	// Separate Header (16 bytes)
 	separateHeader := totalBuf[:16]
 	copy(separateHeader[:8], c.sessionID[:])
-	binary.BigEndian.PutUint64(separateHeader[8:16], atomic.AddUint64(&c.packetID, 1))
+	binary.BigEndian.PutUint64(separateHeader[8:16], c.packetID.Add(1))
 
 	buf := totalBuf[16:]
 	// Encrpt Separate Header

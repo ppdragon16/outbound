@@ -95,7 +95,7 @@ var cipherIv = make([]byte, 64)
 const CIPHER_BENCHMARK_BUFFER_LEN = 4096
 
 func init() {
-	for i := 0; i < len(cipherKey); i++ {
+	for i := range cipherKey {
 		cipherKey[i] = byte(i)
 	}
 

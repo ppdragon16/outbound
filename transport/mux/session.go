@@ -48,7 +48,7 @@ func setKeepAlive(conn net.Conn, period time.Duration) {
 		SetKeepAlive(bool) error
 		SetKeepAlivePeriod(time.Duration) error
 	}
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		if k, ok := conn.(keepAliver); ok {
 			_ = k.SetKeepAlive(true)
 			_ = k.SetKeepAlivePeriod(period)

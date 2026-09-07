@@ -373,7 +373,7 @@ func ParseVmessURL(vmess string) (data *V2Ray, err error) {
 			return
 		}
 		re := regexp.MustCompile(`.*:(.+)@(.+):(\d+)`)
-		s := strings.Split(vmess[8:], "?")[0]
+		s, _, _ := strings.Cut(vmess[8:], "?")
 		s, err = common.Base64StdDecode(s)
 		if err != nil {
 			s, _ = common.Base64UrlDecode(s)

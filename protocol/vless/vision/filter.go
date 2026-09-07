@@ -54,10 +54,7 @@ func (vc *Conn) FilterTLS(buffer []byte) (index int) {
 
 	if vc.remainingServerHello > 0 {
 		end := int(vc.remainingServerHello)
-		i := index
-		if i < 0 {
-			i = 0
-		}
+		i := max(index, 0)
 		if i+end > lenP {
 			end = lenP
 			vc.remainingServerHello -= uint16(end - i)

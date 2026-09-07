@@ -182,7 +182,7 @@ func TestPoolStatsOccupancy(t *testing.T) {
 	resetClass(i)
 
 	p := &classPools[i]
-	for n := 0; n < 3; n++ {
+	for range 3 {
 		PutBuffer(make([]byte, class))
 	}
 	var snap StatsSnapshot
@@ -276,7 +276,7 @@ func TestRingGrowsOnOverflow(t *testing.T) {
 	if p.cap != initialRingSize {
 		t.Fatalf("initial cap = %d, want %d", p.cap, initialRingSize)
 	}
-	for n := 0; n < initialRingSize+1; n++ {
+	for range initialRingSize + 1 {
 		PutBuffer(make([]byte, class))
 	}
 	if p.cap != initialRingSize*2 {
@@ -326,7 +326,7 @@ func TestSweeperWarmSetKeepsLowRateClass(t *testing.T) {
 
 	p := &classPools[i]
 	warmCount := max(classWarmMinBytes>>i, p.cap>>1) // 32: byte floor wins at cap 32
-	for n := 0; n < warmCount; n++ {
+	for range warmCount {
 		PutBuffer(make([]byte, class))
 	}
 	if p.n != warmCount {
@@ -410,7 +410,7 @@ func TestSweeperWarmCountTracksRingGrowth(t *testing.T) {
 	defer resetClass(i)
 
 	const count = 100 // grows the ring 32 -> 64 -> 128
-	for n := 0; n < count; n++ {
+	for range count {
 		PutBuffer(make([]byte, class))
 	}
 	p := &classPools[i]

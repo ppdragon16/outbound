@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"slices"
 	"unsafe"
 
 	"github.com/daeuniverse/outbound/pkg/oops"
@@ -438,8 +439,8 @@ func parseAddrPortBytes(b []byte) (netip.AddrPort, error) {
 	}
 	// IPv4: a.b.c.d:port — find last colon
 	lastColon := -1
-	for i := len(b) - 1; i >= 0; i-- {
-		if b[i] == ':' {
+	for i, v := range slices.Backward(b) {
+		if v == ':' {
 			lastColon = i
 			break
 		}

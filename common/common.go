@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/eknkc/basex"
@@ -116,7 +117,7 @@ func BytesIncBigEndian(b []byte) {
 }
 
 func BytesIncLittleEndian(b []byte) {
-	for i := 0; i < len(b); i++ {
+	for i := range b {
 		b[i]++
 		if b[i] != 0 {
 			break
@@ -168,12 +169,7 @@ func StringToUUID5(str string) string {
 }
 
 func StringsHas(strs []string, str string) bool {
-	for _, s := range strs {
-		if s == str {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strs, str)
 }
 
 func HeadOverlap(p, b []byte) bool {

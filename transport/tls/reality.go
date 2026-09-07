@@ -59,7 +59,7 @@ type RealityUConn struct {
 	Verified   bool
 }
 
-var p, _ = reflect.TypeOf((*utls.Conn)(nil)).Elem().FieldByName("peerCertificates")
+var p, _ = reflect.TypeFor[utls.Conn]().FieldByName("peerCertificates")
 
 func (c *RealityUConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 	certs := *(*[]*x509.Certificate)(unsafe.Add(unsafe.Pointer(c.Conn), p.Offset))
@@ -316,7 +316,7 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c net.
 				}
 				get(true)
 				concurrency := int(randBetween(x.spiderY[2], x.spiderY[3]))
-				for i := 0; i < concurrency; i++ {
+				for range concurrency {
 					go get(false)
 				}
 				// Do not close the connection

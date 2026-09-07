@@ -66,8 +66,8 @@ func updatePaddingScheme(rawScheme []byte) bool {
 
 func stringMapFromBytes(b []byte) map[string]string {
 	m := make(map[string]string)
-	lines := strings.Split(string(b), "\n")
-	for _, line := range lines {
+	lines := strings.SplitSeq(string(b), "\n")
+	for line := range lines {
 		v := strings.SplitN(line, "=", 2)
 		if len(v) == 2 {
 			m[v[0]] = v[1]
