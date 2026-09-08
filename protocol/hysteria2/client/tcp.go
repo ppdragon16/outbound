@@ -2,6 +2,7 @@ package client
 
 import (
 	"net"
+	"sync"
 	"time"
 
 	"github.com/daeuniverse/outbound/pkg/oops"
@@ -14,30 +15,82 @@ type tcpConn struct {
 	PseudoLocalAddr  net.Addr
 	PseudoRemoteAddr net.Addr
 	Established      bool
-	// dialDeadline arms the deferred fast-open response read; zero when
-	// the dial ctx had no deadline.
-	dialDeadline time.Time
+	// deadlineMu serializes caller deadline changes with handshake
+	// cleanup. Until the fast-open response is consumed, the dial
+	// deadline caps both directions and cannot be extended by callers.
+	deadlineMu    sync.Mutex
+	dialDeadline  time.Time
+	readDeadline  time.Time
+	writeDeadline time.Time
+	respErr       error
+	establishOnce sync.Once
+}
+
+// handshakeDeadline returns the earlier nonzero deadline. Caller deadlines
+// cannot extend or disable the dial timeout while the response is pending.
+func (c *tcpConn) handshakeDeadline(t time.Time) time.Time {
+	if !c.dialDeadline.IsZero() && (t.IsZero() || c.dialDeadline.Before(t)) {
+		return c.dialDeadline
+	}
+	return t
+}
+
+func (c *tcpConn) readFastOpenResponse() error {
+	c.establishOnce.Do(func() {
+		defer func() {
+			c.deadlineMu.Lock()
+			defer c.deadlineMu.Unlock()
+			if !c.dialDeadline.IsZero() {
+				// The response is consumed (or permanently failed):
+				// drop the dial cap and hand the deadlines back to the
+				// caller exactly as it set them.
+				c.dialDeadline = time.Time{}
+				_ = c.Orig.SetReadDeadline(c.readDeadline)
+				_ = c.Orig.SetWriteDeadline(c.writeDeadline)
+			}
+		}()
+		ok, msg, err := protocol.ReadTCPResponse(c.Orig)
+		if err != nil {
+			c.respErr = err
+			return
+		}
+		if !ok {
+			c.respErr = oops.Wrapf(err, "dial error: %s", msg)
+		}
+	})
+	return c.respErr
 }
 
 func (c *tcpConn) Read(b []byte) (n int, err error) {
 	if !c.Established {
-		if !c.dialDeadline.IsZero() {
-			_ = c.Orig.SetDeadline(c.dialDeadline)
-		}
 		// Read response
-		ok, msg, err := protocol.ReadTCPResponse(c.Orig)
-		if !c.dialDeadline.IsZero() {
-			_ = c.Orig.SetDeadline(time.Time{})
-		}
-		if err != nil {
+		if err = c.readFastOpenResponse(); err != nil {
 			return 0, err
-		}
-		if !ok {
-			return 0, oops.Wrapf(err, "dial error: %s", msg)
 		}
 		c.Established = true
 	}
 	return c.Orig.Read(b)
+}
+
+func (c *tcpConn) SetDeadline(t time.Time) error {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	c.readDeadline, c.writeDeadline = t, t
+	return c.Orig.SetDeadline(c.handshakeDeadline(t))
+}
+
+func (c *tcpConn) SetReadDeadline(t time.Time) error {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	c.readDeadline = t
+	return c.Orig.SetReadDeadline(c.handshakeDeadline(t))
+}
+
+func (c *tcpConn) SetWriteDeadline(t time.Time) error {
+	c.deadlineMu.Lock()
+	defer c.deadlineMu.Unlock()
+	c.writeDeadline = t
+	return c.Orig.SetWriteDeadline(c.handshakeDeadline(t))
 }
 
 func (c *tcpConn) Write(b []byte) (n int, err error) {
@@ -69,16 +122,4 @@ func (c *tcpConn) LocalAddr() net.Addr {
 
 func (c *tcpConn) RemoteAddr() net.Addr {
 	return c.PseudoRemoteAddr
-}
-
-func (c *tcpConn) SetDeadline(t time.Time) error {
-	return c.Orig.SetDeadline(t)
-}
-
-func (c *tcpConn) SetReadDeadline(t time.Time) error {
-	return c.Orig.SetReadDeadline(t)
-}
-
-func (c *tcpConn) SetWriteDeadline(t time.Time) error {
-	return c.Orig.SetWriteDeadline(t)
 }

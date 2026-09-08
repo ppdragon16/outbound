@@ -88,8 +88,12 @@ func (c *Client) DialConn(stream *utils.QStream, addr string, dialDeadline time.
 	if c.config.FastOpen {
 		// Don't wait for the response when fast open is enabled.
 		// Return the connection immediately, defer the response handling
-		// to the first Read() call, which re-arms the dial deadline:
-		// clearing it here would leave that read unbounded.
+		// to the first Read() call. Keep the dial deadline armed on the
+		// stream until the response is consumed, independently of caller
+		// deadlines.
+		if !dialDeadline.IsZero() {
+			_ = stream.SetDeadline(dialDeadline)
+		}
 		return &tcpConn{
 			Orig:             stream,
 			PseudoLocalAddr:  conn.LocalAddr(),
