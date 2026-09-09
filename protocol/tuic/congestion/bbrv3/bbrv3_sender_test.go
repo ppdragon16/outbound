@@ -433,3 +433,31 @@ func TestInflightAtLossClamp(t *testing.T) {
 		t.Fatalf("inflightAtLoss = %d, must be clamped ≥ 0", got)
 	}
 }
+
+// TestAppLimitedPacingAware: the app-limited approximation must judge against
+// what pacing sustains (capped by cwnd), not cwnd alone — in ProbeBW the
+// pacer holds ~1 BDP in flight while cwnd allows ~2×BDP, and a cwnd-relative
+// test would mark every steady event app-limited and starve the model.
+func TestAppLimitedPacingAware(t *testing.T) {
+	h := newHarness(t)
+	driveToUp(h) // UP: pacingRate ≈ 1.25×bw, minRtt = 50ms, BDP = 48000B
+
+	// Pacing-sustained in-flight (~60KB at 1.25×bw × 50ms) must NOT be
+	// flagged, even though it is far below the UP cwnd (~108KB).
+	h.drainAll()
+	h.send(50) // 60000 B ≈ 1.25 BDP
+	h.clock.now = h.clock.now.Add(roundRTT)
+	h.event(40, 0)
+	if h.s.sampler.IsAppLimited() {
+		t.Fatalf("pacing-sustained inflight (%dB) marked app-limited", h.inflight)
+	}
+
+	// Genuine idleness must still be flagged.
+	h.drainAll()
+	h.send(5) // 6000 B, well under 3/4 of pacing-sustained in-flight
+	h.clock.now = h.clock.now.Add(roundRTT)
+	h.event(1, 0)
+	if !h.s.sampler.IsAppLimited() {
+		t.Fatalf("near-idle inflight (%dB) not marked app-limited", h.inflight)
+	}
+}

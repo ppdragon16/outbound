@@ -25,7 +25,7 @@ BBRv3 拥塞控制（draft-ietf-ccwg-bbr-06，2026-07）的 Go 实现，作为
 | loss-recovery 期间 cwnd 调制（§5.6.4.4）不实现 | 接口无 recovery 钩子，`InRecovery()` 恒 false（quiche 同） |
 | `OnRetransmissionTimeout` 空操作 | fork 内为死代码（无调用点）；quiche 同为空 |
 | `C.is_cwnd_limited` 用发送时近似 | `bytesInFlight > cwnd`（接口无该信号） |
-| app-limited 用发送侧启发式 | `priorInFlight < cwnd` 时标记（与 v1 包一致的近似） |
+| app-limited 用发送侧启发式 | 接口无传输层信号；按 `3/4×min(cwnd, pacing_rate×minRTT)` 判定——纯 cwnd 判定在 ProbeBW 稳态（pacing 持有 ~1 BDP，cwnd 允许 ~2 BDP）会把所有事件标成 app-limited，饿死带宽模型 |
 | loss-timer 丢包经 `OnCongestionEvent` 排队、下次 ACK 并入模型 | fork 的 loss-timer 路径只走 legacy 回调，不进 `OnCongestionEventEx`；本实现保持采样器一致并延迟一拍处理 |
 | `ack_phase` 复用 `ACKS_PROBE_STARTING` 代替 `ACKS_REFILLING` | 同一 ACK 内被 `StartProbeBW_UP` 覆写，行为中性 |
 | idle_restart 仅在 `RS.delivered > 0` 时清除 | 与 draft L3264-3265 一致（非偏离，记录语义） |

@@ -1095,9 +1095,25 @@ func (b *bbr3Sender) handleRestartFromIdle(now time.Time) {
 // maybeAppLimited marks the sampler app-limited when the connection had
 // spare cwnd (same heuristic as the v1 package; stands in for the draft's
 // transport-provided C.app_limited signal).
+// maybeAppLimited approximates the draft's C.app_limited signal, which the
+// fork's interface does not carry. A bare cwnd test (as v1 used) over-marks in
+// steady state: pacing deliberately holds about one BDP in flight while cwnd
+// allows cwnd_gain×BDP, so every ProbeBW event would be flagged app-limited
+// and the bandwidth model would starve of rising samples. Judge instead
+// against what the current pacing rate would sustain, capped by cwnd, with
+// 3/4 slack (cf. the pacing-aware heuristic in the olicesx fork's bbr3).
 func (b *bbr3Sender) maybeAppLimited(bytesInFlight congestion.ByteCount) {
-	cwnd := b.GetCongestionWindow()
-	if bytesInFlight >= cwnd {
+	rtt := b.minRtt
+	if rtt <= 0 {
+		rtt = b.rttStats.SmoothedRTT()
+	}
+	if rtt <= 0 {
+		// No RTT information yet; do not mark (keeps early samples usable).
+		return
+	}
+	pacingInFlight := congestion.ByteCount(uint64(b.bandwidthForPacer()) * uint64(rtt) / uint64(time.Second))
+	limit := minByteCount2(b.cwnd, pacingInFlight)
+	if bytesInFlight >= limit*3/4 {
 		return
 	}
 	b.sampler.OnAppLimited()
