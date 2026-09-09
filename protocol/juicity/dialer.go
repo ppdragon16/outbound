@@ -13,7 +13,7 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
-	"github.com/daeuniverse/outbound/protocol/tuic/congestion/bbr"
+	"github.com/daeuniverse/outbound/protocol/tuic/congestion"
 	"github.com/daeuniverse/quic-go"
 	"github.com/google/uuid"
 )
@@ -96,11 +96,11 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 					EnableDatagrams:                false,
 					HandshakeIdleTimeout:           8 * time.Second,
 					CapabilityCallback:             capabilityCallback,
-					// Use BBR from the start to avoid allocating a CUBIC sender
-					// that would be immediately replaced via SetCongestionControl.
-					InitialCongestionControl: bbr.NewBbrSender(
-						bbr.DefaultClock{},
-						bbr.GetInitialPacketSize(proxyAddrs[0]),
+					// Use the configured congestion controller from the start
+					// to avoid allocating a CUBIC sender that would be
+					// immediately replaced via SetCongestionControl.
+					InitialCongestionControl: congestion.NewInitialSender(
+						header.Feature1.(string), proxyAddrs[0],
 					),
 				},
 				Uuid:                 id,

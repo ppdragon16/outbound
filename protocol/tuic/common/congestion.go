@@ -15,7 +15,8 @@ const (
 // SetCongestionController wires the configured congestion controller into the
 // QUIC connection. "brutal" uses cwnd as the target bandwidth in bytes per
 // second (community convention shared with sing-box and the tuic brutal
-// forks); when it is zero the connection falls back to BBR.
+// forks); when it is zero the connection falls back to BBR. "bbrv3" opts in
+// to the draft-ietf-ccwg-bbr-06 implementation (protocol/tuic/congestion/bbrv3).
 func SetCongestionController(quicConn quic.Connection, cc string, cwnd uint64) {
 	switch cc {
 	case "brutal":
@@ -24,6 +25,8 @@ func SetCongestionController(quicConn quic.Connection, cc string, cwnd uint64) {
 			return
 		}
 		congestion.UseBrutal(quicConn, cwnd)
+	case "bbrv3":
+		congestion.UseBBRV3(quicConn)
 	default:
 		congestion.UseBBR(quicConn)
 	}
