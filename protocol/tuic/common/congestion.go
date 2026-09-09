@@ -13,21 +13,23 @@ const (
 )
 
 // SetCongestionController wires the configured congestion controller into the
-// QUIC connection. "brutal" uses cwnd as the target bandwidth in bytes per
-// second (community convention shared with sing-box and the tuic brutal
-// forks); when it is zero the connection falls back to BBR. "bbrv3" opts in
-// to the draft-ietf-ccwg-bbr-06 implementation (protocol/tuic/congestion/bbrv3).
+// QUIC connection. Unset or unrecognized controllers default to BBRv3 (the
+// draft-ietf-ccwg-bbr-06 implementation in protocol/tuic/congestion/bbrv3);
+// "bbr" explicitly restores the previous stable default (Chromium-lineage
+// BBRv1). "brutal" uses cwnd as the target bandwidth in bytes per second
+// (community convention shared with sing-box and the tuic brutal forks); when
+// it is zero the connection falls back to BBRv3.
 func SetCongestionController(quicConn quic.Connection, cc string, cwnd uint64) {
 	switch cc {
+	case "bbr":
+		congestion.UseBBR(quicConn)
 	case "brutal":
 		if cwnd == 0 {
-			congestion.UseBBR(quicConn)
+			congestion.UseBBRV3(quicConn)
 			return
 		}
 		congestion.UseBrutal(quicConn, cwnd)
-	case "bbrv3":
-		congestion.UseBBRV3(quicConn)
 	default:
-		congestion.UseBBR(quicConn)
+		congestion.UseBBRV3(quicConn)
 	}
 }

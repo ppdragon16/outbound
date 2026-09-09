@@ -32,9 +32,10 @@ BBRv3 拥塞控制（draft-ietf-ccwg-bbr-06，2026-07）的 Go 实现，作为
 
 ## 启用
 
-默认关闭。显式配置 `congestion_control=bbrv3`（tuic）或
-`CongestionController=bbrv3`（juicity）后经 `SetCongestionController` /
-`InitialCongestionControl` 注入。不改 quic-go fork。
+三协议（tuic / juicity / hysteria2）**默认启用**：未配置 `congestion_control`
+时即使用 bbrv3（hysteria2 中带宽驱动的 brutal 除外——协商出带宽仍用 brutal）。
+显式 `congestion_control=bbr` 回退 v1；`brutal`（tuic，需 cwnd）不变。
+经 `SetCongestionController` / `InitialCongestionControl` 注入，不改 quic-go fork。
 
 ## 测试
 

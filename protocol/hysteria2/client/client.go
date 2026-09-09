@@ -506,8 +506,8 @@ func (c *Client) applyPostHandshake(resp *http.Response, conn quic.Connection) (
 	var actualTx uint64
 	if authResp.RxAuto {
 		// Server asks client to use bandwidth detection,
-		// ignore local bandwidth config and use BBR
-		congestion.UseBBR(conn)
+		// ignore local bandwidth config and use BBRv3 (the default CC)
+		congestion.UseBBRV3(conn)
 	} else {
 		// actualTx = min(serverRx, clientTx)
 		actualTx = authResp.Rx
@@ -518,8 +518,8 @@ func (c *Client) applyPostHandshake(resp *http.Response, conn quic.Connection) (
 		if actualTx > 0 {
 			congestion.UseBrutal(conn, actualTx)
 		} else {
-			// We don't know our own bandwidth either, use BBR
-			congestion.UseBBR(conn)
+			// We don't know our own bandwidth either; use BBRv3 (the default CC)
+			congestion.UseBBRV3(conn)
 		}
 	}
 	resp.Body.Close()

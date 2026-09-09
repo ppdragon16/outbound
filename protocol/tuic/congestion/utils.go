@@ -17,8 +17,9 @@ func UseBBR(conn quic.Connection) {
 	))
 }
 
-// UseBBRV3 swaps the connection onto BBRv3 (draft-ietf-ccwg-bbr-06).
-// Opt-in only: callers must pass congestion_control=bbrv3 explicitly.
+// UseBBRV3 installs the BBRv3 (draft-ietf-ccwg-bbr-06) sender. It is the
+// default congestion controller on QUIC-based protocols (tuic, juicity,
+// hysteria2); pass congestion_control=bbr to restore the BBRv1 default.
 func UseBBRV3(conn quic.Connection) {
 	conn.SetCongestionControl(bbrv3.NewBbr3Sender(
 		bbrv3.DefaultClock{},
@@ -33,13 +34,14 @@ func UseBrutal(conn quic.Connection, tx uint64) {
 // NewInitialSender returns the initial congestion-control sender for the
 // named controller, so connections that would immediately swap CC don't pay
 // for a throwaway CUBIC sender. Mirrors the names accepted by
-// tuic/common.SetCongestionController; "brutal" falls back to BBR here
-// because the negotiated bandwidth isn't known yet.
+// tuic/common.SetCongestionController (default = BBRv3); "brutal" falls back
+// to BBRv3 here because the negotiated bandwidth isn't known yet, and "bbr"
+// restores the BBRv1 default.
 func NewInitialSender(name string, addr net.Addr) quiccongestion.CongestionControl {
 	switch name {
-	case "bbrv3":
-		return bbrv3.NewBbr3Sender(bbrv3.DefaultClock{}, bbrv3.GetInitialPacketSize(addr))
-	default:
+	case "bbr":
 		return bbr.NewBbrSender(bbr.DefaultClock{}, bbr.GetInitialPacketSize(addr))
+	default:
+		return bbrv3.NewBbr3Sender(bbrv3.DefaultClock{}, bbrv3.GetInitialPacketSize(addr))
 	}
 }
