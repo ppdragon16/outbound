@@ -206,6 +206,7 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 			ServiceName:     serviceName,
 			ServerName:      sni,
 			AllowInsecure:   bool(s.AllowInsecure) || option.AllowInsecure,
+			UserAgent:       tls.FingerprintUserAgent(option.UtlsImitate),
 		}
 	case "http", "http2", "h2":
 		sni := s.SNI
@@ -270,6 +271,9 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 		d, err = httpupgrade.NewDialer(u.String(), d)
 		if err != nil {
 			return nil, err
+		}
+		if httpUpgradeDialer, ok := d.(*httpupgrade.Dialer); ok {
+			d = httpUpgradeDialer.UseFingerprintName(option.UtlsImitate)
 		}
 	default:
 		return nil, fmt.Errorf("%w: network: %v", dialer.UnexpectedFieldErr, s.Net)

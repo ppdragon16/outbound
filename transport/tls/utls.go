@@ -2,8 +2,11 @@ package tls
 
 import (
 	"fmt"
+	"net/http"
 
 	utls "github.com/refraction-networking/utls"
+
+	"github.com/daeuniverse/outbound/common/ua"
 )
 
 var clientHelloIDMap = map[string]*utls.ClientHelloID{
@@ -67,4 +70,26 @@ func nameToUtlsClientHelloID(name string) (*utls.ClientHelloID, error) {
 // (e.g. shadowtls).
 func NameToUtlsClientHelloID(name string) (*utls.ClientHelloID, error) {
 	return nameToUtlsClientHelloID(name)
+}
+
+// FingerprintHeaders returns the browser-consistent HTTP headers for a
+// configured fingerprint name ("chrome_auto", "firefox_105", ...). Unknown or
+// empty names fall back to the default browser headers instead of erroring:
+// the caller is a transport handshake, not a validator, and missing
+// fingerprint context must not break the connection.
+func FingerprintHeaders(name string) http.Header {
+	id, err := nameToUtlsClientHelloID(name)
+	if err != nil {
+		id = nil
+	}
+	return ua.Headers(id)
+}
+
+// FingerprintUserAgent returns just the User-Agent for a fingerprint name.
+func FingerprintUserAgent(name string) string {
+	id, err := nameToUtlsClientHelloID(name)
+	if err != nil {
+		id = nil
+	}
+	return ua.UserAgent(id)
 }

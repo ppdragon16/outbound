@@ -36,6 +36,8 @@ import (
 	"github.com/daeuniverse/outbound/protocol"
 	utls "github.com/refraction-networking/utls"
 
+	"github.com/daeuniverse/outbound/common/ua"
+
 	xtls "crypto/tls"
 
 	"golang.org/x/crypto/chacha20poly1305"
@@ -283,7 +285,10 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c net.
 						req, _ = http.NewRequest("GET", string(prefix)+getPathLocked(paths), nil)
 						maps.Unlock()
 					}
-					req.Header.Set("User-Agent", x.fingerprint.Client) // TODO: User-Agent map
+					// Keep the spider request consistent with the impersonated
+					// fingerprint: a Chrome ClientHello with a non-browser UA
+					// (the old "Chrome" literal) is trivially linkable.
+					ua.ApplyTo(req.Header, x.fingerprint)
 					times := 1
 					if !first {
 						times = int(randBetween(x.spiderY[4], x.spiderY[5]))

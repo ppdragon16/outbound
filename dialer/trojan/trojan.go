@@ -93,6 +93,7 @@ func (s *Trojan) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer
 			ServiceName:   serviceName,
 			ServerName:    s.Sni,
 			AllowInsecure: s.AllowInsecure || option.AllowInsecure,
+			UserAgent:     tls.FingerprintUserAgent(option.UtlsImitate),
 		}
 	case "httpupgrade":
 		u := url.URL{
@@ -104,9 +105,11 @@ func (s *Trojan) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer
 			}.Encode(),
 		}
 
-		if parentDialer, err = httpupgrade.NewDialer(u.String(), parentDialer); err != nil {
+		httpUpgradeDialer, err := httpupgrade.NewDialer(u.String(), parentDialer)
+		if err != nil {
 			return nil, err
 		}
+		parentDialer = httpUpgradeDialer.UseFingerprintName(option.UtlsImitate)
 	}
 	if strings.HasPrefix(s.Encryption, "ss;") {
 		fields := strings.SplitN(s.Encryption, ";", 3)

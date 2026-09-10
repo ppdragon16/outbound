@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/daeuniverse/outbound/common/ua"
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
@@ -126,6 +127,14 @@ func (s *WsConfig) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer
 		},
 	}
 	ws.header.Set("Host", s.Hostname)
+	// Keep the WebSocket handshake consistent with the impersonated TLS
+	// fingerprint: a Chrome ClientHello paired with the Go default UA is
+	// linkable across layers.
+	if id, err := transportTls.NameToUtlsClientHelloID(option.UtlsImitate); err == nil {
+		ua.ApplyTo(ws.header, id)
+	} else {
+		ua.ApplyTo(ws.header, nil)
+	}
 	if len(s.Alpn) > 0 {
 		ws.tlsClientConfig.NextProtos = strings.Split(s.Alpn, ",")
 	}

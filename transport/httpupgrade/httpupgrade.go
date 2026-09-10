@@ -12,8 +12,10 @@ import (
 
 	utls "github.com/refraction-networking/utls"
 
+	"github.com/daeuniverse/outbound/common/ua"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
+	transportTls "github.com/daeuniverse/outbound/transport/tls"
 )
 
 type Dialer struct {
@@ -24,6 +26,18 @@ type Dialer struct {
 	path       string
 	serverName string
 	skipVerify bool
+	// headers keeps the upgrade handshake's cleartext headers in sync with the
+	// impersonated TLS fingerprint. nil means "no fingerprint context" and
+	// falls back to the default browser headers at request time.
+	headers http.Header
+}
+
+// UseFingerprintName makes the upgrade handshake carry the headers a real
+// browser with the same fingerprint would send ("chrome_auto", "firefox_120",
+// ...). Unknown names fall back to default browser headers.
+func (t *Dialer) UseFingerprintName(name string) *Dialer {
+	t.headers = transportTls.FingerprintHeaders(name)
+	return t
 }
 
 func NewDialer(s string, d netproxy.Dialer) (*Dialer, error) {
@@ -89,6 +103,16 @@ func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c net.C
 		}
 		req.Header.Set("Connection", "upgrade")
 		req.Header.Set("Upgrade", "websocket")
+		// Keep the cleartext handshake consistent with the TLS fingerprint;
+		// when no fingerprint context exists, fall back to default browser
+		// headers rather than leaving the Go default UA in place.
+		headers := t.headers
+		if headers == nil {
+			headers = ua.Headers(nil)
+		}
+		for k, v := range headers {
+			req.Header[k] = v
+		}
 		req.Host = t.host
 
 		err = req.Write(conn)

@@ -262,12 +262,15 @@ type Dialer struct {
 	ServiceName   string
 	ServerName    string
 	AllowInsecure bool
+	// UserAgent keeps the gRPC layer's UA consistent with the impersonated TLS
+	// fingerprint; empty leaves gRPC's own default in place.
+	UserAgent string
 }
 
 func (d *Dialer) DialContext(ctx context.Context, network string, address string) (net.Conn, error) {
 	switch network {
 	case "tcp":
-		meta, cancel, err := getGrpcClientConn(ctx, d.ParentDialer, d.ServerName, address, d.AllowInsecure)
+		meta, cancel, err := getGrpcClientConn(ctx, d.ParentDialer, d.ServerName, address, d.AllowInsecure, d.UserAgent)
 		if err != nil {
 			cancel()
 			return nil, err
@@ -298,7 +301,7 @@ func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 	return nil, fmt.Errorf("%w: grpc+udp", netproxy.UnsupportedTunnelTypeError)
 }
 
-func getGrpcClientConn(ctx context.Context, dialer netproxy.Dialer, serverName string, address string, allowInsecure bool) (*clientConnMeta, ccCanceller, error) {
+func getGrpcClientConn(ctx context.Context, dialer netproxy.Dialer, serverName string, address string, allowInsecure bool, userAgent string) (*clientConnMeta, ccCanceller, error) {
 	// allowInsecure?
 	roots, err := cert.GetSystemCertPool()
 	if err != nil {
@@ -338,7 +341,7 @@ func getGrpcClientConn(ctx context.Context, dialer netproxy.Dialer, serverName s
 	meta = &clientConnMeta{
 		cc: nil,
 	}
-	meta.cc, err = grpc.DialContext(ctx, address,
+	opts := []grpc.DialOption{
 		certOption,
 		grpc.WithContextDialer(func(ctxGrpc context.Context, s string) (net.Conn, error) {
 			return dialer.DialContext(ctxGrpc, "tcp", s)
@@ -355,7 +358,13 @@ func getGrpcClientConn(ctx context.Context, dialer netproxy.Dialer, serverName s
 			Timeout:             10 * time.Second,
 			PermitWithoutStream: true,
 		}),
-	)
+	}
+	// Only override gRPC's own UA when a fingerprint-consistent one was
+	// derived; an empty WithUserAgent would blank the header entirely.
+	if userAgent != "" {
+		opts = append(opts, grpc.WithUserAgent(userAgent))
+	}
+	meta.cc, err = grpc.DialContext(ctx, address, opts...)
 	if err != nil {
 		return nil, canceller, err
 	}
