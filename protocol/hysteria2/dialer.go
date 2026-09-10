@@ -42,6 +42,9 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		FastOpen:   true,
 		NextDialer: nextDialer,
 	}
+	// hysteria2's auth round trip is HTTP/3, and quic-go's http3 dialer refuses
+	// multi-version configs, so preferring v2 pins it (no v1 fallback).
+	config.QUICConfig.Versions = protocol.QuicVersionsHTTP3(header.Flags)
 
 	if header.SNI == "" {
 		config.TLSConfig.ServerName = host

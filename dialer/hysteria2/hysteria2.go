@@ -35,6 +35,8 @@ type Hysteria2 struct {
 	MaxTx        uint64
 	MaxRx        uint64
 	ObfsPassword string
+	// QuicV2 offers QUIC v2 (RFC 9369) in the first packet.
+	QuicV2 bool
 }
 
 func NewHysteria2(link string) (dialer.Dialer, *dialer.Property, error) {
@@ -51,6 +53,10 @@ func NewHysteria2(link string) (dialer.Dialer, *dialer.Property, error) {
 }
 
 func (s *Hysteria2) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) (netproxy.Dialer, error) {
+	var flags protocol.Flags
+	if s.QuicV2 {
+		flags |= protocol.Flags_Quic_PreferV2
+	}
 	header := protocol.Header{
 		ProxyAddress: s.Server,
 		TlsConfig: &utls.Config{
@@ -60,6 +66,7 @@ func (s *Hysteria2) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dia
 		SNI:      s.Sni,
 		User:     s.User,
 		Password: s.Password,
+		Flags:    flags,
 	}
 
 	feature1 := &hysteria2.Feature1{
@@ -116,6 +123,16 @@ func normalizeCertHash(hash string) string {
 }
 
 // ref: https://v2.hysteria.network/zh/docs/developers/URI-Scheme/
+// QuicV2Requested reports whether a link asks for QUIC v2 (RFC 9369) in the
+// first packet via ?quic_version=2 (or the quicv2=1 alias).
+func QuicV2Requested(q url.Values) bool {
+	v := q.Get("quic_version")
+	if v == "" {
+		v = q.Get("quic-version")
+	}
+	return v == "2" || v == "v2" || q.Get("quicv2") == "1"
+}
+
 func ParseHysteria2URL(link string) (*Hysteria2, error) {
 	u, err := url.Parse(link)
 	if err != nil {
@@ -162,6 +179,7 @@ func ParseHysteria2URL(link string) (*Hysteria2, error) {
 		MaxTx:        maxTx,
 		MaxRx:        maxRx,
 		ObfsPassword: obfsPassword,
+		QuicV2:       QuicV2Requested(q),
 	}
 	conf.Password, _ = u.User.Password()
 	return conf, nil
@@ -194,6 +212,9 @@ func (s *Hysteria2) ExportToURL() string {
 	if s.ObfsPassword != "" {
 		q.Set("obfs", "salamander")
 		q.Set("obfs-password", s.ObfsPassword)
+	}
+	if s.QuicV2 {
+		q.Set("quic_version", "2")
 	}
 	t.RawQuery = q.Encode()
 	return t.String()
