@@ -44,5 +44,11 @@ STARTUP 双出口（bw 平台期 / 高丢包）、Drain→ProbeBW、DOWN→REFIL
 UP 高丢包回落与 inflight_longterm 边界、ProbeRTT 进出与 0.5 cwnd 钳制、
 pacing 速率跟随、采样器扩展、InflightAtLoss 钳制。
 
+`bbrv3_probertt_schedule_test.go`：**ProbeRTT 调度在代理真实流量形态下的验证**——
+① 空闲 30s 后恢复：探针在**恢复后第 1 轮**即进入（否则 BDP 估计偏高、恢复瞬间排
+队）；② 持续上传（永不排空）：探针在 4 轮饱和轮转内完成并还原 cwnd gain 与窗口，
+不会卡在半速；③ 周期性：200 轮内出现 2 个探针窗口、最小间隔 5.36s≈ProbeRTTInterval
+（既不饿死也不抖动）；④ 高 BDP 链路（0.5×BDP 很大）：探针仍能排空完成。
+
 已知未覆盖（后续 netem 实测矩阵）：与 cubic/brutal 共存、多流聚合、
 深浅缓冲不同丢包率下的实际吞吐对比。

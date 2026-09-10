@@ -2,6 +2,7 @@ package brutal
 
 import (
 	"fmt"
+	"math/rand"
 	"os"
 	"strconv"
 	"time"
@@ -19,6 +20,19 @@ const (
 
 	debugEnv           = "HYSTERIA_BRUTAL_DEBUG"
 	debugPrintInterval = 2
+
+	// Rate randomisation. brutal paces at a fixed rate, which is what makes it
+	// useful (it keeps a known link just below saturation) and also what makes
+	// the resulting traffic pattern machine-like and therefore fingerprintable.
+	// The pacer rate is therefore re-drawn once per window from a symmetric
+	// distribution, so the long-run average still equals the configured rate
+	// while the short-term rate is not constant.
+	jitterPctEnv    = "HYSTERIA_BRUTAL_JITTER"     // percent, 0 disables
+	jitterWindowEnv = "HYSTERIA_BRUTAL_JITTER_WIN" // duration, default 1s
+	maxRateEnv      = "HYSTERIA_BRUTAL_MAX_RATE"   // bytes/s, 0 = derived cap
+
+	defaultJitterPct    = 10
+	defaultJitterWindow = time.Second
 )
 
 var _ congestion.CongestionControl = &BrutalSender{}
@@ -32,6 +46,15 @@ type BrutalSender struct {
 	pktInfoSlots [pktInfoSlotCount]pktInfo
 	ackRate      float64
 
+	// rate randomisation and the hard ceiling on what brutal will send
+	now          func() time.Time
+	jitterPct    float64              // fraction of the target rate, 0 disables
+	jitterWindow time.Duration        // how often the factor is re-drawn
+	rateLimit    congestion.ByteCount // absolute ceiling; 0 = derived from bps
+	rng          *rand.Rand
+	jitterFactor float64
+	jitterUntil  time.Time
+
 	debug                 bool
 	lastAckPrintTimestamp int64
 }
@@ -44,16 +67,104 @@ type pktInfo struct {
 
 func NewBrutalSender(bps uint64) *BrutalSender {
 	debug, _ := strconv.ParseBool(os.Getenv(debugEnv))
+	bs := newBrutalSender(bps, debug, envJitterPct(), envJitterWindow(), envRateLimit())
+	return bs
+}
+
+// newBrutalSender builds a sender with explicit mitigation parameters, so the
+// behaviour does not depend on the environment in tests.
+func newBrutalSender(bps uint64, debug bool, jitterPct float64, jitterWindow time.Duration, rateLimit congestion.ByteCount) *BrutalSender {
 	bs := &BrutalSender{
 		bps:             congestion.ByteCount(bps),
 		maxDatagramSize: congestion.InitialPacketSizeIPv4,
 		ackRate:         1,
+		now:             time.Now,
+		jitterPct:       jitterPct,
+		jitterWindow:    jitterWindow,
+		rateLimit:       rateLimit,
+		rng:             rand.New(rand.NewSource(time.Now().UnixNano())),
+		jitterFactor:    1,
 		debug:           debug,
 	}
 	bs.pacer = common.NewPacer(func() congestion.ByteCount {
-		return congestion.ByteCount(float64(bs.bps) / bs.ackRate)
+		return bs.targetRate()
 	})
 	return bs
+}
+
+func envJitterPct() float64 {
+	v := os.Getenv(jitterPctEnv)
+	if v == "" {
+		return defaultJitterPct / 100
+	}
+	pct, err := strconv.ParseFloat(v, 64)
+	if err != nil || pct < 0 {
+		return defaultJitterPct / 100
+	}
+	if pct > 90 {
+		pct = 90
+	}
+	return pct / 100
+}
+
+func envJitterWindow() time.Duration {
+	v := os.Getenv(jitterWindowEnv)
+	if v == "" {
+		return defaultJitterWindow
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return defaultJitterWindow
+	}
+	return d
+}
+
+func envRateLimit() congestion.ByteCount {
+	v := os.Getenv(maxRateEnv)
+	if v == "" {
+		return 0
+	}
+	limit, err := strconv.ParseUint(v, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return congestion.ByteCount(limit)
+}
+
+// SetRateLimit sets a hard ceiling (bytes/s) on the rate brutal paces at,
+// independently of loss compensation and rate randomisation. A limit of 0
+// restores the derived cap.
+func (b *BrutalSender) SetRateLimit(limit congestion.ByteCount) {
+	b.rateLimit = limit
+}
+
+// rateCeiling is the maximum rate brutal is allowed to pace at: the configured
+// limit when one was set, otherwise the worst case the loss compensation could
+// already reach before (bps / minAckRate). Rate randomisation must never exceed
+// this, so enabling it cannot raise the peak rate of a connection.
+func (b *BrutalSender) rateCeiling() congestion.ByteCount {
+	if b.rateLimit > 0 {
+		return b.rateLimit
+	}
+	return congestion.ByteCount(float64(b.bps) / minAckRate)
+}
+
+// targetRate returns the rate to pace at right now: the configured bandwidth,
+// compensated for loss, randomised by ±jitterPct and clamped to the ceiling.
+func (b *BrutalSender) targetRate() congestion.ByteCount {
+	if b.jitterPct > 0 {
+		now := b.now()
+		if now.After(b.jitterUntil) {
+			b.jitterUntil = now.Add(b.jitterWindow)
+			// symmetric around 1, so the average rate is unchanged
+			b.jitterFactor = 1 + b.jitterPct*(2*b.rng.Float64()-1)
+		}
+	}
+	rate := congestion.ByteCount(float64(b.bps) / b.ackRate * b.jitterFactor)
+	if ceiling := b.rateCeiling(); rate > ceiling {
+		rate = ceiling
+	}
+	return rate
 }
 
 func (b *BrutalSender) SetRTTStatsProvider(rttStats congestion.RTTStatsProvider) {
