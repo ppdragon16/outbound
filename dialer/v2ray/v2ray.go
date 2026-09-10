@@ -43,6 +43,7 @@ type V2Ray struct {
 	Path           string         `json:"path"`
 	TLS            string         `json:"tls"`
 	Flow           string         `json:"flow,omitempty"`
+	Encryption     string         `json:"encryption,omitempty"`
 	Alpn           string         `json:"alpn,omitempty"`
 	AllowInsecure  FlexibleBool   `json:"allowInsecure"`
 	Fingerprint    string         `json:"fp,omitempty"`
@@ -248,6 +249,7 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 		Cipher:       getAutoCipher(),
 		Password:     s.ID,
 		Feature1:     s.Flow,
+		Feature2:     s.Encryption,
 		Flags: func() protocol.Flags {
 			if s.Mux && !s.Smux {
 				return protocol.Flags_VLess_TcpMux
@@ -319,6 +321,7 @@ func ParseVlessURL(vless string) (data *V2Ray, err error) {
 		Path:          u.Query().Get("path"),
 		TLS:           u.Query().Get("security"),
 		Flow:          u.Query().Get("flow"),
+		Encryption:    u.Query().Get("encryption"),
 		Alpn:          u.Query().Get("alpn"),
 		AllowInsecure: FlexibleBool(parseAllowInsecure(u.Query())),
 		Fingerprint:   u.Query().Get("fp"),
@@ -485,6 +488,7 @@ func (s *V2Ray) ExportToURL() string {
 		}
 
 		//TODO: QUIC
+		common.SetValue(&query, "encryption", s.Encryption)
 		if s.TLS != "none" {
 			common.SetValue(&query, "sni", s.SNI)
 			common.SetValue(&query, "alpn", s.Alpn)

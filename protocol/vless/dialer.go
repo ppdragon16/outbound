@@ -7,6 +7,7 @@ import (
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
+	"github.com/daeuniverse/outbound/protocol/vless/encryption"
 	"github.com/daeuniverse/outbound/protocol/vless/vision"
 	"github.com/daeuniverse/outbound/protocol/vmess"
 )
@@ -27,6 +28,7 @@ type Dialer struct {
 	xudp         bool
 	tcpMux       bool
 	key          []byte
+	encClient    *encryption.ClientInstance
 }
 
 func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
@@ -51,6 +53,23 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		return nil, fmt.Errorf("unsupported xtls flow type: %v", flowStr)
 	}
 
+	var encClient *encryption.ClientInstance
+	if header.Feature2 != nil {
+		encStr, ok := header.Feature2.(string)
+		if !ok {
+			return nil, fmt.Errorf("Feature2 (encryption) must be a string, got %T", header.Feature2)
+		}
+		if encStr != "" && encStr != "none" {
+			if flowStr != "" {
+				return nil, fmt.Errorf("vless encryption is incompatible with flow %v", flowStr)
+			}
+			encClient, err = encryption.NewClient(encStr)
+			if err != nil {
+				return nil, fmt.Errorf("parse vless encryption: %w", err)
+			}
+		}
+	}
+
 	return &Dialer{
 		StatelessDialer: protocol.StatelessDialer{
 			ParentDialer: nextDialer,
@@ -61,7 +80,17 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 		xudp:         flowStr == XRV,
 		tcpMux:       header.Flags&protocol.Flags_VLess_TcpMux != 0,
 		key:          id,
+		encClient:    encClient,
 	}, nil
+}
+
+// handshakeEncryption applies the post-quantum encryption handshake to the
+// freshly dialed proxy connection, before any VLESS protocol bytes are sent.
+func (d *Dialer) handshakeEncryption(conn net.Conn) (net.Conn, error) {
+	if d.encClient == nil {
+		return conn, nil
+	}
+	return d.encClient.Handshake(conn)
 }
 
 func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (net.Conn, error) {
@@ -76,6 +105,11 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 		conn, err := d.ParentDialer.DialContext(ctx, "tcp", d.proxyAddress)
 		if err != nil {
 			return nil, fmt.Errorf("dial proxy: %w", err)
+		}
+
+		if conn, err = d.handshakeEncryption(conn); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("vless encryption handshake: %w", err)
 		}
 
 		conn, err = NewConn(conn, Metadata{
@@ -130,6 +164,11 @@ func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 	conn, err := d.ParentDialer.DialContext(ctx, "tcp", d.proxyAddress)
 	if err != nil {
 		return nil, fmt.Errorf("dial proxy: %w", err)
+	}
+
+	if conn, err = d.handshakeEncryption(conn); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("vless encryption handshake: %w", err)
 	}
 
 	vConn, err := NewConn(conn, Metadata{
