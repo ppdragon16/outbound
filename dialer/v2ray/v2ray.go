@@ -20,6 +20,7 @@ import (
 	"github.com/daeuniverse/outbound/transport/httpupgrade"
 	"github.com/daeuniverse/outbound/transport/meek"
 	"github.com/daeuniverse/outbound/transport/mux"
+	"github.com/daeuniverse/outbound/transport/shadowtls"
 	"github.com/daeuniverse/outbound/transport/smux"
 	"github.com/daeuniverse/outbound/transport/tls"
 	"github.com/daeuniverse/outbound/transport/ws"
@@ -44,6 +45,9 @@ type V2Ray struct {
 	TLS            string         `json:"tls"`
 	Flow           string         `json:"flow,omitempty"`
 	Encryption     string         `json:"encryption,omitempty"`
+	Stls           string         `json:"stls,omitempty"`
+	StlsPass       string         `json:"stlspass,omitempty"`
+	StlsSni        string         `json:"stlsni,omitempty"`
 	Alpn           string         `json:"alpn,omitempty"`
 	AllowInsecure  FlexibleBool   `json:"allowInsecure"`
 	Fingerprint    string         `json:"fp,omitempty"`
@@ -102,6 +106,33 @@ func (s *V2Ray) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer) (
 	if s.TLS == "reality" {
 		if s.Protocol != "vless" {
 			return nil, fmt.Errorf("only VLESS supports reality")
+		}
+	}
+
+	// ShadowTLS v3 is a middle layer: it wraps the raw tcp dialer so the
+	// whole transport stack (tls/ws/grpc/...) and the protocol ride inside
+	// its authenticated stream.
+	if s.Stls != "" {
+		if strings.ToLower(s.Net) != "tcp" {
+			return nil, fmt.Errorf("shadow-tls only supports tcp transport, got %v", s.Net)
+		}
+		version, err := strconv.Atoi(s.Stls)
+		if err != nil {
+			return nil, fmt.Errorf("parse shadow-tls version: %w", err)
+		}
+		sni := s.StlsSni
+		if sni == "" {
+			sni = s.SNI
+		}
+		nextDialer, err = shadowtls.NewDialer(nextDialer, net.JoinHostPort(s.Add, string(s.Port)), shadowtls.Config{
+			Password:      s.StlsPass,
+			Version:       version,
+			Sni:           sni,
+			Fingerprint:   s.Fingerprint,
+			AllowInsecure: bool(s.AllowInsecure) || option.AllowInsecure,
+		})
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -322,6 +353,9 @@ func ParseVlessURL(vless string) (data *V2Ray, err error) {
 		TLS:           u.Query().Get("security"),
 		Flow:          u.Query().Get("flow"),
 		Encryption:    u.Query().Get("encryption"),
+		Stls:          u.Query().Get("stls"),
+		StlsPass:      u.Query().Get("stlspass"),
+		StlsSni:       u.Query().Get("stlsni"),
 		Alpn:          u.Query().Get("alpn"),
 		AllowInsecure: FlexibleBool(parseAllowInsecure(u.Query())),
 		Fingerprint:   u.Query().Get("fp"),
@@ -489,6 +523,15 @@ func (s *V2Ray) ExportToURL() string {
 
 		//TODO: QUIC
 		common.SetValue(&query, "encryption", s.Encryption)
+		if s.Stls != "" {
+			common.SetValue(&query, "stls", s.Stls)
+			if s.StlsPass != "" {
+				common.SetValue(&query, "stlspass", s.StlsPass)
+			}
+			if s.StlsSni != "" && s.StlsSni != s.SNI {
+				common.SetValue(&query, "stlsni", s.StlsSni)
+			}
+		}
 		if s.TLS != "none" {
 			common.SetValue(&query, "sni", s.SNI)
 			common.SetValue(&query, "alpn", s.Alpn)

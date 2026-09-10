@@ -61,3 +61,10 @@ func nameToUtlsClientHelloID(name string) (*utls.ClientHelloID, error) {
 	}
 	return clientHelloID, nil
 }
+
+// NameToUtlsClientHelloID resolves a fingerprint name to a utls.ClientHelloID.
+// Exported for transport combinators that build their own utls conns
+// (e.g. shadowtls).
+func NameToUtlsClientHelloID(name string) (*utls.ClientHelloID, error) {
+	return nameToUtlsClientHelloID(name)
+}
