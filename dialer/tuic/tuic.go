@@ -29,6 +29,8 @@ type Tuic struct {
 	AllowInsecure     bool
 	DisableSni        bool
 	CongestionControl string
+	// QuicV2 offers QUIC v2 (RFC 9369) in the first packet.
+	QuicV2 bool
 	// Cwnd is the congestion_control parameter: for "brutal" it carries the
 	// target bandwidth in bytes per second (community convention, matching
 	// sing-box and the tuic brutal forks).
@@ -58,6 +60,9 @@ func (s *Tuic) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) 
 	if s.UdpRelayMode == "quic" {
 		flags |= protocol.Flags_Tuic_UdpRelayModeQuic
 	}
+	if s.QuicV2 {
+		flags |= protocol.Flags_Quic_PreferV2
+	}
 	if d, err = protocol.NewDialer("tuic", d, protocol.Header{
 		ProxyAddress: net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
 		Feature1:     s.CongestionControl,
@@ -75,6 +80,16 @@ func (s *Tuic) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) 
 		return nil, err
 	}
 	return d, nil
+}
+
+// QuicV2Requested reports whether a link asks for QUIC v2 (RFC 9369) in the
+// first packet via ?quic_version=2 (or the quicv2=1 alias).
+func QuicV2Requested(q url.Values) bool {
+	v := q.Get("quic_version")
+	if v == "" {
+		v = q.Get("quic-version")
+	}
+	return v == "2" || v == "v2" || q.Get("quicv2") == "1"
 }
 
 func ParseTuicURL(u string) (data *Tuic, err error) {
@@ -131,6 +146,7 @@ func ParseTuicURL(u string) (data *Tuic, err error) {
 		AllowInsecure:     allowInsecure,
 		DisableSni:        disableSni,
 		CongestionControl: t.Query().Get("congestion_control"),
+		QuicV2:            QuicV2Requested(t.Query()),
 		Cwnd:              cwndFromQuery(t),
 		Alpn:              alpn,
 		UdpRelayMode:      strings.ToLower(t.Query().Get("udp_relay_mode")),
@@ -176,6 +192,9 @@ func (t *Tuic) ExportToURL() string {
 	}
 	if t.UdpRelayMode != "" {
 		common.SetValue(&q, "udp_relay_mode", t.UdpRelayMode)
+	}
+	if t.QuicV2 {
+		common.SetValue(&q, "quic_version", "2")
 	}
 
 	u.RawQuery = q.Encode()

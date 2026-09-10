@@ -96,6 +96,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 					EnableDatagrams:                false,
 					HandshakeIdleTimeout:           8 * time.Second,
 					CapabilityCallback:             capabilityCallback,
+					Versions:                       protocol.QuicVersions(header.Flags),
 					// Use the configured congestion controller from the start
 					// to avoid allocating a CUBIC sender that would be
 					// immediately replaced via SetCongestionControl.

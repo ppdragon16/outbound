@@ -295,6 +295,72 @@ func startUDPRelay(t *testing.T, dstAddr string) string {
 	return ln.LocalAddr().String()
 }
 
+// startUDPBlackhole returns a UDP address and a channel delivering the first
+// datagram a client sends to it, so the QUIC version of the initial packet can
+// be asserted without completing a handshake.
+func startUDPBlackhole(t *testing.T) (string, <-chan []byte) {
+	t.Helper()
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	pktCh := make(chan []byte, 4)
+	go func() {
+		for {
+			buf := make([]byte, 4096)
+			n, _, err := pc.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			pkt := make([]byte, n)
+			copy(pkt, buf[:n])
+			select {
+			case pktCh <- pkt:
+			default:
+			}
+		}
+	}()
+	return pc.LocalAddr().String(), pktCh
+}
+
+// TestQuicVersionPreference pins the outbound negotiation behaviour: by
+// default the first packet is QUIC v1, and WithQuicV2 flips it to RFC 9369 v2
+// (0x6b3343cf) while keeping v1 for fallback.
+func TestQuicVersionPreference(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		preferV2   bool
+		wantPrefix uint32
+	}{
+		{"default offers v1", false, 0x1},
+		{"preferV2 offers v2", true, 0x6b3343cf},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			addr, pktCh := startUDPBlackhole(t)
+			client := newTestClient(t, addr, WithQuicV2(tc.preferV2))
+			ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+			defer cancel()
+			// The blackhole never answers, so the dial fails; the first flight
+			// it emits is what matters here.
+			_, _ = client.DialContext(ctx, "tcp", "unreachable.example.com:443")
+
+			select {
+			case pkt := <-pktCh:
+				if len(pkt) < 5 {
+					t.Fatal("short packet")
+				}
+				got := uint32(pkt[1])<<24 | uint32(pkt[2])<<16 | uint32(pkt[3])<<8 | uint32(pkt[4])
+				if got != tc.wantPrefix {
+					t.Fatalf("first packet version = %#x, want %#x", got, tc.wantPrefix)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("no packet captured")
+			}
+		})
+	}
+}
+
 func TestUDPPathEncoding(t *testing.T) {
 	cases := []struct {
 		host string

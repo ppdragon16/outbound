@@ -32,7 +32,9 @@ type Juicity struct {
 	AllowInsecure         bool
 	CongestionControl     string
 	PinnedCertchainSha256 string
-	Protocol              string
+	// QuicV2 offers QUIC v2 (RFC 9369) in the first packet.
+	QuicV2   bool
+	Protocol string
 }
 
 func NewJuicity(link string) (dialer.Dialer, *dialer.Property, error) {
@@ -76,16 +78,31 @@ func (s *Juicity) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Diale
 			return nil
 		}
 	}
+	var flags protocol.Flags
+	if s.QuicV2 {
+		flags |= protocol.Flags_Quic_PreferV2
+	}
 	if d, err = protocol.NewDialer("juicity", d, protocol.Header{
 		ProxyAddress: net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
 		Feature1:     s.CongestionControl,
 		TlsConfig:    tlsConfig,
 		User:         s.User,
 		Password:     s.Password,
+		Flags:        flags,
 	}); err != nil {
 		return nil, err
 	}
 	return d, nil
+}
+
+// QuicV2Requested reports whether a link asks for QUIC v2 (RFC 9369) in the
+// first packet via ?quic_version=2 (or the quicv2=1 alias).
+func QuicV2Requested(q url.Values) bool {
+	v := q.Get("quic_version")
+	if v == "" {
+		v = q.Get("quic-version")
+	}
+	return v == "2" || v == "v2" || q.Get("quicv2") == "1"
 }
 
 func ParseJuicityURL(u string) (data *Juicity, err error) {
@@ -125,6 +142,7 @@ func ParseJuicityURL(u string) (data *Juicity, err error) {
 		Sni:                   sni,
 		AllowInsecure:         allowInsecure,
 		CongestionControl:     t.Query().Get("congestion_control"),
+		QuicV2:                QuicV2Requested(t.Query()),
 		PinnedCertchainSha256: t.Query().Get("pinned_certchain_sha256"),
 		Protocol:              "juicity",
 	}
@@ -145,6 +163,9 @@ func (t *Juicity) ExportToURL() string {
 	common.SetValue(&q, "sni", t.Sni)
 	common.SetValue(&q, "congestion_control", t.CongestionControl)
 	common.SetValue(&q, "pinned_certchain_sha256", t.PinnedCertchainSha256)
+	if t.QuicV2 {
+		common.SetValue(&q, "quic_version", "2")
+	}
 	u.RawQuery = q.Encode()
 	return u.String()
 }

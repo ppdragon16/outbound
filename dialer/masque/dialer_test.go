@@ -44,11 +44,35 @@ func TestParseMasqueURL(t *testing.T) {
 	}
 }
 
+func TestParseMasqueURLQuicV2(t *testing.T) {
+	const want = true
+	for _, link := range []string{
+		"masque://proxy.example.com:443?quic_version=2",
+		"masque://proxy.example.com:443?quic-version=v2",
+		"masque://proxy.example.com:443?quicv2=1",
+	} {
+		d, _, err := NewMasque(link)
+		if err != nil {
+			t.Fatalf("%s: %v", link, err)
+		}
+		if got := d.(*Masque).QuicV2; got != want {
+			t.Errorf("%s: QuicV2 = %v, want %v", link, got, want)
+		}
+	}
+	d, _, err := NewMasque("masque://proxy.example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.(*Masque).QuicV2 {
+		t.Error("QuicV2 must default to false")
+	}
+}
+
 // TestDialerEndToEnd exercises the netproxy.Dialer surface against a real
 // HTTP/3 CONNECT proxy.
 func TestDialerEndToEnd(t *testing.T) {
 	addr := startEchoProxy(t)
-	d, err := NewDialer(nil, addr, "masque.test", true)
+	d, err := NewDialer(nil, addr, "masque.test", true, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +111,7 @@ func TestDialerEndToEnd(t *testing.T) {
 }
 
 func TestDialerRequiresAddress(t *testing.T) {
-	if _, err := NewDialer(nil, "", "", false); err == nil {
+	if _, err := NewDialer(nil, "", "", false, false); err == nil {
 		t.Fatal("empty address must be rejected")
 	}
 }

@@ -20,6 +20,8 @@ type Masque struct {
 	Host     string
 	Sni      string
 	Insecure bool
+	// QuicV2 offers QUIC v2 (RFC 9369) in the first packet.
+	QuicV2 bool
 }
 
 // NewMasque builds a Masque from a link.
@@ -61,7 +63,17 @@ func parseMasqueURL(link string) (*Masque, error) {
 		Host:     u.Host,
 		Sni:      sni,
 		Insecure: u.Query().Get("insecure") == "1",
+		QuicV2:   quicV2Requested(u.Query()),
 	}, nil
+}
+
+// quicV2Requested reports whether the link asks for QUIC v2 first.
+func quicV2Requested(q url.Values) bool {
+	v := q.Get("quic_version")
+	if v == "" {
+		v = q.Get("quic-version")
+	}
+	return v == "2" || v == "v2" || q.Get("quicv2") == "1"
 }
 
 // Dialer builds the runtime dialer, optionally layered on parent.
@@ -70,5 +82,5 @@ func (s *Masque) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer
 	if option != nil && option.AllowInsecure {
 		insecure = true
 	}
-	return NewDialer(parentDialer, s.Host, s.Sni, insecure)
+	return NewDialer(parentDialer, s.Host, s.Sni, insecure, s.QuicV2)
 }

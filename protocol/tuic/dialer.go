@@ -108,6 +108,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 					EnableDatagrams:                true,
 					HandshakeIdleTimeout:           8 * time.Second,
 					CapabilityCallback:             capabilityCallback,
+					Versions:                       protocol.QuicVersions(header.Flags),
 				},
 				Uuid:                  id,
 				Password:              header.Password,

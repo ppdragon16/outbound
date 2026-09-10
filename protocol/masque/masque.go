@@ -21,6 +21,8 @@ import (
 	"github.com/daeuniverse/quic-go"
 	"github.com/daeuniverse/quic-go/http3"
 	utls "github.com/refraction-networking/utls"
+
+	"github.com/daeuniverse/outbound/protocol"
 )
 
 const (
@@ -48,6 +50,10 @@ type Client struct {
 	// a local UDP socket is created.
 	dialUDP func(ctx context.Context, addr string) (net.PacketConn, error)
 
+	// preferV2 offers QUIC v2 (RFC 9369) in the first packet, keeping v1 for
+	// version-negotiation fallback.
+	preferV2 bool
+
 	mu     sync.Mutex
 	conn   *http3.ClientConn
 	closed bool
@@ -60,6 +66,11 @@ type Option func(*Client)
 // WithAuthority overrides the :authority pseudo header value.
 func WithAuthority(authority string) Option {
 	return func(c *Client) { c.authority = authority }
+}
+
+// WithQuicV2 offers QUIC v2 first (RFC 9369), with v1 kept for fallback.
+func WithQuicV2(prefer bool) Option {
+	return func(c *Client) { c.preferV2 = prefer }
 }
 
 // WithPacketConnDialer routes the QUIC layer through the given packet conn
@@ -94,6 +105,9 @@ func NewClient(addr string, sni string, allowInsecure bool, opts ...Option) (*Cl
 	c.alive.Store(true)
 	for _, opt := range opts {
 		opt(c)
+	}
+	if c.preferV2 {
+		c.quicConf.Versions = protocol.QuicVersions(protocol.Flags_Quic_PreferV2)
 	}
 	return c, nil
 }
