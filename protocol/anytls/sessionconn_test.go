@@ -893,8 +893,11 @@ func TestProbeMustNotClearReadDeadline(t *testing.T) {
 
 // TestProbeMustNotClearWriteDeadline is the write-side twin of the probe
 // regression: a relay write is in flight under tcp.go's write timeout when
-// the heartbeat fires. Probe must not wipe the pending write deadline, or
-// the relay write blocks forever — the same leak, mirrored to l2r.
+// the heartbeat fires. Probe may override the pending write deadline with
+// its own, but it must never CLEAR one — a cleared deadline turns the
+// queued writer's bounded timeout into an infinite block. After the probe
+// fires, the in-flight write must therefore still terminate with a timeout
+// (bounded by the probe's own 5s deadline), never hang.
 func TestProbeMustNotClearWriteDeadline(t *testing.T) {
 	ts := newTestServer(t)
 	d := newSessionAsConnDialer(t, ts.ln.Addr().String())
@@ -909,7 +912,7 @@ func TestProbeMustNotClearWriteDeadline(t *testing.T) {
 	serverNextEvent(t, tc)
 
 	// A relay write in flight: keep writing far past the socket buffers
-	// (the server never reads) under a 100ms write deadline, mirroring
+	// (the server never reads) under a short write deadline, mirroring
 	// dae's set-deadline-then-Write pattern.
 	if err := conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
 		t.Fatal(err)
@@ -950,10 +953,10 @@ func TestProbeMustNotClearWriteDeadline(t *testing.T) {
 	case res := <-ch:
 		var netErr net.Error
 		if !errors.As(res.err, &netErr) || !netErr.Timeout() {
-			t.Fatalf("expected write timeout after Probe, got %v", res.err)
+			t.Fatalf("expected bounded write timeout after Probe, got %v", res.err)
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("Write still blocked after its deadline: Probe cleared the write deadline")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Write still blocked 10s after Probe: Probe cleared the write deadline (unbounded hang)")
 	}
 
 	// Server gone, the conn is unusable either way — close cleanly.

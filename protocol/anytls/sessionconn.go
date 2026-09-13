@@ -344,12 +344,21 @@ func (c *sessionConn) Close() error {
 // (CloseWrite) and the pool-return (Close) paths use it; the server drops a
 // FIN for an already-forgotten sid, but one frame is cleaner on the wire.
 func (c *sessionConn) sendFin() error {
-	if !c.finSent.CompareAndSwap(false, true) {
+	// Idempotent, but only on SUCCESS: the flag is set after the write
+	// commits, so a failed FIN (dead conn) can be retried by a later
+	// Close without being swallowed by the dedup gate. The write carries
+	// its own short deadline — inheriting a stale expired one from an
+	// idle relay previously made the FIN fail silently and left r2l
+	// parked for a full idle-timeout cycle.
+	if c.finSent.Load() {
 		return nil
 	}
 	frame := newFrame(cmdFIN, c.id)
-	_, err := writeFrame(c.session, frame)
-	return err
+	if _, err := writeFrameWithDeadline(c.session, frame, time.Now().Add(5*time.Second)); err != nil {
+		return err
+	}
+	c.finSent.Store(true)
+	return nil
 }
 
 // CloseWrite implements netproxy.CloseWriter: dae's relay calls it when the

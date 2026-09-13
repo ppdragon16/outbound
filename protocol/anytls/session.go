@@ -271,18 +271,17 @@ func (s *session) run() error {
 // Probe sends a lightweight heartbeat frame to verify the underlying connection
 // is still alive. It returns nil if the write succeeds.
 func (s *session) Probe() error {
-	// Probe must never touch the conn deadlines. It fires every heartbeat
-	// tick, often while a checked-out session's relay is mid-transport:
-	// clearing the READ deadline disarmed the relay reader's idle timeout
-	// (the production goroutine leak), and clearing the WRITE deadline would
-	// disarm an in-flight relay write bounded by tcp.go's
-	// DefaultTCPWriteTimeout the same way. Stale deadlines at checkout are
-	// handled where they belong — newDirectConn resets them before any
-	// reader/writer exists, and a stale WRITE deadline that fails this very
-	// probe is cleared by the caller's timeout path (or the heartbeat's),
-	// which self-heals on the next tick.
+	// The probe write carries its OWN deadline and overrides whatever write
+	// deadline is on the conn. It must never CLEAR one: the heartbeat fires
+	// every tick, often while a checked-out session's relay is mid-transport
+	// — clearing the READ deadline disarmed the relay reader's idle timeout
+	// (the production goroutine leak), and clearing the WRITE deadline
+	// turned a queued writer's bounded timeout into an infinite block.
+	// Overriding with a fresh future deadline keeps every in-flight write
+	// bounded; the deadline lingers afterwards until the next write's own
+	// deadline overrides it (writeConnWithDeadline no longer defer-clears).
 	frame := newFrame(cmdHeartRequest, 0)
-	_, err := writeFrame(s, frame)
+	_, err := writeFrameWithDeadline(s, frame, time.Now().Add(5*time.Second))
 	return err
 }
 
@@ -300,11 +299,10 @@ func (s *session) startHeartbeat() {
 			if s.Closed() {
 				return
 			}
+			// No timeout special-case: Probe carries its own deadline, so
+			// a timeout is a genuinely stalled connection (or one whose
+			// conn died under us) — not a stale-deadline artifact to wipe.
 			if err := s.Probe(); err != nil {
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					_ = s.conn.SetWriteDeadline(time.Time{})
-					continue
-				}
 				s.Close()
 				return
 			}
@@ -368,7 +366,15 @@ func (s *session) writeConnWithDeadline(b []byte, deadline time.Time) (n int, er
 		if err := s.conn.SetWriteDeadline(deadline); err != nil {
 			return 0, err
 		}
-		defer func() { _ = s.conn.SetWriteDeadline(time.Time{}) }()
+		// Deliberately no defer-clear here. The deadline belongs to this
+		// write and lingers until the next explicitly-deadlined write
+		// overrides it. Clearing it on the way out would disarm an
+		// in-flight writer that armed its own deadline and is queued
+		// behind connLock (the write-side twin of the original probe
+		// leak). Every writer either carries its own deadline (Probe,
+		// sendFin, writeConnWithDeadline callers) or follows dae's
+		// set-conn-deadline-then-Write pattern (sessionConn.Write), so a
+		// lingering future deadline is always overridden before reuse.
 	}
 	return s.writeConnLocked(b)
 }

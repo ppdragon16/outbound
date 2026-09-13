@@ -234,13 +234,10 @@ func (d *Dialer) getSession(ctx context.Context) (*session, error) {
 			break
 		}
 		// Health probe: a successful write confirms the connection is alive.
+		// Probe carries its own deadline (overriding any lingering one), so
+		// a failure — timeout or not — means the conn genuinely cannot take
+		// writes. Drop it and try the next candidate.
 		if err := s.Probe(); err != nil {
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// Transient write timeout from leftover stream deadline.
-				// Clear it and reuse anyway.
-				_ = s.conn.SetDeadline(time.Time{})
-				return s, nil
-			}
 			s.Close()
 			continue
 		}
