@@ -14,6 +14,14 @@ type Feature1 struct {
 	IdleSessionCheckInterval time.Duration
 	IdleSessionTimeout       time.Duration
 	MinIdleSession           int
+	// SessionAsConn switches TCP dialing to the session-as-conn fast path:
+	// the checked-out session is handed to the caller as a net.Conn and its
+	// TCP stream is consumed inline by sessionConn.Read (no run() dispatch
+	// loop, no stream objects, no ring buffer). UDP keeps the classic
+	// stream path on a dedicated session. Zero value false keeps the stream
+	// path for programmatic callers; the anytls URL parser defaults to true
+	// and only `mode=stream` clears it.
+	SessionAsConn bool
 }
 
 const ( // cmds

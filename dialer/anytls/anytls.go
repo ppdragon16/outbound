@@ -29,6 +29,10 @@ type Anytls struct {
 	IdleSessionCheckInterval time.Duration
 	IdleSessionTimeout       time.Duration
 	MinIdleSession           int
+	// SessionAsConn enables the session-as-conn fast path. Default true:
+	// only an explicit `mode=stream` query parameter opts back into the
+	// classic stream path.
+	SessionAsConn bool
 }
 
 func NewAnytls(link string) (dialer.Dialer, *dialer.Property, error) {
@@ -80,6 +84,10 @@ func parseAnytlsURL(link string) (*Anytls, error) {
 		minIdleSession, _ = strconv.Atoi(s)
 	}
 
+	// The session-as-conn fast path is the default; an explicit
+	// `mode=stream` opts back into the classic stream path.
+	sessionAsConn := u.Query().Get("mode") != "stream"
+
 	antls := &Anytls{
 		link:                     link,
 		Name:                     name,
@@ -90,6 +98,7 @@ func parseAnytlsURL(link string) (*Anytls, error) {
 		IdleSessionCheckInterval: idleCheckInterval,
 		IdleSessionTimeout:       idleTimeout,
 		MinIdleSession:           minIdleSession,
+		SessionAsConn:            sessionAsConn,
 	}
 
 	return antls, nil
@@ -106,6 +115,7 @@ func (s *Anytls) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer
 				IdleSessionCheckInterval: s.IdleSessionCheckInterval,
 				IdleSessionTimeout:       s.IdleSessionTimeout,
 				MinIdleSession:           s.MinIdleSession,
+				SessionAsConn:            s.SessionAsConn,
 			},
 			TlsConfig: &utls.Config{
 				ServerName:         s.Sni,

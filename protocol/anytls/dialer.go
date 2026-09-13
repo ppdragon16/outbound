@@ -37,7 +37,19 @@ type Dialer struct {
 	idleSessionCheckInterval time.Duration
 	idleSessionTimeout       time.Duration
 	minIdleSession           int
-	heartbeatInterval        time.Duration
+
+	// sessionAsConn switches TCP dialing to the session-as-conn fast path
+	// (session.newDirectConn): the checked-out session is handed to the
+	// caller as a net.Conn and its TCP stream is read inline, without the
+	// run() dispatch loop or stream objects. Sessions for this mode are
+	// never started with run(), so the two paths cannot share a session.
+	// UDP still runs on the classic stream path via a dedicated session
+	// that is created lazily and shared by all packet conns of this dialer.
+	sessionAsConn bool
+
+	udpMu             sync.Mutex
+	udpSession        *session // stream-path session dedicated to UDP (lazy)
+	heartbeatInterval time.Duration
 
 	// replenishing guards the background replenishment goroutine so only
 	// one runs at a time.
@@ -60,6 +72,7 @@ func NewDialer(ParentDialer netproxy.Dialer, header protocol.Header) (netproxy.D
 	checkInterval := defaultIdleSessionCheckInterval
 	idleTimeout := defaultIdleSessionTimeout
 	minIdle := defaultMinIdleSession
+	sessionAsConn := false
 	if f, ok := header.Feature1.(*Feature1); ok && f != nil {
 		if f.IdleSessionCheckInterval > 0 {
 			checkInterval = f.IdleSessionCheckInterval
@@ -70,6 +83,7 @@ func NewDialer(ParentDialer netproxy.Dialer, header protocol.Header) (netproxy.D
 		if f.MinIdleSession > 0 {
 			minIdle = f.MinIdleSession
 		}
+		sessionAsConn = f.SessionAsConn
 	}
 
 	// Heartbeat at a rate that ensures at least 2 probes within the idle
@@ -99,6 +113,7 @@ func NewDialer(ParentDialer netproxy.Dialer, header protocol.Header) (netproxy.D
 		idleSessionCheckInterval: checkInterval,
 		idleSessionTimeout:       idleTimeout,
 		minIdleSession:           minIdle,
+		sessionAsConn:            sessionAsConn,
 		heartbeatInterval:        heartbeatInterval,
 		ctx:                      ctx,
 		cancel:                   cancel,
@@ -116,6 +131,9 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 		if err != nil {
 			return nil, err
 		}
+		if d.sessionAsConn {
+			return s.newDirectConn(addr)
+		}
 		return s.newStream(addr)
 	case "udp":
 		conn, err := d.ListenPacket(ctx, addr)
@@ -132,6 +150,23 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 }
 
 func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn, error) {
+	// UDP always runs on the classic stream path: packet streams rely on
+	// the run() dispatch loop for fan-in. In session-as-conn mode the
+	// pool sessions have no run loop, so UDP gets a dedicated stream-path
+	// session, created lazily and shared by every packet conn (its streams
+	// multiplex). It is closed with the dialer; a dead one is replaced on
+	// the next call.
+	if d.sessionAsConn {
+		s, err := d.getStreamSession(ctx)
+		if err != nil {
+			return nil, err
+		}
+		_, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		return s.newPacketStream(net.JoinHostPort("sp.v2.udp-over-tcp.arpa", port), addr)
+	}
 	s, err := d.getSession(ctx)
 	if err != nil {
 		return nil, err
@@ -141,6 +176,24 @@ func (d *Dialer) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 		return nil, err
 	}
 	return s.newPacketStream(net.JoinHostPort("sp.v2.udp-over-tcp.arpa", port), addr)
+}
+
+// getStreamSession returns the dialer's dedicated UDP session, creating it
+// (with the run() dispatch loop) if none is alive. It never enters the idle
+// pool — manageSession for this session must not return it to the pool, so
+// its stream-close notifications are drained instead.
+func (d *Dialer) getStreamSession(ctx context.Context) (*session, error) {
+	d.udpMu.Lock()
+	defer d.udpMu.Unlock()
+	if d.udpSession != nil && !d.udpSession.Closed() {
+		return d.udpSession, nil
+	}
+	s, err := d.createSessionWithRun(ctx)
+	if err != nil {
+		return nil, err
+	}
+	d.udpSession = s
+	return s, nil
 }
 
 // pickIdleSession returns the idle session with the lowest dial latency from
@@ -204,7 +257,44 @@ func (d *Dialer) getSession(ctx context.Context) (*session, error) {
 
 // createSession dials a new TCP+TLS connection to the proxy, performs the
 // anytls key exchange, and starts the session's background goroutines.
+// In session-as-conn mode the dispatch loop (run) is not started: the
+// checked-out session's TCP stream is consumed inline by sessionConn.Read.
 func (d *Dialer) createSession(ctx context.Context) (*session, error) {
+	s, err := d.dialNewSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	d.startSession(s, !d.sessionAsConn)
+	return s, nil
+}
+
+// createSessionWithRun is createSession with the dispatch loop forced on,
+// for the dedicated UDP session in session-as-conn mode. That session never
+// returns to the idle pool: its stream-close notifications are drained, so
+// closing one packetStream does not hand a run()-backed session to the
+// session-as-conn pool.
+func (d *Dialer) createSessionWithRun(ctx context.Context) (*session, error) {
+	s, err := d.dialNewSession(ctx)
+	if err != nil {
+		return nil, err
+	}
+	go func() {
+		for range s.closeStreamChan {
+		}
+		// The chan close means the session is dead. manageSession would
+		// drop it from d.sessions here; do the same so a replaced UDP
+		// session does not linger in the map.
+		d.mu.Lock()
+		delete(d.sessions, s.seq)
+		d.mu.Unlock()
+	}()
+	go s.run()
+	s.startHeartbeat()
+	return s, nil
+}
+
+// dialNewSession performs the TCP+TLS dial and the anytls key exchange.
+func (d *Dialer) dialNewSession(ctx context.Context) (*session, error) {
 	start := time.Now()
 	conn, err := d.ParentDialer.DialContext(ctx, "tcp", d.proxyAddress)
 	if err != nil {
@@ -232,11 +322,17 @@ func (d *Dialer) createSession(ctx context.Context) (*session, error) {
 	d.sessions[seq] = s
 	d.mu.Unlock()
 
-	go d.manageSession(s, seq)
-	go s.run()
-	s.startHeartbeat()
-
 	return s, nil
+}
+
+// startSession launches the background goroutines. withRun=false leaves the
+// TCP stream unconsumed so a sessionConn can read it inline.
+func (d *Dialer) startSession(s *session, withRun bool) {
+	go d.manageSession(s, s.seq)
+	if withRun {
+		go s.run()
+	}
+	s.startHeartbeat()
 }
 
 // maybeReplenish triggers async session creation when the idle pool drops
