@@ -252,7 +252,11 @@ func (c *stream) Close() error {
 		c.session.removeStream(c.id)
 		if c.finSent.CompareAndSwap(false, true) {
 			frame := newFrame(cmdFIN, c.id)
-			_, _ = writeFrame(c.session, frame)
+			// Carry its own deadline: a naked write inherits the conn's
+			// lingering deadline, which is expired after five idle seconds
+			// — the FIN then fails silently and the server keeps a ghost
+			// stream (its relay parked on a never-closing upstream).
+			_, _ = writeFrameWithDeadline(c.session, frame, time.Now().Add(frameWriteTimeout))
 		}
 		c.closeRead()
 	}

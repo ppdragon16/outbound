@@ -80,6 +80,13 @@ func writeFrame(session *session, frame frame) (int, error) {
 	return writeFrameWithDeadline(session, frame, time.Time{})
 }
 
+// frameWriteTimeout bounds every protocol-frame write that does not run
+// under a caller-supplied deadline (heartbeat probes, FINs, heartbeat
+// responses). Naked zero-deadline writes inherit whatever the conn carries
+// — after five idle seconds that is an expired deadline, and the write
+// fails instantly and silently.
+const frameWriteTimeout = 5 * time.Second
+
 func writeFrameWithDeadline(session *session, frame frame, deadline time.Time) (int, error) {
 	size, err := encodedFrameSize(frame)
 	if err != nil {

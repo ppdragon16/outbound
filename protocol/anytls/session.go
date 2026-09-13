@@ -258,7 +258,7 @@ func (s *session) run() error {
 			}
 		case cmdHeartRequest:
 			frame := newFrame(cmdHeartResponse, sid)
-			if _, err := writeFrame(s, frame); err != nil {
+			if _, err := writeFrameWithDeadline(s, frame, time.Now().Add(frameWriteTimeout)); err != nil {
 				return err
 			}
 		case cmdHeartResponse:
@@ -281,7 +281,7 @@ func (s *session) Probe() error {
 	// bounded; the deadline lingers afterwards until the next write's own
 	// deadline overrides it (writeConnWithDeadline no longer defer-clears).
 	frame := newFrame(cmdHeartRequest, 0)
-	_, err := writeFrameWithDeadline(s, frame, time.Now().Add(5*time.Second))
+	_, err := writeFrameWithDeadline(s, frame, time.Now().Add(frameWriteTimeout))
 	return err
 }
 

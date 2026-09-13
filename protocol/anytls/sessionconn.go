@@ -364,7 +364,7 @@ func (c *sessionConn) sendFin() error {
 		return nil
 	}
 	frame := newFrame(cmdFIN, c.id)
-	if _, err := writeFrameWithDeadline(c.session, frame, time.Now().Add(5*time.Second)); err != nil {
+	if _, err := writeFrameWithDeadline(c.session, frame, time.Now().Add(frameWriteTimeout)); err != nil {
 		return err
 	}
 	c.finSent.Store(true)
