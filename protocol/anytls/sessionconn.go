@@ -60,6 +60,11 @@ type sessionConn struct {
 	eof  bool        // our FIN received from the server
 	dead atomic.Bool // protocol violation / misalignment; conn is unusable
 
+	// finSent makes the client-side cmdFIN (CloseWrite / pool return)
+	// idempotent: both paths write it, and a duplicated FIN for an
+	// already-forgotten sid is harmless but noisy on the wire.
+	finSent atomic.Bool
+
 	// readHadError records that a Read ended in a transport error (deadline,
 	// reset, ...). The stream may then sit mid-frame; such a session must
 	// never re-enter the idle pool, or every later request on it reads a
@@ -325,8 +330,7 @@ func (c *sessionConn) Close() error {
 			}
 			// Tell the server this stream is done, best effort. The session
 			// (and its TCP connection) stays alive and returns to the pool.
-			frame := newFrame(cmdFIN, c.id)
-			if _, err := writeFrame(c.session, frame); err != nil && firstErr == nil {
+			if err := c.sendFin(); err != nil && firstErr == nil {
 				firstErr = err
 			}
 		}
@@ -334,6 +338,29 @@ func (c *sessionConn) Close() error {
 		c.session.removeStream(c.id)
 	})
 	return firstErr
+}
+
+// sendFin writes this stream's cmdFIN exactly once. Both the half-close
+// (CloseWrite) and the pool-return (Close) paths use it; the server drops a
+// FIN for an already-forgotten sid, but one frame is cleaner on the wire.
+func (c *sessionConn) sendFin() error {
+	if !c.finSent.CompareAndSwap(false, true) {
+		return nil
+	}
+	frame := newFrame(cmdFIN, c.id)
+	_, err := writeFrame(c.session, frame)
+	return err
+}
+
+// CloseWrite implements netproxy.CloseWriter: dae's relay calls it when the
+// client half-closes (the l2r direction ends without error). It tells the
+// server this stream's client side is done, so the server can close its
+// upstream and finish the response. Reading stays open — the server's
+// remaining payload and its FIN(sid) still arrive, which lets the r2l relay
+// end on EOF instead of dying on a blind deadline. The session stays
+// reusable; this is not Close.
+func (c *sessionConn) CloseWrite() error {
+	return c.sendFin()
 }
 
 func (c *sessionConn) SetDeadline(t time.Time) error {

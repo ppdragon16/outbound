@@ -271,9 +271,16 @@ func (s *session) run() error {
 // Probe sends a lightweight heartbeat frame to verify the underlying connection
 // is still alive. It returns nil if the write succeeds.
 func (s *session) Probe() error {
-	// Clear any stale deadline before probing — this is the first
-	// write when pulling a session from the idle pool.
-	_ = s.conn.SetDeadline(time.Time{})
+	// Probe must never touch the conn deadlines. It fires every heartbeat
+	// tick, often while a checked-out session's relay is mid-transport:
+	// clearing the READ deadline disarmed the relay reader's idle timeout
+	// (the production goroutine leak), and clearing the WRITE deadline would
+	// disarm an in-flight relay write bounded by tcp.go's
+	// DefaultTCPWriteTimeout the same way. Stale deadlines at checkout are
+	// handled where they belong — newDirectConn resets them before any
+	// reader/writer exists, and a stale WRITE deadline that fails this very
+	// probe is cleared by the caller's timeout path (or the heartbeat's),
+	// which self-heals on the next tick.
 	frame := newFrame(cmdHeartRequest, 0)
 	_, err := writeFrame(s, frame)
 	return err

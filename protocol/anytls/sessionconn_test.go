@@ -734,3 +734,229 @@ func TestSessionAsConnOversizeAbandonKillsSession(t *testing.T) {
 	}
 	_ = conn2.Close()
 }
+
+// TestSessionAsConnCloseWrite verifies the half-close: CloseWrite sends the
+// client's cmdFIN so the server can close its upstream, reading stays open
+// (the late payload and the server's FIN still arrive), and the FIN is
+// idempotent across CloseWrite + Close.
+
+// readCmdFrame reads frames from the server side, skipping control frames
+// (padding/settings/alerts), and asserts the next real frame is wantCmd for
+// wantSid. It auto-answers client HeartRequests like serverNextEvent does.
+func readCmdFrame(t *testing.T, conn net.Conn, wantCmd byte, wantSid uint32) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	_ = conn.SetReadDeadline(deadline)
+	defer func() { _ = conn.SetReadDeadline(time.Time{}) }()
+	for {
+		cmd, sid, _, err := testReadFrame(conn)
+		if err != nil {
+			t.Fatalf("read frame: %v", err)
+		}
+		if cmd == cmdHeartRequest {
+			// Answer it, then let it fall through: it may BE the wanted
+			// frame (Probe test).
+			if err := testWriteFrame(conn, cmdHeartResponse, sid, nil); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if cmd == cmdWaste || cmd == cmdSettings || cmd == cmdUpdatePaddingScheme || cmd == cmdServerSettings || cmd == cmdAlert {
+			continue
+		}
+		if cmd != wantCmd || sid != wantSid {
+			t.Fatalf("got cmd=%d sid=%d, want cmd=%d sid=%d", cmd, sid, wantCmd, wantSid)
+		}
+		return
+	}
+}
+
+func TestSessionAsConnCloseWrite(t *testing.T) {
+	ts := newTestServer(t)
+	d := newSessionAsConnDialer(t, ts.ln.Addr().String())
+	ctx := context.Background()
+
+	conn, err := d.DialContext(ctx, "tcp", "t.example.com:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := ts.Accept(t)
+	serverNextEvent(t, tc)
+	serverNextEvent(t, tc)
+
+	half := conn.(interface{ CloseWrite() error })
+	if err := half.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	readCmdFrame(t, tc, cmdFIN, 1)
+
+	// Reading stays open after the half-close: the server's late payload
+	// still reaches the reader.
+	if err := testWriteFrame(tc, cmdPSH, 1, []byte("late")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 16)
+	n, err := conn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != "late" {
+		t.Fatalf("read %q, want %q", buf[:n], "late")
+	}
+
+	// CloseWrite is idempotent: a second call writes no new frame (only
+	// padding-level waste may appear; another FIN would fail readCmdFrame).
+	if err := half.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tc.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		fcmd, fsid, _, ferr := testReadFrame(tc)
+		if ferr != nil {
+			break // timed out with no frame: no duplicate FIN, as wanted
+		}
+		if fcmd == cmdFIN {
+			t.Fatalf("duplicate FIN written for sid=%d", fsid)
+		}
+	}
+	_ = tc.SetReadDeadline(time.Time{})
+
+	// The server finishes the response with its FIN → clean EOF.
+	if err := testWriteFrame(tc, cmdFIN, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Read(buf); !errors.Is(err, io.EOF) {
+		t.Fatalf("expected EOF after server FIN, got %v", err)
+	}
+
+	// Normal close returns the session to the pool; finSent suppresses the
+	// duplicate FIN.
+	_ = conn.Close()
+	waitPool(t, d, 1)
+}
+
+// TestProbeMustNotClearReadDeadline is the production leak, distilled: a
+// relay reader parks on the frame header under a deadline while the session's
+// heartbeat fires mid-read. Probe must only clear the WRITE side — wiping the
+// read deadline (the old behavior) disarmed the relay's idle timeout and its
+// half-close ultimatum, and the reader blocked forever.
+func TestProbeMustNotClearReadDeadline(t *testing.T) {
+	ts := newTestServer(t)
+	d := newSessionAsConnDialer(t, ts.ln.Addr().String())
+	ctx := context.Background()
+
+	conn, err := d.DialContext(ctx, "tcp", "t.example.com:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := ts.Accept(t)
+	serverNextEvent(t, tc)
+	serverNextEvent(t, tc)
+
+	// Reader armed with a deadline, parked on the frame header — the
+	// production shape (dae bounds every relay Read with a deadline).
+	if err := conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	type readResult struct {
+		n   int
+		err error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		n, err := conn.Read(make([]byte, 16))
+		ch <- readResult{n, err}
+	}()
+	time.Sleep(100 * time.Millisecond) // let the reader park first
+
+	// Heartbeat tick mid-read. readCmdFrame auto-answers the HeartRequest
+	// with HeartResponse, waking the underlying read mid-deadline just like
+	// the production server does.
+	prober := conn.(interface{ Probe() error })
+	if err := prober.Probe(); err != nil {
+		t.Fatal(err)
+	}
+	readCmdFrame(t, tc, cmdHeartRequest, 0)
+
+	select {
+	case res := <-ch:
+		var netErr net.Error
+		if !errors.As(res.err, &netErr) || !netErr.Timeout() {
+			t.Fatalf("expected timeout after Probe, got %v", res.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Read still blocked after its deadline: Probe cleared the read deadline (the production leak)")
+	}
+	_ = conn.Close()
+}
+
+// TestProbeMustNotClearWriteDeadline is the write-side twin of the probe
+// regression: a relay write is in flight under tcp.go's write timeout when
+// the heartbeat fires. Probe must not wipe the pending write deadline, or
+// the relay write blocks forever — the same leak, mirrored to l2r.
+func TestProbeMustNotClearWriteDeadline(t *testing.T) {
+	ts := newTestServer(t)
+	d := newSessionAsConnDialer(t, ts.ln.Addr().String())
+	ctx := context.Background()
+
+	conn, err := d.DialContext(ctx, "tcp", "t.example.com:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := ts.Accept(t)
+	serverNextEvent(t, tc)
+	serverNextEvent(t, tc)
+
+	// A relay write in flight: keep writing far past the socket buffers
+	// (the server never reads) under a 100ms write deadline, mirroring
+	// dae's set-deadline-then-Write pattern.
+	if err := conn.SetWriteDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	type writeResult struct {
+		n   int
+		err error
+	}
+	ch := make(chan writeResult, 1)
+	go func() {
+		buf := make([]byte, 64<<10)
+		total, err := 0, error(nil)
+		for total < 64<<20 {
+			var n int
+			n, err = conn.Write(buf)
+			total += n
+			if err != nil {
+				break
+			}
+		}
+		ch <- writeResult{total, err}
+	}()
+	time.Sleep(50 * time.Millisecond) // writes already flowing past the buffers
+
+	// Heartbeat tick mid-write. The heartbeat write inherits the pending
+	// deadline, so it may itself time out — which is precisely the proof
+	// that the deadline survived the tick (pre-fix, Probe wiped it and
+	// neither write ever failed).
+	prober := conn.(interface{ Probe() error })
+	if perr := prober.Probe(); perr != nil {
+		var netErr net.Error
+		if !errors.As(perr, &netErr) || !netErr.Timeout() {
+			t.Fatalf("probe failed with non-timeout error: %v", perr)
+		}
+	}
+
+	select {
+	case res := <-ch:
+		var netErr net.Error
+		if !errors.As(res.err, &netErr) || !netErr.Timeout() {
+			t.Fatalf("expected write timeout after Probe, got %v", res.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Write still blocked after its deadline: Probe cleared the write deadline")
+	}
+
+	// Server gone, the conn is unusable either way — close cleanly.
+	_ = tc.Close()
+	_ = conn.Close()
+}
