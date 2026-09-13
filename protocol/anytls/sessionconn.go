@@ -49,10 +49,13 @@ type sessionConn struct {
 
 	// Frame reassembly state, so a Read interrupted by a deadline in the
 	// middle of a header or payload resumes without losing alignment.
-	hdr     rawHeader
-	hdrN    int    // header bytes already consumed
-	pendBuf []byte // pool buffer holding unread payload (valid segment)
-	pendOff int    // next byte to return from pendBuf
+	hdr  rawHeader
+	hdrN int // header bytes already consumed
+	// pendRemaining is the unread tail of an oversized cmdPSH payload. The
+	// direct-read design leaves those bytes on the TCP stream (no
+	// intermediate buffer); they are consumed straight into the caller's
+	// buffer before any new frame is parsed.
+	pendRemaining int
 
 	eof  bool        // our FIN received from the server
 	dead atomic.Bool // protocol violation / misalignment; conn is unusable
@@ -131,28 +134,27 @@ func (c *sessionConn) Read(b []byte) (n int, err error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
-	// Resume any payload left over from a previous short read.
-	if c.pendBuf != nil {
-		n = copy(b, c.pendBuf[c.pendOff:])
-		c.pendOff += n
-		if c.pendOff == len(c.pendBuf) {
-			pool.PutBuffer(c.pendBuf)
-			c.pendBuf, c.pendOff = nil, 0
-		}
-		return n, nil
-	}
 	c.readEnter.Add(1)
 	defer c.readEnter.Done()
 	if c.dead.Load() {
 		return 0, net.ErrClosed
 	}
-	// A previous error already broke frame alignment: allow no new frame
-	// reads (stash residue above is still handed out).
+	// A previous error already broke frame alignment: allow no further
+	// reads — by contract the connection is unusable once a Read fails.
 	if c.readHadError.Load() {
 		return 0, net.ErrClosed
 	}
 	if c.eof {
 		return 0, io.EOF
+	}
+	// Resume the unread tail of an oversized payload left on the TCP stream
+	// by a previous short read: no intermediate buffering, the bytes go
+	// straight from the conn into the caller's buffer.
+	if c.pendRemaining > 0 {
+		n = min(len(b), c.pendRemaining)
+		n, err = io.ReadFull(c.conn, b[:n])
+		c.pendRemaining -= n
+		return n, err
 	}
 	for {
 		for c.hdrN < len(c.hdr) {
@@ -189,38 +191,20 @@ func (c *sessionConn) Read(b []byte) (n int, err error) {
 				}
 				continue
 			}
-			if length <= len(b) {
-				// Fast path: read the payload straight into the caller's
-				// buffer — no intermediate copy.
-				n, err := io.ReadFull(c.conn, b[:length])
-				if err == nil {
-					return n, nil
-				}
-				if n > 0 {
-					// Interrupted mid-payload (deadline): keep the bytes for
-					// the next call so alignment is preserved.
-					c.stash(b[:n])
-					return n, err
-				}
-				return 0, err
-			}
-			// Payload larger than the caller's buffer: read it all into a
-			// pool buffer and hand out slices.
-			buf := pool.GetBuffer(length)
-			n, err := io.ReadFull(c.conn, buf)
-			if n > 0 {
-				c.pendBuf, c.pendOff = buf[:n], 0
-			}
+			// Read as much of the payload as fits, straight into the
+			// caller's buffer — no intermediate GetBuffer copy even when
+			// the payload is larger: its tail stays on the TCP stream,
+			// accounted by pendRemaining, and resumes on the next Read.
+			n, err := io.ReadFull(c.conn, b[:min(length, len(b))])
+			c.pendRemaining = length - n
 			if err != nil {
-				if c.pendBuf != nil {
-					return 0, err // pending keeps the partial payload
-				}
-				pool.PutBuffer(buf)
-				return 0, err
+				// Short read + error is valid net.Conn semantics: the n
+				// bytes are the caller's. The deferred hook flags the
+				// connection unusable, so the session never re-enters the
+				// pool with this tail pending.
+				return n, err
 			}
-			n2 := copy(b, buf)
-			c.pendOff = n2
-			return n2, nil
+			return n, nil
 		case cmdWaste:
 			if err := c.discard(length); err != nil {
 				return 0, err
@@ -324,15 +308,18 @@ func (c *sessionConn) Close() error {
 		c.dead.Store(true)
 		_ = c.conn.SetReadDeadline(time.Now())
 		c.readEnter.Wait()
-		defer c.releasePending()
 
-		// A session whose Read ended in an error (deadline, reset, protocol
-		// violation — the sentinel is set from Read's deferred hook) may sit
-		// mid-frame: its stream position can no longer be trusted, so it
-		// must never re-enter the idle pool. markDead is idempotent for the
-		// fatal path, which already tore the session down.
+		// Two states leave the stream off a frame boundary and make the
+		// session unfit for the idle pool:
+		//   - readHadError: a Read ended in a transport error or protocol
+		//     violation (sentinel set by Read's deferred hook). markDead is
+		//     idempotent for the fatal path, which already tore the session
+		//     down.
+		//   - pendRemaining > 0: the direct-read design left an oversized
+		//     payload's tail on the TCP stream and the caller gave up
+		//     before consuming it.
 		if !c.eof {
-			if c.readHadError.Load() {
+			if c.readHadError.Load() || c.pendRemaining > 0 {
 				c.markDead()
 				return
 			}
@@ -367,21 +354,6 @@ func (c *sessionConn) SetReadDeadline(t time.Time) error {
 
 func (c *sessionConn) SetWriteDeadline(t time.Time) error {
 	return c.conn.SetWriteDeadline(t)
-}
-
-// stash parks payload bytes already read into the caller's buffer after a
-// mid-payload interruption, so the next Read resumes in order.
-func (c *sessionConn) stash(data []byte) {
-	buf := pool.GetBuffer(len(data))
-	copy(buf, data)
-	c.pendBuf, c.pendOff = buf[:len(data)], 0
-}
-
-func (c *sessionConn) releasePending() {
-	if c.pendBuf != nil {
-		pool.PutBuffer(c.pendBuf)
-		c.pendBuf, c.pendOff = nil, 0
-	}
 }
 
 // discard skips a payload. An interrupted discard loses bytes that have no

@@ -665,8 +665,9 @@ func TestSessionAsConnInterruptKillsSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	for {
-		// Short deadline: pendBuf bytes come back instantly (copies don't
-		// consult the deadline); waiting on the next frame header times out.
+		// Short deadline: buffered payload bytes come back instantly (copies
+		// don't consult the deadline); waiting on the next frame header
+		// times out.
 		_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
 		if _, err := conn.Read(make([]byte, 32<<10)); err != nil {
 			break
@@ -687,6 +688,47 @@ func TestSessionAsConnInterruptKillsSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	tc2 := ts.Accept(t)
+	if ev := serverNextEvent(t, tc2); ev.cmd != cmdSYN || ev.sid != 1 {
+		t.Fatalf("expected SYN sid=1 on a NEW connection, got cmd=%d sid=%d", ev.cmd, ev.sid)
+	}
+	_ = conn2.Close()
+}
+
+// TestSessionAsConnOversizeAbandonKillsSession covers the direct-read
+// design's pool gate: a payload larger than the caller's buffer leaves its
+// unread tail on the TCP stream (pendRemaining); a caller that gives up
+// before consuming it must not send the session back to the idle pool
+// mid-frame.
+func TestSessionAsConnOversizeAbandonKillsSession(t *testing.T) {
+	ts := newTestServer(t)
+	d := newSessionAsConnDialer(t, ts.ln.Addr().String())
+	ctx := context.Background()
+
+	conn, err := d.DialContext(ctx, "tcp", "t.example.com:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := ts.Accept(t)
+	clientHandshake(t, tc)
+
+	payload := make([]byte, 16<<10)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	if err := testWriteFrame(tc, cmdPSH, 1, payload); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 100) // far smaller than the payload: pendRemaining > 0
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close() // caller gives up; the tail is still on the stream
+
+	conn2, err := d.DialContext(ctx, "tcp", "t.example.com:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc2 := ts.Accept(t) // must be a NEW connection, not the poisoned session
 	if ev := serverNextEvent(t, tc2); ev.cmd != cmdSYN || ev.sid != 1 {
 		t.Fatalf("expected SYN sid=1 on a NEW connection, got cmd=%d sid=%d", ev.cmd, ev.sid)
 	}
