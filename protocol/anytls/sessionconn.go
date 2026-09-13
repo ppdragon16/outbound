@@ -33,6 +33,16 @@ import (
 //     bytes at the time the previous conn sent FIN) is dropped by the
 //     sid != c.id filter in Read, which keeps pool reuse safe.
 //
+// halfCloseGrace bounds how long the read side stays open after a
+// half-close (CloseWrite). The anytls server closes the stream locally on
+// FIN without ever echoing one back (sing-anytls closeLocally: "don't
+// notify remote peer"), and only a server relay that finishes normally
+// sends FIN — one whose upstream keeps the connection open never does.
+// Without this bound the r2l relay parks for a full idle-timeout cycle
+// per half-closed client disconnect, which re-creates the connection
+// leak this whole effort set out to fix. Test-overridable.
+var halfCloseGrace = 10 * time.Second
+
 // ErrStreamRefused marks an application-level refusal (the server failed to
 // dial the upstream target). The frame stream stays aligned — the session
 // itself remains healthy and pool-worthy — so it is exempt from the
@@ -364,12 +374,30 @@ func (c *sessionConn) sendFin() error {
 // CloseWrite implements netproxy.CloseWriter: dae's relay calls it when the
 // client half-closes (the l2r direction ends without error). It tells the
 // server this stream's client side is done, so the server can close its
-// upstream and finish the response. Reading stays open — the server's
-// remaining payload and its FIN(sid) still arrive, which lets the r2l relay
-// end on EOF instead of dying on a blind deadline. The session stays
-// reusable; this is not Close.
+// upstream and finish the response. Reading stays open — but bounded: the
+// anytls server never echoes a FIN for a half-close (it closes the stream
+// locally without notifying the peer), so an unbounded wait would park the
+// r2l relay for the full idle timeout on every client disconnect. The
+// grace deadline is the single backstop, and it needs no force-close
+// timer, which would kill active transfers outright:
+//   - soft: arm the conn read deadline at now+halfCloseGrace. A server
+//     still sending overrides it on the relay loop's next per-read
+//     deadline re-arm, so active transfers are unaffected; the response
+//     completing makes the server relay finish and send a real FIN.
+//   - live vs silent: the only window where the grace gets overridden
+//     before firing is a relay mid-write — a live stream, exactly the one
+//     that doesn't need the backstop; a silent server always has the
+//     deadline armed on its parked Read.
+//
+// A grace timeout always leaves the session mid-frame-risky (readHadError),
+// so Close marks the session dead rather than pooling it; the pool
+// replenisher absorbs that cost.
 func (c *sessionConn) CloseWrite() error {
-	return c.sendFin()
+	if err := c.sendFin(); err != nil {
+		return err
+	}
+	_ = c.conn.SetReadDeadline(time.Now().Add(halfCloseGrace))
+	return nil
 }
 
 func (c *sessionConn) SetDeadline(t time.Time) error {

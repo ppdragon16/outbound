@@ -841,6 +841,113 @@ func TestSessionAsConnCloseWrite(t *testing.T) {
 // heartbeat fires mid-read. Probe must only clear the WRITE side — wiping the
 // read deadline (the old behavior) disarmed the relay's idle timeout and its
 // half-close ultimatum, and the reader blocked forever.
+// TestSessionAsConnHalfCloseGraceDeadline pins the soft backstop: after a
+// half-close the read side must terminate within halfCloseGrace on a silent
+// server, instead of parking until the 60-minute relay idle timeout (the
+// production leak re-created by the server's FIN-less half-close handling).
+func TestSessionAsConnHalfCloseGraceDeadline(t *testing.T) {
+	old := halfCloseGrace
+	halfCloseGrace = 300 * time.Millisecond
+	defer func() { halfCloseGrace = old }()
+
+	ts := newTestServer(t)
+	d := newSessionAsConnDialer(t, ts.ln.Addr().String())
+	ctx := context.Background()
+
+	conn, err := d.DialContext(ctx, "tcp", "t.example.com:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := ts.Accept(t)
+	serverNextEvent(t, tc)
+	serverNextEvent(t, tc)
+
+	half := conn.(interface{ CloseWrite() error })
+	start := time.Now()
+	if err := half.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	readCmdFrame(t, tc, cmdFIN, 1)
+
+	buf := make([]byte, 16)
+	if _, err := conn.Read(buf); err == nil {
+		t.Fatal("expected the half-close grace deadline to break the silent read")
+	} else {
+		var netErr net.Error
+		if !errors.As(err, &netErr) || !netErr.Timeout() {
+			t.Fatalf("expected a timeout error from the grace deadline, got %v", err)
+		}
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("grace deadline took %v, unbounded wait is back", elapsed)
+	}
+
+	// The conn is done; closing must be idempotent with the timer backstop.
+	if err := conn.Close(); err != nil {
+		t.Fatalf("Close after grace timeout: %v", err)
+	}
+}
+
+// TestSessionAsConnHalfCloseActiveSurvives pins the soft backstop's
+// overridden-by-liveness property: a server that keeps sending after the
+// half-close keeps the relay alive past the grace window — each read re-arms
+// the relay's own deadline, so an active transfer is never cut by the grace.
+func TestSessionAsConnHalfCloseActiveSurvives(t *testing.T) {
+	old := halfCloseGrace
+	halfCloseGrace = 300 * time.Millisecond
+	defer func() { halfCloseGrace = old }()
+
+	ts := newTestServer(t)
+	d := newSessionAsConnDialer(t, ts.ln.Addr().String())
+	ctx := context.Background()
+
+	conn, err := d.DialContext(ctx, "tcp", "t.example.com:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := ts.Accept(t)
+	serverNextEvent(t, tc)
+	serverNextEvent(t, tc)
+
+	half := conn.(interface{ CloseWrite() error })
+	if err := half.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	readCmdFrame(t, tc, cmdFIN, 1)
+
+	// Keep the server pushing data for well past the grace window.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 10; i++ {
+			if err := testWriteFrame(tc, cmdPSH, 1, []byte("chunk")); err != nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+
+	buf := make([]byte, 16)
+	got := 0
+	for got < 10 {
+		// Mirror dae's relay loop: each read re-arms its own deadline,
+		// which is what overrides (and thereby survives) the half-close
+		// grace armed once by CloseWrite.
+		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		n, err := conn.Read(buf)
+		if err != nil {
+			t.Fatalf("active transfer died after %d chunks: %v", got, err)
+		}
+		if string(buf[:n]) != "chunk" {
+			t.Fatalf("read %q", buf[:n])
+		}
+		got++
+	}
+	<-done
+}
+
 func TestProbeMustNotClearReadDeadline(t *testing.T) {
 	ts := newTestServer(t)
 	d := newSessionAsConnDialer(t, ts.ln.Addr().String())
