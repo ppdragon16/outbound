@@ -112,6 +112,10 @@ func ResolveUDPAddrs(address string) ([]net.Addr, error) {
 }
 
 func resolveIPAddrWithResolver(resolver *net.Resolver, address string) (*net.IPAddr, int, error) {
+	return resolveIPAddrContext(resolver, context.Background(), address)
+}
+
+func resolveIPAddrContext(resolver *net.Resolver, ctx context.Context, address string) (*net.IPAddr, int, error) {
 	host, _port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, 0, err
@@ -120,7 +124,7 @@ func resolveIPAddrWithResolver(resolver *net.Resolver, address string) (*net.IPA
 	if err != nil {
 		return nil, 0, fmt.Errorf("invalid port: %v", _port)
 	}
-	addrs, err := resolver.LookupIPAddr(context.Background(), host)
+	addrs, err := resolver.LookupIPAddr(ctx, host)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -164,6 +168,21 @@ func ResolveIPAddr(address string) (*net.IPAddr, error) {
 
 func ResolveUDPAddr(address string) (*net.UDPAddr, error) {
 	return ResolveUDPAddrWithResolver(net.DefaultResolver, address)
+}
+
+// ResolveUDPAddrContext resolves address like ResolveUDPAddr but honors ctx,
+// so a datapath caller can bound one resolution attempt instead of hanging
+// its read loop on the process resolver.
+func ResolveUDPAddrContext(ctx context.Context, address string) (*net.UDPAddr, error) {
+	addr, port, err := resolveIPAddrContext(net.DefaultResolver, ctx, address)
+	if err != nil {
+		return nil, err
+	}
+	return &net.UDPAddr{
+		IP:   addr.IP,
+		Zone: addr.Zone,
+		Port: port,
+	}, nil
 }
 
 func ResolveTCPAddr(address string) (*net.TCPAddr, error) {
