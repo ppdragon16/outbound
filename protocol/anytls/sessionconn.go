@@ -1,12 +1,14 @@
 package anytls
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/outbound/pool"
@@ -31,6 +33,12 @@ import (
 //     bytes at the time the previous conn sent FIN) is dropped by the
 //     sid != c.id filter in Read, which keeps pool reuse safe.
 //
+// ErrStreamRefused marks an application-level refusal (the server failed to
+// dial the upstream target). The frame stream stays aligned — the session
+// itself remains healthy and pool-worthy — so it is exempt from the
+// readHadError sentinel.
+var ErrStreamRefused = errors.New("anytls: server refused stream")
+
 // Heartbeat note: startHeartbeat() stays active (write-only, unaffected by the
 // missing run loop). Server-initiated HeartRequests are answered only when
 // Read is running; for pooled idle sessions liveness is verified by Probe()
@@ -46,8 +54,19 @@ type sessionConn struct {
 	pendBuf []byte // pool buffer holding unread payload (valid segment)
 	pendOff int    // next byte to return from pendBuf
 
-	eof  bool // our FIN received from the server
-	dead bool // protocol violation / misalignment; conn is unusable
+	eof  bool        // our FIN received from the server
+	dead atomic.Bool // protocol violation / misalignment; conn is unusable
+
+	// readHadError records that a Read ended in a transport error (deadline,
+	// reset, ...). The stream may then sit mid-frame; such a session must
+	// never re-enter the idle pool, or every later request on it reads a
+	// shifted frame stream ("invalid cmd").
+	readHadError atomic.Bool
+	// readEnter tracks the in-flight Read call. dae's relay loop bounds each
+	// Read with a deadline and closes the conn while the peer-direction
+	// reader may still be unwinding, so Close must wait for the in-flight
+	// reader to exit before trusting the state above.
+	readEnter sync.WaitGroup
 
 	closeOnce sync.Once
 }
@@ -100,13 +119,21 @@ func (s *session) newDirectConn(addr string) (*sessionConn, error) {
 	return &sessionConn{session: s, id: sid}, nil
 }
 
-func (c *sessionConn) Read(b []byte) (int, error) {
+func (c *sessionConn) Read(b []byte) (n int, err error) {
+	// Any transport error (EOF excepted) leaves the frame stream at an
+	// untrusted position: record it once, here, instead of at every error
+	// return below. Close uses this to keep the session out of the pool.
+	defer func() {
+		if err != nil && err != io.EOF && !errors.Is(err, ErrStreamRefused) {
+			c.readHadError.Store(true)
+		}
+	}()
 	if len(b) == 0 {
 		return 0, nil
 	}
 	// Resume any payload left over from a previous short read.
 	if c.pendBuf != nil {
-		n := copy(b, c.pendBuf[c.pendOff:])
+		n = copy(b, c.pendBuf[c.pendOff:])
 		c.pendOff += n
 		if c.pendOff == len(c.pendBuf) {
 			pool.PutBuffer(c.pendBuf)
@@ -114,7 +141,14 @@ func (c *sessionConn) Read(b []byte) (int, error) {
 		}
 		return n, nil
 	}
-	if c.dead {
+	c.readEnter.Add(1)
+	defer c.readEnter.Done()
+	if c.dead.Load() {
+		return 0, net.ErrClosed
+	}
+	// A previous error already broke frame alignment: allow no new frame
+	// reads (stash residue above is still handed out).
+	if c.readHadError.Load() {
 		return 0, net.ErrClosed
 	}
 	if c.eof {
@@ -214,7 +248,12 @@ func (c *sessionConn) Read(b []byte) (int, error) {
 				if sid == c.id {
 					msg := string(buf)
 					pool.PutBuffer(buf)
-					return c.fatal(fmt.Errorf("anytls: server refused stream: %s", msg))
+					// Application-level refusal: the frame was consumed in
+					// full, the stream stays aligned, and the server closes
+					// only this stream — the session remains reusable. The
+					// (now stale) FIN for sid is skipped by the sid filter
+					// on the next checkout.
+					return 0, fmt.Errorf("%w: %s", ErrStreamRefused, msg)
 				}
 				pool.PutBuffer(buf)
 			}
@@ -278,15 +317,32 @@ func (c *sessionConn) Write(b []byte) (int, error) {
 func (c *sessionConn) Close() error {
 	var firstErr error
 	c.closeOnce.Do(func() {
-		// Tell the server this stream is done, best effort. The session
-		// (and its TCP connection) stays alive and returns to the pool.
+		// Refuse new Reads, then unblock any Read still in flight. dae's
+		// relay closes the conn while the peer-direction reader may still be
+		// blocked mid-frame, so the reassembly state is only safe to inspect
+		// after that reader exits.
+		c.dead.Store(true)
+		_ = c.conn.SetReadDeadline(time.Now())
+		c.readEnter.Wait()
+		defer c.releasePending()
+
+		// A session whose Read ended in an error (deadline, reset, protocol
+		// violation — the sentinel is set from Read's deferred hook) may sit
+		// mid-frame: its stream position can no longer be trusted, so it
+		// must never re-enter the idle pool. markDead is idempotent for the
+		// fatal path, which already tore the session down.
 		if !c.eof {
+			if c.readHadError.Load() {
+				c.markDead()
+				return
+			}
+			// Tell the server this stream is done, best effort. The session
+			// (and its TCP connection) stays alive and returns to the pool.
 			frame := newFrame(cmdFIN, c.id)
 			if _, err := writeFrame(c.session, frame); err != nil && firstErr == nil {
 				firstErr = err
 			}
 		}
-		c.releasePending()
 		// Return the session to the idle pool (also clears deadlines).
 		c.session.removeStream(c.id)
 	})
@@ -345,6 +401,6 @@ func (c *sessionConn) fatal(err error) (int, error) {
 }
 
 func (c *sessionConn) markDead() {
-	c.dead = true
+	c.dead.Store(true)
 	c.session.Close()
 }

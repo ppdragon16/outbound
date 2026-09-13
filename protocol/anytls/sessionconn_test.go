@@ -492,18 +492,18 @@ func TestSessionAsConnReadDeadline(t *testing.T) {
 		}
 	}
 
+	// A timed-out Read marks the conn permanently unusable: the frame
+	// stream may sit mid-header or mid-payload, so retrying is not merely
+	// pointless, it would parse payload bytes as a frame header. The error
+	// surfaces as net.ErrClosed regardless of what the deadline cleared.
 	if err := testWriteFrame(tc, cmdPSH, 1, []byte("late")); err != nil {
 		t.Fatal(err)
 	}
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		t.Fatal(err)
 	}
-	n, err := conn.Read(buf)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(buf[:n]) != "late" {
-		t.Fatalf("read %q, want %q", buf[:n], "late")
+	if _, err := conn.Read(buf); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("expected net.ErrClosed after a timed-out read, got %v", err)
 	}
 }
 
@@ -529,7 +529,43 @@ func TestSessionAsConnStreamRefused(t *testing.T) {
 		t.Fatal("expected stream-refused error")
 	} else if !bytes.Contains([]byte(err.Error()), []byte("target unreachable")) {
 		t.Fatalf("error should carry server message, got %v", err)
+	} else if !errors.Is(err, ErrStreamRefused) {
+		t.Fatalf("expected ErrStreamRefused sentinel, got %v", err)
 	}
+
+	// The refusal is application-level: the frame stream stays aligned, so
+	// the session must return to the idle pool instead of being killed.
+	_ = conn.Close()
+	waitPool(t, d, 1)
+
+	// The next request reuses the SAME session (no new TCP conn): the mock
+	// server answers on tc, including the stale FIN for sid=1 that the
+	// server sent when it closed the refused stream.
+	conn2, err := d.DialContext(ctx, "tcp", "t.example.com:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The abandoned conn's Close already wrote FIN(sid=1) before pooling.
+	if ev := serverNextEvent(t, tc); ev.cmd != cmdFIN || ev.sid != 1 {
+		t.Fatalf("expected client FIN sid=1, got cmd=%d sid=%d", ev.cmd, ev.sid)
+	}
+	if ev := serverNextEvent(t, tc); ev.cmd != cmdSYN || ev.sid != 2 {
+		t.Fatalf("expected reused session with SYN sid=2, got cmd=%d sid=%d", ev.cmd, ev.sid)
+	}
+	if err := testWriteFrame(tc, cmdFIN, 1, nil); err != nil {
+		t.Fatal(err) // stale FIN of the refused stream, skipped by sid filter
+	}
+	if err := testWriteFrame(tc, cmdPSH, 2, []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	n, err := conn2.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:n]) != "hello" {
+		t.Fatalf("read %q, want %q", buf[:n], "hello")
+	}
+	_ = conn2.Close()
 }
 
 // TestSessionAsConnUDPUsesDedicatedSession verifies that in session-as-conn
@@ -594,4 +630,65 @@ func TestSessionAsConnUDPUsesDedicatedSession(t *testing.T) {
 	}
 	ts.NoNewConn(t)
 	_ = conn3.Close()
+}
+
+// TestSessionAsConnInterruptKillsSession reproduces the production failure
+// behind "anytls: invalid cmd": dae's relayCore forceClose sets a past read
+// deadline (interrupting a Read mid-frame) and then calls Close. The
+// session's stream position can no longer be trusted, so it must be killed
+// instead of returning to the idle pool, where the next request would read a
+// shifted frame stream.
+func TestSessionAsConnInterruptKillsSession(t *testing.T) {
+	ts := newTestServer(t)
+	d := newSessionAsConnDialer(t, ts.ln.Addr().String())
+	ctx := context.Background()
+
+	conn, err := d.DialContext(ctx, "tcp", "t.example.com:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := ts.Accept(t)
+	clientHandshake(t, tc)
+
+	// Server sends a 16 KiB payload; the client reads only the first 100
+	// bytes, drains the cached remainder, and then a past deadline
+	// interrupts the next Read while it waits on a frame header.
+	payload := make([]byte, 16<<10)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+	if err := testWriteFrame(tc, cmdPSH, 1, payload); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 100)
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		// Short deadline: pendBuf bytes come back instantly (copies don't
+		// consult the deadline); waiting on the next frame header times out.
+		_ = conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		if _, err := conn.Read(make([]byte, 32<<10)); err != nil {
+			break
+		}
+	}
+	// forceClose's past deadline: the next Read blocks on the frame header
+	// of whatever the server sends next and gets interrupted.
+	_ = conn.SetReadDeadline(time.Unix(1, 0))
+	if _, err := conn.Read(make([]byte, 32<<10)); err == nil {
+		t.Fatal("expected the interrupted Read to return an error")
+	}
+	_ = conn.Close() // forceClose calls Close while the relay unwinds
+
+	// The poisoned session must never re-enter the idle pool: the next dial
+	// has to open a brand-new TLS connection.
+	conn2, err := d.DialContext(ctx, "tcp", "t.example.com:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc2 := ts.Accept(t)
+	if ev := serverNextEvent(t, tc2); ev.cmd != cmdSYN || ev.sid != 1 {
+		t.Fatalf("expected SYN sid=1 on a NEW connection, got cmd=%d sid=%d", ev.cmd, ev.sid)
+	}
+	_ = conn2.Close()
 }
