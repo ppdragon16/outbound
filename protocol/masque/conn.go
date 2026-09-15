@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/quic-go/http3"
 	"github.com/daeuniverse/quic-go/quicvarint"
 )
@@ -24,7 +25,16 @@ type tcpConn struct {
 func (c *tcpConn) LocalAddr() net.Addr  { return c.localAddr }
 func (c *tcpConn) RemoteAddr() net.Addr { return c.remoteAddr }
 
+// CloseWrite implements netproxy.CloseWriter. A quic-stream Close closes
+// only the write direction — it sends a FIN to the peer and leaves the
+// read side open — so the CONNECT server observes a clean half-close
+// instead of a hard stream cancel, and response data still flows back.
+// Without it the relay falls back to a read deadline and the server-side
+// stream hangs until its own idle timeout.
+func (c *tcpConn) CloseWrite() error { return c.Stream.Close() }
+
 var _ net.Conn = (*tcpConn)(nil)
+var _ netproxy.CloseWriter = (*tcpConn)(nil)
 
 // datagram is one received UDP payload and its originating target.
 type datagram struct {
