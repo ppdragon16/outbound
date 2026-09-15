@@ -888,11 +888,13 @@ func TestSessionAsConnHalfCloseGraceDeadline(t *testing.T) {
 	}
 }
 
-// TestSessionAsConnHalfCloseActiveSurvives pins the soft backstop's
-// overridden-by-liveness property: a server that keeps sending after the
-// half-close keeps the relay alive past the grace window — each read re-arms
-// the relay's own deadline, so an active transfer is never cut by the grace.
-func TestSessionAsConnHalfCloseActiveSurvives(t *testing.T) {
+// TestSessionAsConnHalfCloseClampResets pins the half-close deadline
+// ceiling: relay data still in flight when the client disconnects makes the
+// relay loop re-arm its full idle timeout after every chunk, which used to
+// resurrect the stream past the grace window and park it for the whole
+// timeout on a server that never echoes FIN. After CloseWrite, no re-arm
+// may extend the read past the grace deadline.
+func TestSessionAsConnHalfCloseClampResets(t *testing.T) {
 	old := halfCloseGrace
 	halfCloseGrace = 300 * time.Millisecond
 	defer func() { halfCloseGrace = old }()
@@ -929,23 +931,36 @@ func TestSessionAsConnHalfCloseActiveSurvives(t *testing.T) {
 
 	buf := make([]byte, 16)
 	got := 0
-	for got < 10 {
-		// Mirror dae's relay loop: each read re-arms its own deadline,
-		// which is what overrides (and thereby survives) the half-close
-		// grace armed once by CloseWrite.
+	start := time.Now()
+	for {
+		// Mirror dae's relay loop: each read re-arms its own full idle
+		// timeout. The half-close ceiling must clamp every one of these.
 		if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
 			t.Fatal(err)
 		}
 		n, err := conn.Read(buf)
 		if err != nil {
-			t.Fatalf("active transfer died after %d chunks: %v", got, err)
+			// Bounded exit is the point: the grace must fire even
+			// though the relay kept re-arming.
+			var netErr net.Error
+			if !errors.As(err, &netErr) || !netErr.Timeout() {
+				t.Fatalf("expected timeout from the clamped grace, got %v", err)
+			}
+			break
 		}
 		if string(buf[:n]) != "chunk" {
 			t.Fatalf("read %q", buf[:n])
 		}
 		got++
+		if time.Since(start) > 10*time.Second {
+			t.Fatal("grace did not clamp the relay re-arms: unbounded wait")
+		}
+	}
+	if got == 0 {
+		t.Fatal("in-flight chunks should still be delivered before the grace fires")
 	}
 	<-done
+	_ = conn.Close()
 }
 
 func TestProbeMustNotClearReadDeadline(t *testing.T) {

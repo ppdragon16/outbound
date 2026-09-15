@@ -86,6 +86,12 @@ type sessionConn struct {
 	// reader to exit before trusting the state above.
 	readEnter sync.WaitGroup
 
+	// halfClosedDeadline is the read-deadline ceiling armed by CloseWrite,
+	// stored as unix nanos (0 = not half-closed). Every later
+	// SetReadDeadline is clamped to it: the relay loop's per-read
+	// re-arm must not resurrect a half-closed stream past the grace.
+	halfClosedDeadline atomic.Int64
+
 	closeOnce sync.Once
 }
 
@@ -396,7 +402,9 @@ func (c *sessionConn) CloseWrite() error {
 	if err := c.sendFin(); err != nil {
 		return err
 	}
-	_ = c.conn.SetReadDeadline(time.Now().Add(halfCloseGrace))
+	d := time.Now().Add(halfCloseGrace)
+	c.halfClosedDeadline.Store(d.UnixNano())
+	_ = c.conn.SetReadDeadline(d)
 	return nil
 }
 
@@ -413,6 +421,16 @@ func (c *sessionConn) RemoteAddr() net.Addr {
 }
 
 func (c *sessionConn) SetReadDeadline(t time.Time) error {
+	// After a half-close the stream is terminal: cap every re-arm at the
+	// grace deadline. Without this, relay data still in flight when the
+	// client disconnects tricks the relay loop into re-arming the full
+	// idle timeout; the server then goes silent forever (it never echoes
+	// a FIN for a half-close) and the relay parks for that whole timeout.
+	if hd := c.halfClosedDeadline.Load(); hd != 0 {
+		if grace := time.Unix(0, hd); t.After(grace) {
+			t = grace
+		}
+	}
 	return c.conn.SetReadDeadline(t)
 }
 
