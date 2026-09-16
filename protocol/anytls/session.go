@@ -23,6 +23,12 @@ type session struct {
 	conn     net.Conn
 	connLock sync.Mutex
 
+	// flusher, when set, drains the TLS record coalescer sitting under
+	// conn after each framed write burst and before the raw close, so a
+	// burst leaves in one socket write and no record sits buffered past
+	// the caller's write return.
+	flusher interface{ Flush() error }
+
 	streams    map[uint32]*stream
 	streamLock sync.RWMutex
 
@@ -329,6 +335,12 @@ func (s *session) Close() error {
 		// cannot interleave between its check and send.
 		close(s.closeStreamChan)
 		s.streamLock.Unlock()
+		// Drain the coalescer before the raw close: Conn.Close itself no
+		// longer flushes (a blocked flush must not delay teardown), so a
+		// pending close_notify or final frame is pushed here instead.
+		if s.flusher != nil {
+			_ = s.flusher.Flush()
+		}
 		return s.conn.Close()
 	}
 	return nil
@@ -376,7 +388,19 @@ func (s *session) writeConnWithDeadline(b []byte, deadline time.Time) (n int, er
 		// set-conn-deadline-then-Write pattern (sessionConn.Write), so a
 		// lingering future deadline is always overridden before reuse.
 	}
-	return s.writeConnLocked(b)
+	n, err = s.writeConnLocked(b)
+	if err != nil {
+		return n, err
+	}
+	// Drain the TLS record coalescer so the burst leaves in one socket
+	// write. Without this the caller believes the data is out while
+	// records sit in the coalescing buffer.
+	if s.flusher != nil {
+		if ferr := s.flusher.Flush(); ferr != nil {
+			return n, ferr
+		}
+	}
+	return n, nil
 }
 
 func (s *session) writeConnLocked(b []byte) (n int, err error) {

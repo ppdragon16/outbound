@@ -33,6 +33,7 @@ import (
 	"unsafe"
 
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/pkg/coalesce"
 	"github.com/daeuniverse/outbound/protocol"
 	utls "github.com/refraction-networking/utls"
 
@@ -195,7 +196,13 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c net.
 			KeyLogWriter:           x.infoWriter,
 		}
 		uConn.ServerName = utlsConfig.ServerName
-		uConn.UConn = utls.UClient(c, utlsConfig, *x.fingerprint)
+		// Coalesce the TLS records of one write burst into one socket
+		// write; the verified tunnel relays through this same conn.
+		// BuildHandshakeState and the hello mutations below all happen in
+		// memory before any write, so the coalescer never sees a partial
+		// ClientHello. (Port of koutbound e3596a5.)
+		co := coalesce.New(c)
+		uConn.UConn = utls.UClient(co, utlsConfig, *x.fingerprint)
 		{
 			err = uConn.BuildHandshakeState()
 			if err != nil {
@@ -329,7 +336,7 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c net.
 			time.Sleep(time.Duration(randBetween(x.spiderY[8], x.spiderY[9])) * time.Millisecond) // return
 			return nil, errors.New("REALITY: processed invalid connection")
 		}
-		return uConn, nil
+		return coalesce.NewFlushConn(uConn, co), nil
 
 	case "udp":
 		return nil, fmt.Errorf("%w: Reality+udp", netproxy.UnsupportedTunnelTypeError)

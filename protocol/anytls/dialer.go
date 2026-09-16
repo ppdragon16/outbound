@@ -14,6 +14,7 @@ import (
 	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/pkg/coalesce"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
 )
@@ -298,7 +299,11 @@ func (d *Dialer) dialNewSession(ctx context.Context) (*session, error) {
 		return nil, err
 	}
 
-	tlsConn := utls.Client(conn, d.tlsConfig)
+	// Coalesce the TLS records of one write burst into one socket write;
+	// the session drains the coalescer after each framed burst. (Port of
+	// koutbound 723da22.)
+	co := coalesce.New(conn)
+	tlsConn := utls.Client(co, d.tlsConfig)
 
 	buf := pool.GetBuffer(len(d.key) + 2)
 	defer pool.PutBuffer(buf)
@@ -308,9 +313,16 @@ func (d *Dialer) dialNewSession(ctx context.Context) (*session, error) {
 		tlsConn.Close()
 		return nil, err
 	}
+	// The auth write must leave before the session's first read: drain
+	// explicitly rather than relying on the coalescer's read-flush hook.
+	if err := co.Flush(); err != nil {
+		tlsConn.Close()
+		return nil, err
+	}
 
 	seq := d.sessionCounter.Add(1)
 	s := newSession(tlsConn, seq)
+	s.flusher = co
 	s.heartbeatInterval = d.heartbeatInterval
 	s.idleSince = time.Now()
 	s.dialLatency = time.Since(start)
