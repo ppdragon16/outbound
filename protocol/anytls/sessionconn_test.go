@@ -171,9 +171,11 @@ func serverNextEvent(t *testing.T, conn net.Conn) frameEvent {
 
 // newSessionAsConnDialer builds a session-as-conn dialer against proxyAddr.
 // It constructs Dialer directly (same package) so tests run deterministically:
-// minIdleSession=0 disables background replenishment (NewDialer would always
-// apply a positive default and open connections behind the test's back) and
-// heartbeatInterval=0 silences the heartbeat goroutine.
+// minIdleSession=1 gives a one-slot pool while never triggering background
+// replenishment (the trigger needs idleCount < minIdleSession/2, and 1/2 == 0
+// is never below zero idle sessions); minIdleSession=0 would now disable
+// pooling outright, breaking the reuse assertions below. heartbeatInterval=0
+// silences the heartbeat goroutine.
 func newSessionAsConnDialer(t *testing.T, proxyAddr string) netproxy.Dialer {
 	t.Helper()
 	sum := sha256.Sum256([]byte("testpass"))
@@ -188,7 +190,7 @@ func newSessionAsConnDialer(t *testing.T, proxyAddr string) netproxy.Dialer {
 		sessions:                 make(map[uint64]*session),
 		idleSessions:             make(map[uint64]*session),
 		sessionAsConn:            true,
-		minIdleSession:           0,
+		minIdleSession:           1,
 		idleSessionCheckInterval: 200 * time.Millisecond, // NewTicker requires > 0
 		idleSessionTimeout:       time.Hour,              // no reaping during a test
 		ctx:                      ctx,
@@ -239,6 +241,47 @@ func expectRead(t *testing.T, conn net.Conn, n int) []byte {
 // receive path, server FIN -> EOF, close returning the session to the pool,
 // checkout probe (heartbeat), and reuse of the same TLS connection for a
 // second request with a new stream id.
+// TestMinIdleSessionZeroDisablesPool verifies the explicit-disable semantics:
+// minIdleSession=0 closes a session as soon as it goes idle, so the idle pool
+// stays empty and the next dial opens a fresh TLS connection.
+func TestMinIdleSessionZeroDisablesPool(t *testing.T) {
+	ts := newTestServer(t)
+	d := newSessionAsConnDialer(t, ts.ln.Addr().String())
+	dd := d.(*Dialer)
+	dd.mu.Lock()
+	dd.minIdleSession = 0
+	dd.mu.Unlock()
+	ctx := context.Background()
+
+	conn, err := d.DialContext(ctx, "tcp", "target.example.com:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := ts.Accept(t)
+	if ev := serverNextEvent(t, tc); ev.cmd != cmdSYN {
+		t.Fatalf("expected SYN, got cmd=%d", ev.cmd)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pool must stay empty: the session was closed on idle, not returned.
+	dd.mu.Lock()
+	n := len(dd.idleSessions)
+	dd.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("idle pool should be empty with minIdleSession=0, got %d sessions", n)
+	}
+
+	// The next dial must open a brand-new TLS connection (no reuse).
+	conn2, err := d.DialContext(ctx, "tcp", "target.example.com:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn2.Close() }()
+	ts.Accept(t) // must observe a second TCP+TLS connection
+}
+
 func TestSessionAsConnBasicAndReuse(t *testing.T) {
 	ts := newTestServer(t)
 	d := newSessionAsConnDialer(t, ts.ln.Addr().String())

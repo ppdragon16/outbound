@@ -13,7 +13,12 @@ import (
 type Feature1 struct {
 	IdleSessionCheckInterval time.Duration
 	IdleSessionTimeout       time.Duration
-	MinIdleSession           int
+	// MinIdleSession is the target idle-session pool watermark. nil means
+	// "not configured" and falls back to DefaultMinIdleSession (10). A
+	// pointer to 0 (or to a negative value, treated the same) disables the
+	// idle pool entirely: sessions are closed as soon as they go idle and
+	// never replenished.
+	MinIdleSession *int
 	// SessionAsConn switches TCP dialing to the session-as-conn fast path:
 	// the checked-out session is handed to the caller as a net.Conn and its
 	// TCP stream is consumed inline by sessionConn.Read (no run() dispatch

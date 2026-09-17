@@ -81,8 +81,14 @@ func NewDialer(ParentDialer netproxy.Dialer, header protocol.Header) (netproxy.D
 		if f.IdleSessionTimeout > 0 {
 			idleTimeout = f.IdleSessionTimeout
 		}
-		if f.MinIdleSession > 0 {
-			minIdle = f.MinIdleSession
+		// nil = not configured → default watermark. An explicit value of 0
+		// (or negative, normalized to 0) disables the idle pool: sessions
+		// close when they go idle and are never replenished.
+		if f.MinIdleSession != nil {
+			minIdle = *f.MinIdleSession
+			if minIdle < 0 {
+				minIdle = 0
+			}
 		}
 		sessionAsConn = f.SessionAsConn
 	}
@@ -422,6 +428,14 @@ func (d *Dialer) replenish() {
 func (d *Dialer) manageSession(s *session, seq uint64) {
 	for range s.closeStreamChan {
 		if s.closed.Load() {
+			break
+		}
+		if d.minIdleSession <= 0 {
+			// Idle pool disabled: close the session as soon as it goes
+			// idle instead of pooling it. Close trips s.closed and shuts
+			// closeStreamChan, so the loop exits and the cleanup below
+			// runs.
+			s.Close()
 			break
 		}
 		d.mu.Lock()

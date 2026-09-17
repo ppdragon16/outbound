@@ -28,7 +28,10 @@ type Anytls struct {
 
 	IdleSessionCheckInterval time.Duration
 	IdleSessionTimeout       time.Duration
-	MinIdleSession           int
+	// MinIdleSession is nil unless `minIdleSession` was present in the
+	// link. nil = default watermark (10); 0 or negative = idle pool
+	// disabled.
+	MinIdleSession *int
 	// SessionAsConn enables the session-as-conn fast path. Default true:
 	// only an explicit `mode=stream` query parameter opts back into the
 	// classic stream path.
@@ -73,15 +76,21 @@ func parseAnytlsURL(link string) (*Anytls, error) {
 
 	// Parse idle session configuration (optional).
 	var idleCheckInterval, idleTimeout time.Duration
-	var minIdleSession int
+	var minIdleSession *int
 	if s := u.Query().Get("idleCheckInterval"); s != "" {
 		idleCheckInterval, _ = time.ParseDuration(s)
 	}
 	if s := u.Query().Get("idleTimeout"); s != "" {
 		idleTimeout, _ = time.ParseDuration(s)
 	}
+	// Presence of the key is what matters: `minIdleSession=0` (or a
+	// negative value) explicitly disables the idle pool, while omitting
+	// the key keeps the default watermark. A malformed value is ignored
+	// (falls back to the default) rather than silently disabling the pool.
 	if s := u.Query().Get("minIdleSession"); s != "" {
-		minIdleSession, _ = strconv.Atoi(s)
+		if v, err := strconv.Atoi(s); err == nil {
+			minIdleSession = &v
+		}
 	}
 
 	// The session-as-conn fast path is the default; an explicit
