@@ -187,7 +187,17 @@ func (d *Dialer) getStreamSession(ctx context.Context) (*session, error) {
 	d.udpMu.Lock()
 	defer d.udpMu.Unlock()
 	if d.udpSession != nil && !d.udpSession.Closed() {
-		return d.udpSession, nil
+		// Probe before reuse, mirroring the TCP idle pool: a silently dead
+		// underlying connection (blackholed TCP — no FIN/RST yet) never sets
+		// the local closed flag, so every UDP ListenPacket would otherwise
+		// keep binding to the same dead session and QUIC/HTTP-3 traffic
+		// would blackhole without a single error surfacing.
+		if err := d.udpSession.Probe(); err != nil {
+			d.udpSession.Close()
+			d.udpSession = nil
+		} else {
+			return d.udpSession, nil
+		}
 	}
 	s, err := d.createSessionWithRun(ctx)
 	if err != nil {
