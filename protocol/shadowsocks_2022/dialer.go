@@ -30,7 +30,10 @@ type Dialer struct {
 }
 
 func NewDialer(parentDialer netproxy.Dialer, header protocol.Header) (netproxy.Dialer, error) {
-	conf := ciphers.Aead2022CiphersConf[header.Cipher]
+	conf, ok := ciphers.Aead2022CiphersConf[header.Cipher]
+	if !ok {
+		return nil, fmt.Errorf("shadowsocks 2022: unsupported cipher %q", header.Cipher)
+	}
 	keyStrList := strings.Split(header.Password, ":")
 	pskList := make([][]byte, len(keyStrList))
 	for i, keyStr := range keyStrList {

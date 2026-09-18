@@ -1,6 +1,7 @@
 package shadowsocks_2022
 
 import (
+	"bytes"
 	"crypto/cipher"
 	"encoding/binary"
 	"fmt"
@@ -45,6 +46,14 @@ type TCPConn struct {
 	onceRead    bool
 	onceWrite   bool
 	writeBroken bool
+
+	// requestSalt is the salt this client sent with its request stream. The
+	// response fixed-length header echoes it and SIP022 §3.1.3 requires the
+	// client to check the echoed value against the request salt, which binds
+	// a response stream to this request. Guarded by saltMu because the first
+	// Read and first Write may run on different goroutines.
+	requestSalt []byte
+	saltMu      sync.RWMutex
 
 	nonceRead        [12]byte
 	nonceWrite       [12]byte
@@ -150,6 +159,19 @@ func (c *TCPConn) Read(b []byte) (n int, err error) {
 			if c.bloom.ExistOrAdd(salt) {
 				return 0, protocol.ErrReplayAttack
 			}
+		}
+
+		// SIP022 §3.1.3: the client MUST check the request salt echoed in
+		// the response header against the salt it sent, which binds the
+		// response stream to this request. The echo lives between the
+		// timestamp and the payload length in the fixed header.
+		c.saltMu.RLock()
+		sent := c.requestSalt
+		matched := len(sent) == c.cipherConf.SaltLen &&
+			bytes.Equal(sent, header[offset:offset+c.cipherConf.SaltLen])
+		c.saltMu.RUnlock()
+		if !matched {
+			return 0, protocol.ErrFailAuth
 		}
 
 		// Skip request salt
@@ -263,6 +285,9 @@ func (c *TCPConn) Write(b []byte) (n int, err error) {
 		// --- A. Salt ---
 		salt := buf[curr : curr+c.cipherConf.SaltLen]
 		c.sg.Get(salt)
+		c.saltMu.Lock()
+		c.requestSalt = append(c.requestSalt[:0], salt...)
+		c.saltMu.Unlock()
 		curr += c.cipherConf.SaltLen
 
 		// 初始化会话加密器
