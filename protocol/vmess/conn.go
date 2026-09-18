@@ -241,12 +241,22 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			if err != nil {
 				return 0, err
 			}
-			c.dialTgtAddrPort = tgt.AddrPort()
+			c.dialTgtAddrPort = unmapAddrPort(tgt.AddrPort())
 		}
 		return c.WriteTo(b, net.UDPAddrFromAddrPort(c.dialTgtAddrPort))
 	} else {
 		return c.write(b)
 	}
+}
+
+// unmapAddrPort normalizes the v4-in-v6 form a 16-byte net.IP yields
+// (::ffff:a.b.c.d). Without this, fixed-target datagram sources report as
+// [::ffff:a.b.c.d]:p instead of the canonical a.b.c.d:p, and packet-addr
+// writes would encode an IPv4 target with the IPv6 address type. Unmap is
+// the identity for IPv6 and clean IPv4 addresses, so only the mapped form
+// changes.
+func unmapAddrPort(ap netip.AddrPort) netip.AddrPort {
+	return netip.AddrPortFrom(ap.Addr().Unmap(), ap.Port())
 }
 
 // Writes data to the connection. Empty b should be written before closing the connection to indicate the terminal.

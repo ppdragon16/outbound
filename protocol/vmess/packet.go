@@ -50,7 +50,7 @@ func (c *Conn) ReadFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error
 			if err != nil {
 				return 0, netip.AddrPort{}, err
 			}
-			c.dialTgtAddrPort = tgt.AddrPort()
+			c.dialTgtAddrPort = unmapAddrPort(tgt.AddrPort())
 		}
 		copy(p, buf[:n])
 		return n, c.dialTgtAddrPort, err
