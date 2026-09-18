@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/pool"
 )
 
 // Conn sits between crypto/tls and the real socket. crypto/tls writes
@@ -50,8 +51,19 @@ func New(c net.Conn) *Conn {
 
 // Write accumulates ciphertext and reports full success. The bytes are copied
 // because crypto/tls reuses its record output buffers after Write returns.
+//
+// The backing storage comes from pool.GetBuffer and is returned to the pool on
+// every Flush, so buffers recycle across connections instead of each TLS
+// connection keeping a burst-sized allocation alive until GC (the top
+// alloc_space site in dae_ppdn heap profiles: coalesce.(*Conn).Write). The
+// buffer is never append-grown past its pooled capacity: growth goes through
+// swapBuf so pooled slices keep their power-of-2 cap, as pool.PutBuffer
+// requires.
 func (c *Conn) Write(p []byte) (int, error) {
 	c.mu.Lock()
+	if len(c.buf)+len(p) > cap(c.buf) {
+		c.swapBuf(len(c.buf) + len(p))
+	}
 	c.buf = append(c.buf, p...)
 	n := len(c.buf)
 	c.mu.Unlock()
@@ -65,6 +77,24 @@ func (c *Conn) Write(p []byte) (int, error) {
 
 const bufHardLimit = 128 << 10
 
+// swapBuf replaces the backing buffer with a pooled one of at least n bytes,
+// preserving any pending bytes. Called with c.mu held.
+func (c *Conn) swapBuf(n int) {
+	newBuf := pool.GetBuffer(n)[:len(c.buf)]
+	copy(newBuf, c.buf)
+	c.release()
+	c.buf = newBuf
+}
+
+// release returns the backing buffer to the pool and empties the view.
+// Called with c.mu held.
+func (c *Conn) release() {
+	if c.buf != nil {
+		pool.PutBuffer(c.buf[:cap(c.buf)])
+		c.buf = nil
+	}
+}
+
 // Flush writes accumulated records with a single socket write.
 func (c *Conn) Flush() error {
 	c.mu.Lock()
@@ -73,11 +103,11 @@ func (c *Conn) Flush() error {
 		return nil
 	}
 	if wd := c.wdNano.Load(); wd != 0 && !time.Unix(0, wd).After(time.Now()) {
-		c.buf = c.buf[:0]
+		c.release()
 		return os.ErrDeadlineExceeded
 	}
 	_, err := c.Conn.Write(c.buf)
-	c.buf = c.buf[:0]
+	c.release()
 	return err
 }
 

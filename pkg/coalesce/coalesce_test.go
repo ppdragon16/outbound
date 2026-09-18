@@ -178,3 +178,61 @@ func TestCloseNotDeadlockedByBlockedFlush(t *testing.T) {
 		t.Fatal("Close() deadlocked behind a blocked flush")
 	}
 }
+
+// TestCoalescePooledBufferRecycled verifies the pooled backing storage: after a
+// Flush the buffer goes back to the pool, the next burst re-arms from a pooled
+// slice, and bursts larger than the current capacity swap to a bigger
+// power-of-2 pooled buffer without ever append-growing a pooled slice (which
+// would break pool.PutBuffer's power-of-2 cap contract).
+func TestCoalescePooledBufferRecycled(t *testing.T) {
+	raw := &halfCloseConn{}
+	co := New(raw)
+
+	// First burst: lazily arms a pooled buffer.
+	if _, err := co.Write(make([]byte, 1000)); err != nil {
+		t.Fatal(err)
+	}
+	if err := co.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Second burst after flush: must re-arm cleanly and merge again.
+	if _, err := co.Write(make([]byte, 4000)); err != nil {
+		t.Fatal(err)
+	}
+	// Third write crossing the current capacity: must swap, not append-grow.
+	if _, err := co.Write(make([]byte, 40000)); err != nil {
+		t.Fatal(err)
+	}
+	if err := co.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	var got int
+	for _, w := range raw.writes {
+		got += len(w)
+	}
+	if got != 1000+4000+40000 {
+		t.Fatalf("flushed %d bytes, want %d", got, 1000+4000+40000)
+	}
+
+	// Error-path flush (expired deadline) must also release the buffer.
+	_ = co.SetWriteDeadline(time.Now().Add(-time.Second))
+	if _, err := co.Write([]byte("late")); err != nil {
+		t.Fatal(err)
+	}
+	if err := co.Flush(); err != os.ErrDeadlineExceeded {
+		t.Fatalf("Flush err = %v, want ErrDeadlineExceeded", err)
+	}
+	// The dropped bytes must not reappear in a later flush.
+	_ = co.SetWriteDeadline(time.Time{})
+	if err := co.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	var after int
+	for _, w := range raw.writes {
+		after += len(w)
+	}
+	if after != got {
+		t.Fatalf("dropped bytes leaked into a later flush: %d -> %d", got, after)
+	}
+}
