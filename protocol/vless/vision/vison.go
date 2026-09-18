@@ -40,36 +40,47 @@ func NewConn(conn net.Conn, userUUID []byte) (*Conn, error) {
 	c.reader = &readWrapper{
 		vision: c,
 	}
+	// Unwrap intermediate wrappers (vless.Conn, the TLS read coalescer's
+	// FlushConn, fragment conns, ...) until we reach the actual TLS/REALITY
+	// connection. Each wrapper exposes IntrinsicConn() returning its child;
+	// the TLS types are terminal leaves and do not implement it. The walk is
+	// bounded so a misbehaving wrapper cannot hang the dial path.
+	ic := conn
+	for i := 0; ; i++ {
+		iconn, ok := ic.(interface{ IntrinsicConn() net.Conn })
+		if !ok {
+			break
+		}
+		if i >= 16 {
+			return nil, fmt.Errorf("XTLS intrinsic conn unwrap exceeded depth limit: %T", ic)
+		}
+		ic = iconn.IntrinsicConn()
+	}
 	var t reflect.Type
 	var p unsafe.Pointer
-	if iconn, ok := conn.(interface{ IntrinsicConn() net.Conn }); ok {
-		ic := iconn.IntrinsicConn()
-		if tlsConn, ok := ic.(*utls.Conn); ok {
-			c.Conn = tlsConn.NetConn()
-			c.tlsConn = tlsConn
-			t = reflect.TypeOf(tlsConn).Elem()
-			p = unsafe.Pointer(tlsConn)
-		} else if tlsConn, ok := ic.(*xtls.Conn); ok {
-			c.Conn = tlsConn.NetConn()
-			c.tlsConn = tlsConn
-			t = reflect.TypeOf(tlsConn).Elem()
-			p = unsafe.Pointer(tlsConn)
-		} else if utlsConn, ok := ic.(*utls.UConn); ok {
-			c.Conn = utlsConn.NetConn()
-			c.tlsConn = utlsConn
-			t = reflect.TypeOf(utlsConn.Conn).Elem()
-			p = unsafe.Pointer(utlsConn.Conn)
-		} else if realityConn, ok := ic.(*tls.RealityUConn); ok {
-			// logrus.Infoln("realityConn")
-			c.Conn = realityConn.NetConn()
-			c.tlsConn = realityConn.UConn
-			t = reflect.TypeOf(realityConn.Conn).Elem()
-			p = unsafe.Pointer(realityConn.Conn)
-		} else {
-			return nil, fmt.Errorf("XTLS only supports TLS and REALITY directly for now: %T", ic)
-		}
+	if tlsConn, ok := ic.(*utls.Conn); ok {
+		c.Conn = tlsConn.NetConn()
+		c.tlsConn = tlsConn
+		t = reflect.TypeOf(tlsConn).Elem()
+		p = unsafe.Pointer(tlsConn)
+	} else if tlsConn, ok := ic.(*xtls.Conn); ok {
+		c.Conn = tlsConn.NetConn()
+		c.tlsConn = tlsConn
+		t = reflect.TypeOf(tlsConn).Elem()
+		p = unsafe.Pointer(tlsConn)
+	} else if utlsConn, ok := ic.(*utls.UConn); ok {
+		c.Conn = utlsConn.NetConn()
+		c.tlsConn = utlsConn
+		t = reflect.TypeOf(utlsConn.Conn).Elem()
+		p = unsafe.Pointer(utlsConn.Conn)
+	} else if realityConn, ok := ic.(*tls.RealityUConn); ok {
+		// logrus.Infoln("realityConn")
+		c.Conn = realityConn.NetConn()
+		c.tlsConn = realityConn.UConn
+		t = reflect.TypeOf(realityConn.Conn).Elem()
+		p = unsafe.Pointer(realityConn.Conn)
 	} else {
-		return nil, fmt.Errorf("XTLS only supports TLS and REALITY directly for now: %T", conn)
+		return nil, fmt.Errorf("XTLS only supports TLS and REALITY directly for now: %T", ic)
 	}
 	i, _ := t.FieldByName("input")
 	r, _ := t.FieldByName("rawInput")
