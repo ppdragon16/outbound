@@ -81,6 +81,16 @@ func NewWs(link string) (dialer.Dialer, *dialer.Property, error) {
 		Alpn:     query.Get("alpn"),
 		Sni:      query.Get("sni"),
 	}
+	// The V2Ray share format carries the ws path as the "path" query param
+	// (e.g. ...&type=ws&path=%2Fcustom), not as the URL path. Without this
+	// fallback the dial goes to "/" and CDN-fronted nodes fail the upgrade
+	// (301/403) with a bare "websocket: bad handshake".
+	if t.Path == "" {
+		t.Path = query.Get("path")
+	}
+	if t.Path != "" && !strings.HasPrefix(t.Path, "/") {
+		t.Path = "/" + t.Path
+	}
 
 	if t.Hostname == "" {
 		t.Hostname = u.Hostname()
