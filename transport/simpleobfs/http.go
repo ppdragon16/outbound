@@ -6,7 +6,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -25,11 +24,16 @@ type HTTPObfs struct {
 	path          string
 	buf           []byte
 	offset        int
+	headerBuf     []byte // accumulates the first response until "\r\n\r\n" arrives
 	firstRequest  bool
 	firstResponse bool
 	wMu           sync.Mutex
 	rMu           sync.Mutex
 }
+
+// maxResponseHeaderSize bounds how many terminator-less bytes the first
+// response may accumulate before the peer is declared misbehaving.
+const maxResponseHeaderSize = 8192
 
 // CloseWrite forwards the half-close to the inner conn so a relay FIN
 // propagates through the obfs layer as a transport FIN.
@@ -54,27 +58,42 @@ func (ho *HTTPObfs) Read(b []byte) (int, error) {
 	}
 
 	if ho.firstResponse {
-		buf := pool.GetBuffer(1 << 15)
-		n, err := ho.Conn.Read(buf)
-		if err != nil {
+		for {
+			// readFirstResponse: the "\r\n\r\n"-terminated header may straddle
+			// TCP segments, and a single read can carry the complete header
+			// plus kilobytes of body (the normal fast-relay case). Accumulate
+			// into headerBuf, search the JOINED buffer for the terminator
+			// BEFORE applying the size bound (a terminator hit is success, not
+			// an oversized header), and deliver the body bytes with the read.
+			buf := pool.GetBuffer(1 << 15)
+			n, err := ho.Conn.Read(buf)
+			if err != nil {
+				pool.PutBuffer(buf)
+				ho.headerBuf = nil
+				return 0, err
+			}
+			ho.headerBuf = append(ho.headerBuf, buf[:n]...)
 			pool.PutBuffer(buf)
-			return 0, err
+			idx := bytes.Index(ho.headerBuf, []byte("\r\n\r\n"))
+			if idx == -1 {
+				if len(ho.headerBuf) > maxResponseHeaderSize {
+					ho.headerBuf = nil
+					return 0, fmt.Errorf("simple-obfs http: response header exceeds %d bytes", maxResponseHeaderSize)
+				}
+				continue
+			}
+			ho.firstResponse = false
+			body := ho.headerBuf[idx+4:]
+			n = copy(b, body)
+			if len(body) > n {
+				ho.buf = ho.headerBuf
+				ho.offset = idx + 4 + n
+			} else {
+				pool.PutBuffer(ho.headerBuf)
+				ho.headerBuf = nil
+			}
+			return n, nil
 		}
-		idx := bytes.Index(buf[:n], []byte("\r\n\r\n"))
-		if idx == -1 {
-			pool.PutBuffer(buf)
-			return 0, io.EOF
-		}
-		ho.firstResponse = false
-		length := n - (idx + 4)
-		n = copy(b, buf[idx+4:n])
-		if length > n {
-			ho.buf = buf[:idx+4+length]
-			ho.offset = idx + 4 + n
-		} else {
-			pool.PutBuffer(buf)
-		}
-		return n, nil
 	}
 	return ho.Conn.Read(b)
 }
