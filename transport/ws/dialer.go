@@ -227,6 +227,25 @@ func (s *Ws) DialContext(ctx context.Context, network, addr string) (c net.Conn,
 					InsecureSkipVerify: s.tlsClientConfig.InsecureSkipVerify,
 					RootCAs:            s.tlsClientConfig.RootCAs,
 				}, s.utlsID)
+				// Browser fingerprints carry their own ALPN extension (h2 +
+				// http/1.1) which OVERRIDES Config.NextProtos. Without this
+				// rewrite the server negotiates h2 and gorilla's HTTP/1.1
+				// upgrade reads h2 SETTINGS frames as "malformed HTTP
+				// response". Force the ALPN extension to our list and
+				// re-serialize the ClientHello.
+				if err := uConn.BuildHandshakeState(); err != nil {
+					c.Close()
+					return nil, err
+				}
+				for _, ext := range uConn.Extensions {
+					if alpn, ok := ext.(*utls.ALPNExtension); ok {
+						alpn.AlpnProtocols = s.alpn
+					}
+				}
+				if err := uConn.BuildHandshakeState(); err != nil {
+					c.Close()
+					return nil, err
+				}
 				if err := uConn.HandshakeContext(ctx); err != nil {
 					c.Close()
 					return nil, err
