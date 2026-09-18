@@ -16,6 +16,7 @@ import (
 	"github.com/daeuniverse/outbound/protocol"
 	transportTls "github.com/daeuniverse/outbound/transport/tls"
 	"github.com/gorilla/websocket"
+	utls "github.com/refraction-networking/utls"
 )
 
 func init() {
@@ -51,6 +52,18 @@ type Ws struct {
 	fragmentMaxLength   int64
 	fragmentMinInterval int64
 	fragmentMaxInterval int64
+
+	wssScheme bool
+	// utls fingerprint impersonation for the wss TLS layer. gorilla's own
+	// TLS is Go-stdlib-fingerprinted, which CDN-fronted endpoints (CF JA3
+	// scoring) single out; when utlsEnabled the wss dial is taken over via
+	// NetDialTLSContext and impersonates the chosen browser.
+	utlsEnabled bool
+	utlsID      utls.ClientHelloID
+	// alpn forced to http/1.1 unless the link overrides it: browser
+	// fingerprints advertise h2, and a server picking h2 breaks gorilla's
+	// HTTP/1.1 upgrade.
+	alpn []string
 }
 
 type WsConfig struct {
@@ -128,6 +141,7 @@ func (s *WsConfig) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer
 		StatelessDialer: protocol.StatelessDialer{
 			ParentDialer: nextDialer,
 		},
+		wssScheme:      s.Scheme == "wss",
 		wsAddr:         wsUrl.String(),
 		passthroughUdp: s.PassthroughUdp,
 		header:         http.Header{},
@@ -140,13 +154,18 @@ func (s *WsConfig) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer
 	// Keep the WebSocket handshake consistent with the impersonated TLS
 	// fingerprint: a Chrome ClientHello paired with the Go default UA is
 	// linkable across layers.
-	if id, err := transportTls.NameToUtlsClientHelloID(option.UtlsImitate); err == nil {
+	if id, err := transportTls.NameToUtlsClientHelloID(option.UtlsImitate); err == nil && id != nil {
 		ua.ApplyTo(ws.header, id)
+		ws.utlsEnabled = true
+		ws.utlsID = *id
 	} else {
 		ua.ApplyTo(ws.header, nil)
 	}
+	// Force http/1.1 ALPN: browser ClientHellos advertise h2+h1 and the
+	// server would negotiate h2, which gorilla's upgrade cannot speak.
+	ws.alpn = []string{"http/1.1"}
 	if len(s.Alpn) > 0 {
-		ws.tlsClientConfig.NextProtos = strings.Split(s.Alpn, ",")
+		ws.alpn = strings.Split(s.Alpn, ",")
 	}
 	if option.TlsFragment {
 		ws.tlsFragmentation = true
@@ -169,20 +188,51 @@ func (s *WsConfig) Dialer(option *dialer.ExtraOption, nextDialer netproxy.Dialer
 func (s *Ws) DialContext(ctx context.Context, network, addr string) (c net.Conn, err error) {
 	switch network {
 	case "tcp":
+		rawDial := func(ctx context.Context, addr string) (net.Conn, error) {
+			c, err := s.ParentDialer.DialContext(ctx, "tcp", addr)
+			if err != nil {
+				return nil, err
+			}
+			if s.tlsFragmentation {
+				c = transportTls.NewFragmentConn(c, s.fragmentMinLength, s.fragmentMaxLength, s.fragmentMinInterval, s.fragmentMaxInterval)
+			}
+			return c, nil
+		}
 		wsDialer := &websocket.Dialer{
 			NetDial: func(_, addr string) (net.Conn, error) {
-				c, err := s.ParentDialer.DialContext(ctx, network, addr)
+				return rawDial(ctx, addr)
+			},
+			TLSClientConfig: s.tlsClientConfig,
+		}
+		// Take the wss TLS layer over with utls when a known fingerprint is
+		// configured: NetDialTLSContext replaces gorilla's stdlib-TLS dial
+		// entirely (SNI/verify config is carried over below). Without this,
+		// the outer TLS is Go-stdlib-fingerprinted no matter what fp= says.
+		if s.wssScheme && s.utlsEnabled {
+
+			wsDialer.NetDialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				c, err := rawDial(ctx, addr)
 				if err != nil {
 					return nil, err
 				}
-
-				if s.tlsFragmentation {
-					c = transportTls.NewFragmentConn(c, s.fragmentMinLength, s.fragmentMaxLength, s.fragmentMinInterval, s.fragmentMaxInterval)
+				serverName := s.tlsClientConfig.ServerName
+				if serverName == "" {
+					if host, _, serr := net.SplitHostPort(addr); serr == nil {
+						serverName = host
+					}
 				}
-
-				return c, nil
-			},
-			TLSClientConfig: s.tlsClientConfig,
+				uConn := utls.UClient(c, &utls.Config{
+					ServerName:         serverName,
+					NextProtos:         s.alpn,
+					InsecureSkipVerify: s.tlsClientConfig.InsecureSkipVerify,
+					RootCAs:            s.tlsClientConfig.RootCAs,
+				}, s.utlsID)
+				if err := uConn.HandshakeContext(ctx); err != nil {
+					c.Close()
+					return nil, err
+				}
+				return uConn, nil
+			}
 		}
 		rc, _, err := wsDialer.DialContext(ctx, s.wsAddr, s.header)
 		if err != nil {
