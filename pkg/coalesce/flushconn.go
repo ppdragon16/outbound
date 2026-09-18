@@ -31,6 +31,18 @@ func (f *FlushConn) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// IntrinsicConn forwards the wrapper-peeling convention so callers that need
+// the TLS/REALITY conn itself (notably XTLS/Vision) reach it through this
+// layer. Without the forward, vision's type assert stops at *FlushConn and
+// every vless vision node fails with "XTLS only supports TLS and REALITY
+// directly for now: *coalesce.FlushConn".
+func (f *FlushConn) IntrinsicConn() net.Conn {
+	if ic, ok := f.Conn.(interface{ IntrinsicConn() net.Conn }); ok {
+		return ic.IntrinsicConn()
+	}
+	return f.Conn
+}
+
 // CloseWrite forwards half-close and then flushes the coalesced records that
 // carried it. crypto/tls.Conn implements CloseWrite, but the promoted method
 // set of an embedded net.Conn does not include it, so without this forward
