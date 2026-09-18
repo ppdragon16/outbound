@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -19,7 +20,18 @@ type Params struct {
 	Method, Passwd, Address, Port string
 }
 
+// Both tests dial a real juicity server (example.com:50001 is a placeholder
+// nobody serves on) and cannot pass in offline or CI environments. They are
+// manual integration tests: set JUICITY_INTEGRATION=1 and point the address
+// below at a live server to run them.
+func requireLiveServer(t *testing.T) {
+	if os.Getenv("JUICITY_INTEGRATION") == "" {
+		t.Skip("integration test against a live juicity server; set JUICITY_INTEGRATION=1 to run")
+	}
+}
+
 func TestTcp(t *testing.T) {
+	requireLiveServer(t)
 	d, err := NewDialer(direct.Direct, protocol.Header{
 		ProxyAddress: "example.com:50001",
 		SNI:          "",
@@ -53,6 +65,7 @@ func TestTcp(t *testing.T) {
 }
 
 func TestUdp(t *testing.T) {
+	requireLiveServer(t)
 	d, err := NewDialer(direct.Direct, protocol.Header{
 		ProxyAddress: "example.com:50001",
 		SNI:          "",

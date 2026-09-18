@@ -5,6 +5,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"os"
 	"testing"
 
 	"github.com/daeuniverse/outbound/protocol"
@@ -15,8 +16,15 @@ type Params struct {
 	Method, Passwd, Address, Port string
 }
 
+func requireLiveServer(t *testing.T) {
+	if os.Getenv("OUTBOUND_LIVE_SERVER_TESTS") == "" {
+		t.Skip("integration test against a live proxy server; set the env var to run")
+	}
+}
+
+// https://github.com/winterssy/SSR-Docker
 func TestNewSSStream(t *testing.T) {
-	// https://github.com/winterssy/SSR-Docker
+	requireLiveServer(t)
 
 	params := Params{
 		Method:  "aes-256-cfb",

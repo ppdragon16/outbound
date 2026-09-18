@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -16,7 +17,14 @@ import (
 	"github.com/daeuniverse/outbound/transport/shadowsocksr/proto"
 )
 
+func requireLiveServer(t *testing.T) {
+	if os.Getenv("OUTBOUND_LIVE_SERVER_TESTS") == "" {
+		t.Skip("integration test against a live SSR docker; set OUTBOUND_LIVE_SERVER_TESTS=1 to run")
+	}
+}
+
 func TestTcp(t *testing.T) {
+	requireLiveServer(t)
 	// https://github.com/winterssy/SSR-Docker
 	// Remember to set protocol_param to 3000# (max_client)
 	d := direct.NewDirectDialer(direct.Option{})
@@ -62,6 +70,7 @@ func TestTcp(t *testing.T) {
 }
 
 func TestUdp(t *testing.T) {
+	requireLiveServer(t)
 	// https://github.com/winterssy/SSR-Docker
 	// Remember to set protocol_param to 3000# (max_client)
 	d := direct.NewDirectDialer(direct.Option{})

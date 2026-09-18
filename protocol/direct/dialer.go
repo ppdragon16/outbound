@@ -13,9 +13,12 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 )
 
-var (
-	Direct netproxy.Dialer
-)
+// Direct is the default direct dialer. It is initialized here so callers
+// that use the package without InitDirectDialers (standalone tests, tools)
+// get a working zero-option dialer instead of a nil interface that panics on
+// first use; InitDirectDialers replaces it with the process-wide options
+// (fallback DNS, mptcp, fwmark) during daemon startup.
+var Direct netproxy.Dialer = NewDirectDialer(Option{})
 
 func InitDirectDialers(fallbackDNS string, mptcp bool, mark int) {
 	Direct = NewDirectDialer(Option{FallbackDNS: fallbackDNS, Mptcp: mptcp, Mark: mark})

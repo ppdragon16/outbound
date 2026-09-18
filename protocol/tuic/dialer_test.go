@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 
@@ -19,7 +20,14 @@ type Params struct {
 	Method, Passwd, Address, Port string
 }
 
+func requireLiveServer(t *testing.T) {
+	if os.Getenv("OUTBOUND_LIVE_SERVER_TESTS") == "" {
+		t.Skip("integration test against a live proxy server; set the env var to run")
+	}
+}
+
 func TestTcp(t *testing.T) {
+	requireLiveServer(t)
 	d, err := NewDialer(direct.Direct, protocol.Header{
 		ProxyAddress: "example.com:10383",
 		SNI:          "",
@@ -54,6 +62,7 @@ func TestTcp(t *testing.T) {
 }
 
 func TestUdp(t *testing.T) {
+	requireLiveServer(t)
 	d, err := NewDialer(direct.Direct, protocol.Header{
 		ProxyAddress: "example.com:10383",
 		SNI:          "",
