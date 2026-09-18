@@ -80,11 +80,17 @@ type sessionConn struct {
 	// never re-enter the idle pool, or every later request on it reads a
 	// shifted frame stream ("invalid cmd").
 	readHadError atomic.Bool
-	// readEnter tracks the in-flight Read call. dae's relay loop bounds each
-	// Read with a deadline and closes the conn while the peer-direction
-	// reader may still be unwinding, so Close must wait for the in-flight
-	// reader to exit before trusting the state above.
-	readEnter sync.WaitGroup
+	// Read/Close mutual exclusion. Read holds readMu across its whole body
+	// — including the blocking conn reads — so Close can only inspect the
+	// reassembly state after the in-flight Read has fully exited. A mutex
+	// alone would make Close wait out the read's idle timeout (up to
+	// DefaultTCPIdleTimeout), so Close evicts the parked Read first:
+	// SetReadDeadline(now) MUST stay before the lock — moving it inside
+	// deadlocks Close against the very read it needs to interrupt.
+	// Single-reader invariant: exactly one goroutine (dae's r2l relay)
+	// calls Read; the mutex only serializes that reader against Close.
+	readMu sync.Mutex
+	closed bool
 
 	// halfClosedDeadline is the read-deadline ceiling armed by CloseWrite,
 	// stored as unix nanos (0 = not half-closed). Every later
@@ -155,9 +161,13 @@ func (c *sessionConn) Read(b []byte) (n int, err error) {
 	if len(b) == 0 {
 		return 0, nil
 	}
-	c.readEnter.Add(1)
-	defer c.readEnter.Done()
-	if c.dead.Load() {
+	// Hold the mutex for the whole Read, blocking reads included, so Close
+	// can never inspect reassembly state mid-read. Close evicts the parked
+	// Read via SetReadDeadline(now) before locking, so contention lasts
+	// microseconds, not the read's idle timeout.
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+	if c.closed || c.dead.Load() {
 		return 0, net.ErrClosed
 	}
 	// A previous error already broke frame alignment: allow no further
@@ -322,13 +332,20 @@ func (c *sessionConn) Write(b []byte) (int, error) {
 func (c *sessionConn) Close() error {
 	var firstErr error
 	c.closeOnce.Do(func() {
-		// Refuse new Reads, then unblock any Read still in flight. dae's
-		// relay closes the conn while the peer-direction reader may still be
-		// blocked mid-frame, so the reassembly state is only safe to inspect
-		// after that reader exits.
-		c.dead.Store(true)
+		// Evict a Read parked mid-frame on the TCP stream BEFORE taking
+		// readMu: Read holds that mutex across its blocking conn reads, so
+		// locking first would stall Close until the read's idle timeout
+		// expires. The deadline makes the in-flight Read return at once,
+		// releasing the lock microseconds later. (Do not reorder.)
 		_ = c.conn.SetReadDeadline(time.Now())
-		c.readEnter.Wait()
+
+		c.readMu.Lock()
+		defer c.readMu.Unlock()
+		// The in-flight Read (if any) has exited; from here the reassembly
+		// state is safe to inspect. Post-Close Reads are rejected by the
+		// closed flag; dead is kept in lockstep for paths that check it.
+		c.closed = true
+		c.dead.Store(true)
 
 		// Two states leave the stream off a frame boundary and make the
 		// session unfit for the idle pool:
@@ -344,10 +361,17 @@ func (c *sessionConn) Close() error {
 				c.markDead()
 				return
 			}
-			// Tell the server this stream is done, best effort. The session
-			// (and its TCP connection) stays alive and returns to the pool.
-			if err := c.sendFin(); err != nil && firstErr == nil {
-				firstErr = err
+			// Tell the server this stream is done, best effort. A failed
+			// FIN can mean a partial frame on the wire — the stream is
+			// then mid-frame and the next checkout would parse garbage
+			// (the write path never sets readHadError), so the session
+			// must die here, not return to the pool.
+			if err := c.sendFin(); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				c.markDead()
+				return
 			}
 		}
 		// Return the session to the idle pool (also clears deadlines).

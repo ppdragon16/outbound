@@ -282,6 +282,65 @@ func TestMinIdleSessionZeroDisablesPool(t *testing.T) {
 	ts.Accept(t) // must observe a second TCP+TLS connection
 }
 
+// TestCloseAfterFailedFinDoesNotPool pins the FIN-failure contract: a failed
+// sendFin can leave a partial frame on the wire (the write path never sets
+// readHadError), so Close must mark the session dead instead of returning it
+// to the idle pool — otherwise the next checkout would parse a shifted frame
+// stream (cross-request "串台").
+func TestCloseAfterFailedFinDoesNotPool(t *testing.T) {
+	ts := newTestServer(t)
+	d := newSessionAsConnDialer(t, ts.ln.Addr().String())
+	ctx := context.Background()
+
+	conn, err := d.DialContext(ctx, "tcp", "target.example.com:80")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc := ts.Accept(t)
+	if ev := serverNextEvent(t, tc); ev.cmd != cmdSYN {
+		t.Fatalf("expected SYN, got cmd=%d", ev.cmd)
+	}
+
+	// Sabotage the write side only: the session looks perfectly healthy on
+	// the read side (no readHadError, no pending tail), so without the fix
+	// Close would still pool it.
+	sc := conn.(*sessionConn)
+	sc.session.conn = brokenWriteConn{Conn: sc.session.conn}
+
+	if err := conn.Close(); err == nil {
+		t.Fatal("expected Close to surface the FIN write failure")
+	}
+
+	// The session must be dead: never pooled, and reaped from d.sessions.
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		dd := d.(*Dialer)
+		dd.mu.Lock()
+		idle, total := len(dd.idleSessions), len(dd.sessions)
+		dd.mu.Unlock()
+		if idle == 0 && total == 0 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("session must be dead after a failed FIN (idle=%d, sessions=%d)",
+		func() int { dd := d.(*Dialer); dd.mu.Lock(); defer dd.mu.Unlock(); return len(dd.idleSessions) }(),
+		func() int { dd := d.(*Dialer); dd.mu.Lock(); defer dd.mu.Unlock(); return len(dd.sessions) }())
+}
+
+// brokenWriteConn fails every write (as a dead or saturated TCP conn would)
+// while keeping the rest of the Conn surface benign.
+type brokenWriteConn struct{ net.Conn }
+
+func (c brokenWriteConn) Write(p []byte) (int, error) {
+	return 0, errors.New("anytls test: broken write side")
+}
+func (c brokenWriteConn) Read(p []byte) (int, error)       { return 0, io.EOF }
+func (c brokenWriteConn) Close() error                     { return nil }
+func (c brokenWriteConn) SetDeadline(time.Time) error      { return nil }
+func (c brokenWriteConn) SetReadDeadline(time.Time) error  { return nil }
+func (c brokenWriteConn) SetWriteDeadline(time.Time) error { return nil }
+
 func TestSessionAsConnBasicAndReuse(t *testing.T) {
 	ts := newTestServer(t)
 	d := newSessionAsConnDialer(t, ts.ln.Addr().String())
