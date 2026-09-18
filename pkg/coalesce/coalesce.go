@@ -20,6 +20,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/daeuniverse/outbound/netproxy"
 )
 
 // Conn sits between crypto/tls and the real socket. crypto/tls writes
@@ -122,4 +124,18 @@ func (c *Conn) Pending() int {
 // hatches that call Close.
 func (c *Conn) Close() error {
 	return c.Conn.Close()
+}
+
+// CloseWrite flushes the coalesced records and then half-closes the underlying
+// socket. net.Conn has no CloseWrite, so embedding it does not promote one: a
+// caller that peels to this layer (Vision's direct mode, which writes its
+// payload to exactly this conn, and dae's relay) would otherwise half-close
+// nothing while the socket stays fully open. Flushing first matters here:
+// everything written so far is still in c.buf, and a FIN that overtakes its
+// own records would truncate them.
+func (c *Conn) CloseWrite() error {
+	if err := c.Flush(); err != nil {
+		return err
+	}
+	return netproxy.ForwardCloseWrite(c.Conn)
 }
