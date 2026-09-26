@@ -23,6 +23,7 @@
 package smux
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -39,6 +40,22 @@ const (
 	defaultAcceptBacklog = 1024
 	maxShaperSize        = 1024
 	openCloseTimeout     = 30 * time.Second // Timeout for opening/closing streams
+
+	// frameReadBufferSize bounds the recvLoop read buffer. Without it every
+	// frame costs two read syscalls (8-byte header + payload) even when both
+	// sit in the same TCP segment - the dominant direction for downlink-heavy
+	// traffic (e.g. QUIC video). recvLoop is the session's only reader, so
+	// the buffer cannot reorder or race with anything.
+	frameReadBufferSize = 32 << 10
+
+	// write-batch bounds: how much already-queued traffic sendLoop may merge
+	// into a single underlying write. Frames are self-delimiting and TCP
+	// preserves order, so merging is protocol-transparent; the bounds only
+	// cap syscall amortization so a deep queue cannot balloon one buffer.
+	// Requests still queued go out on the next loop round-trip, so merging
+	// adds no latency of its own.
+	maxWriteBatchFrames = 16
+	maxWriteBatchBytes  = 32 << 10
 )
 
 // resultChanPool reduces allocation of result channels
@@ -410,6 +427,10 @@ func (s *Session) recvLoop() {
 	var hdr rawHeader
 	var updHdr updHeader
 
+	// Buffered reads: see frameReadBufferSize. recvLoop is the session's
+	// only reader of s.conn.
+	br := bufio.NewReaderSize(s.conn, frameReadBufferSize)
+
 	for {
 		// Wait until we have tokens or session is closed.
 		for atomic.LoadInt32(&s.bucket) <= 0 && !s.IsClosed() {
@@ -425,7 +446,7 @@ func (s *Session) recvLoop() {
 
 		// As long as we have tokens, try to read frames.
 		// read header first
-		_, err := io.ReadFull(s.conn, hdr[:])
+		_, err := io.ReadFull(br, hdr[:])
 		if err != nil {
 			s.notifyReadError(err)
 			return
@@ -497,7 +518,7 @@ func (s *Session) recvLoop() {
 			// is consumed, and only the head still carries cap == 2^n, which
 			// pool.PutBuffer requires to recycle the buffer.
 			buf := pool.GetBuffer(int(hdr.Length()))
-			written, err := io.ReadFull(s.conn, buf)
+			written, err := io.ReadFull(br, buf)
 			if err != nil {
 				s.notifyReadError(err)
 
@@ -529,7 +550,7 @@ func (s *Session) recvLoop() {
 				return
 			}
 
-			_, err := io.ReadFull(s.conn, updHdr[:])
+			_, err := io.ReadFull(br, updHdr[:])
 			if err != nil {
 				s.notifyReadError(err)
 				return
@@ -638,15 +659,9 @@ func (s *Session) notifyShaperConsumed() {
 func (s *Session) sendLoop() {
 	var n int
 	var err error
-	var vec [][]byte // vector for writeBuffers
 
-	bw, ok := s.conn.(interface {
-		WriteBuffers(v [][]byte) (n int, err error)
-	})
-	if ok {
-		vec = make([][]byte, 2)
-	}
-
+	// getBufferWithRequestHeader builds a full frame (header+payload) in one
+	// pooled buffer.
 	getBufferWithRequestHeader := func(dataSize int, request writeRequest) []byte {
 		buf := pool.GetBuffer(dataSize + headerSize)
 		buf[0] = request.frame.ver
@@ -656,51 +671,102 @@ func (s *Session) sendLoop() {
 		return buf
 	}
 
+	// batch is reused across loop iterations: requests are drained, written
+	// and their results delivered all within one iteration, so nothing
+	// retains the slice past its reuse point.
+	batch := make([]writeRequest, 0, maxWriteBatchFrames)
+
 EVENT_LOOP:
 	for {
 		select {
 		case <-s.die:
 			return
 		case <-s.chShaperPending:
+			// Collect whatever is already queued: frames are self-delimiting
+			// and TCP preserves order, so consecutive frames merge into ONE
+			// underlying write. Bounds only cap syscall amortization; frames
+			// still queued go out on the next round-trip, so merging adds no
+			// latency of its own.
+			batch = batch[:0]
+			total := 0
 			for {
 				request, ok := s.sq.Pop()
 				if !ok {
-					// notify shaperLoop to accept new requests
-					s.notifyShaperConsumed()
-					goto EVENT_LOOP
+					break
 				}
+				batch = append(batch, request)
+				total += headerSize + len(request.frame.data)
+				if len(batch) >= maxWriteBatchFrames || total >= maxWriteBatchBytes {
+					break
+				}
+			}
+			if len(batch) == 0 {
+				// notify shaperLoop to accept new requests
+				s.notifyShaperConsumed()
+				goto EVENT_LOOP
+			}
 
-				var buf []byte
-				// support for scatter-gather I/O
-				if len(vec) > 0 {
-					buf = getBufferWithRequestHeader(0, request)
-					vec[0] = buf[:headerSize]
-					vec[1] = request.frame.data
-					n, err = bw.WriteBuffers(vec)
-				} else {
-					buf = getBufferWithRequestHeader(len(request.frame.data), request)
-					copy(buf[headerSize:], request.frame.data)
-					n, err = s.conn.Write(buf)
-				}
+			if len(batch) == 1 {
+				// Fast path: a lone frame goes out as a single frame buffer.
+				request := batch[0]
+				buf := getBufferWithRequestHeader(len(request.frame.data), request)
+				copy(buf[headerSize:], request.frame.data)
+				n, err = s.conn.Write(buf)
 				pool.PutBuffer(buf)
-
 				n -= headerSize
 				if n < 0 {
 					n = 0
 				}
-
-				result := writeResult{
-					n:   n,
-					err: err,
+				if err != nil {
+					n = 0
 				}
-
-				request.result <- result
-
-				// store conn error
+				request.result <- writeResult{n: n, err: err}
 				if err != nil {
 					s.notifyWriteError(err)
 					return
 				}
+				continue
+			}
+
+			// Merged path: assemble the whole batch contiguously and issue a
+			// single write. On success every frame is fully written; on error
+			// the frames that fit (by cumulative offset) are credited and the
+			// session is torn down by notifyWriteError, so unblocking the
+			// rest via their waiters' chSocketWriteError select is enough.
+			buf := pool.GetBuffer(total)
+			off := 0
+			for _, request := range batch {
+				frame := buf[off : off+headerSize+len(request.frame.data)]
+				frame[0] = request.frame.ver
+				frame[1] = request.frame.cmd
+				binary.LittleEndian.PutUint16(frame[2:], uint16(len(request.frame.data)))
+				binary.LittleEndian.PutUint32(frame[4:], request.frame.sid)
+				copy(frame[headerSize:], request.frame.data)
+				off += len(frame)
+			}
+			n, err = s.conn.Write(buf[:total])
+			pool.PutBuffer(buf)
+
+			off = 0
+			for _, request := range batch {
+				payload := len(request.frame.data)
+				rn := payload
+				if err != nil {
+					// credit only what fits before the failure point
+					rn = n - off - headerSize
+					if rn > payload {
+						rn = payload
+					}
+					if rn < 0 {
+						rn = 0
+					}
+				}
+				off += headerSize + payload
+				request.result <- writeResult{n: rn, err: err}
+			}
+			if err != nil {
+				s.notifyWriteError(err)
+				return
 			}
 		}
 	}
