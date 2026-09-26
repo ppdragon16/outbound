@@ -34,6 +34,9 @@ func (c *Conn) ReadFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error
 	// FIXME: a compromise on Symmetric NAT
 	addr = c.cachedProxyAddrIpIP
 
+	// The prefix buffer must come from the pool: bLen flows into the
+	// io.Reader interface call, so a stack array would escape and turn this
+	// into a per-datagram malloc.
 	bLen := pool.GetBuffer(2)
 	defer pool.PutBuffer(bLen)
 	if _, err = io.ReadFull(&c.readWrapper, bLen); err != nil {
@@ -63,11 +66,21 @@ func (c *Conn) WriteTo(p []byte, addr net.Addr) (n int, err error) {
 func (c *Conn) WriteToAddrPort(p []byte, _ netip.AddrPort) (n int, err error) {
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
-	bLen := pool.GetBuffer(2)
-	defer pool.PutBuffer(bLen)
-	binary.BigEndian.PutUint16(bLen, uint16(len(p)))
-	if _, err = c.write(bLen); err != nil {
+	// Coalesce the 2-byte length prefix and the payload into one pooled
+	// buffer and one Write: the previous two-write shape produced two
+	// downstream TLS records / smux frames and two syscalls per datagram.
+	// (A stack array for the prefix alone does NOT work: c.write is
+	// non-inlinable, so the slice escapes and every call would malloc.)
+	buf := pool.GetBuffer(2 + len(p))
+	defer pool.PutBuffer(buf)
+	binary.BigEndian.PutUint16(buf, uint16(len(p)))
+	copy(buf[2:], p)
+	// Return the payload bytes actually carried by the successful write,
+	// not a recomputed len(p): c.write promises full-write-or-error today,
+	// and deriving it from n keeps that contract honest if the underlying
+	// writer ever changes.
+	if n, err = c.write(buf[:2+len(p)]); err != nil {
 		return 0, err
 	}
-	return c.write(p)
+	return n - 2, nil
 }
