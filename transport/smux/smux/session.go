@@ -426,6 +426,7 @@ func (s *Session) recvLoop() {
 	// Buffered + adaptive reads: see frame_reader.go. recvLoop is the
 	// session's only reader of s.conn.
 	br := newFrameReader(s.conn)
+	defer br.release()
 
 	for {
 		// Wait until we have tokens or session is closed.

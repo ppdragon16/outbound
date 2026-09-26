@@ -1,6 +1,10 @@
 package smux
 
-import "io"
+import (
+	"io"
+
+	"github.com/daeuniverse/outbound/pool"
+)
 
 const (
 	// minFrameReadBufferSize is the recvLoop read buffer's starting size:
@@ -38,7 +42,17 @@ type frameReader struct {
 }
 
 func newFrameReader(conn io.Reader) *frameReader {
-	return &frameReader{conn: conn, buf: make([]byte, minFrameReadBufferSize)}
+	return &frameReader{conn: conn, buf: pool.GetBuffer(minFrameReadBufferSize)}
+}
+
+// release returns the buffer to the pool. Call exactly once when the reader
+// is done - i.e. when recvLoop exits. The buffer is pooled rather than
+// made because sessions churn (update-sub, reconnects) and recycled buffers
+// let a new session skip the cold allocation; the lifetime discipline is
+// simple because recvLoop is the only user.
+func (r *frameReader) release() {
+	pool.PutBuffer(r.buf)
+	r.buf = nil
 }
 
 func (r *frameReader) Read(p []byte) (n int, err error) {
@@ -64,13 +78,12 @@ func (r *frameReader) Read(p []byte) (n int, err error) {
 
 	// Grow only on evidence: the previous fill hit the buffer's exact
 	// capacity, meaning at least that many bytes were waiting and we may
-	// have left data in the kernel for a second syscall.
+	// have left data in the kernel for a second syscall. The old buffer is
+	// recycled back to the pool as part of the swap.
 	if r.lastFillFull && len(r.buf) < maxFrameReadBufferSize {
-		newSize := len(r.buf) * 2
-		if newSize > maxFrameReadBufferSize {
-			newSize = maxFrameReadBufferSize
-		}
-		r.buf = make([]byte, newSize)
+		newSize := min(len(r.buf)*2, maxFrameReadBufferSize)
+		pool.PutBuffer(r.buf)
+		r.buf = pool.GetBuffer(newSize)
 	}
 	r.start, r.end = 0, 0
 	n, err = r.conn.Read(r.buf)
