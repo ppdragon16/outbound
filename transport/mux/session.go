@@ -1,6 +1,7 @@
 package mux
 
 import (
+	"bufio"
 	"encoding/binary"
 	"io"
 	"net"
@@ -69,6 +70,13 @@ func setKeepAlive(conn net.Conn, period time.Duration) {
 func (s *session) run() {
 	defer s.Close()
 
+	// Buffered reads: each session message is decoded from three 2-byte
+	// ReadFulls (metaLen/id/status) plus a payload - without buffering that
+	// is 3+ read syscalls per message even when a whole message sits in one
+	// TCP segment. run() is the session's only reader of s.conn, and no
+	// read deadline is ever set on it, so a plain bufio is safe here.
+	br := bufio.NewReaderSize(s.conn, 4096)
+
 	var (
 		metaLen [2]byte
 		id      [2]byte
@@ -77,7 +85,7 @@ func (s *session) run() {
 	)
 
 	for {
-		if _, err := io.ReadFull(s.conn, metaLen[:]); err != nil {
+		if _, err := io.ReadFull(br, metaLen[:]); err != nil {
 			return
 		}
 		mLen := binary.BigEndian.Uint16(metaLen[:])
@@ -85,19 +93,19 @@ func (s *session) run() {
 			return
 		}
 
-		if _, err := io.ReadFull(s.conn, id[:]); err != nil {
+		if _, err := io.ReadFull(br, id[:]); err != nil {
 			return
 		}
 		sid := binary.BigEndian.Uint16(id[:])
 
-		if _, err := io.ReadFull(s.conn, status[:]); err != nil {
+		if _, err := io.ReadFull(br, status[:]); err != nil {
 			return
 		}
 		opcode := status[0]
 		opts := status[1]
 
 		if mLen > 4 {
-			if _, err := io.CopyN(io.Discard, s.conn, int64(mLen-4)); err != nil {
+			if _, err := io.CopyN(io.Discard, br, int64(mLen-4)); err != nil {
 				return
 			}
 		}
@@ -123,7 +131,7 @@ func (s *session) run() {
 					return
 				}
 				dLen := int(binary.BigEndian.Uint16(dataLen[:]))
-				if _, err := io.CopyN(io.Discard, s.conn, int64(dLen)); err != nil {
+				if _, err := io.CopyN(io.Discard, br, int64(dLen)); err != nil {
 					return
 				}
 			}
