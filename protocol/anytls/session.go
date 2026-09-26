@@ -335,12 +335,12 @@ func (s *session) Close() error {
 		// cannot interleave between its check and send.
 		close(s.closeStreamChan)
 		s.streamLock.Unlock()
-		// Drain the coalescer before the raw close: Conn.Close itself no
-		// longer flushes (a blocked flush must not delay teardown), so a
-		// pending close_notify or final frame is pushed here instead.
-		if s.flusher != nil {
-			_ = s.flusher.Flush()
-		}
+		// No coalescer Flush here: the underlying path may be dead, and a
+		// deadline-less Flush would block the raw socket Write until the
+		// TCP retransmission timeout (~15min) — this is teardown, not
+		// graceful shutdown, so discard unsent bytes and close now.
+		// (Conn.Close made the same trade: its internal flush was removed
+		// because "a blocked flush must not delay teardown".)
 		return s.conn.Close()
 	}
 	return nil
