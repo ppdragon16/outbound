@@ -23,7 +23,6 @@
 package smux
 
 import (
-	"bufio"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -41,12 +40,9 @@ const (
 	maxShaperSize        = 1024
 	openCloseTimeout     = 30 * time.Second // Timeout for opening/closing streams
 
-	// frameReadBufferSize bounds the recvLoop read buffer. Without it every
-	// frame costs two read syscalls (8-byte header + payload) even when both
-	// sit in the same TCP segment - the dominant direction for downlink-heavy
-	// traffic (e.g. QUIC video). recvLoop is the session's only reader, so
-	// the buffer cannot reorder or race with anything.
-	frameReadBufferSize = 32 << 10
+	// frameReadBufferSize is superseded by frameReader: the recvLoop read
+	// buffer now starts at 2KiB and grows adaptively to 32KiB on evidence
+	// of large arrival bursts (see frame_reader.go).
 
 	// write-batch bounds: how much already-queued traffic sendLoop may merge
 	// into a single underlying write. Frames are self-delimiting and TCP
@@ -427,9 +423,9 @@ func (s *Session) recvLoop() {
 	var hdr rawHeader
 	var updHdr updHeader
 
-	// Buffered reads: see frameReadBufferSize. recvLoop is the session's
-	// only reader of s.conn.
-	br := bufio.NewReaderSize(s.conn, frameReadBufferSize)
+	// Buffered + adaptive reads: see frame_reader.go. recvLoop is the
+	// session's only reader of s.conn.
+	br := newFrameReader(s.conn)
 
 	for {
 		// Wait until we have tokens or session is closed.
