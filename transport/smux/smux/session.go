@@ -32,6 +32,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/daeuniverse/outbound/common/iout"
 	"github.com/daeuniverse/outbound/pool"
 )
 
@@ -423,10 +424,10 @@ func (s *Session) recvLoop() {
 	var hdr rawHeader
 	var updHdr updHeader
 
-	// Buffered + adaptive reads: see frame_reader.go. recvLoop is the
-	// session's only reader of s.conn.
-	br := newFrameReader(s.conn)
-	defer br.release()
+	// Buffered + adaptive reads: see common/iout.AdaptiveReader. recvLoop
+	// is the session's only reader of s.conn.
+	br := iout.NewAdaptiveReader(s.conn)
+	defer br.Release()
 
 	for {
 		// Wait until we have tokens or session is closed.

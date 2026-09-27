@@ -1,7 +1,6 @@
 package mux
 
 import (
-	"bufio"
 	"encoding/binary"
 	"io"
 	"net"
@@ -9,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/daeuniverse/outbound/common/iout"
 	"github.com/daeuniverse/outbound/pool"
 )
 
@@ -74,8 +74,10 @@ func (s *session) run() {
 	// ReadFulls (metaLen/id/status) plus a payload - without buffering that
 	// is 3+ read syscalls per message even when a whole message sits in one
 	// TCP segment. run() is the session's only reader of s.conn, and no
-	// read deadline is ever set on it, so a plain bufio is safe here.
-	br := bufio.NewReaderSize(s.conn, 4096)
+	// read deadline is ever set on it, so buffering is safe here. The
+	// adaptive reader starts at 2KiB and grows to 32KiB under burst load.
+	br := iout.NewAdaptiveReader(s.conn)
+	defer br.Release()
 
 	var (
 		metaLen [2]byte

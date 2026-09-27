@@ -1,4 +1,4 @@
-package smux
+package iout
 
 import (
 	"bytes"
@@ -29,17 +29,17 @@ func (c *chunkReader) Read(p []byte) (int, error) {
 }
 
 // The reader must start small, grow only on evidence of full fills, cap at
-// maxFrameReadBufferSize, stash remainder bytes across Reads, and bypass
+// maxAdaptiveReadBufferSize, stash remainder bytes across Reads, and bypass
 // the buffer for caller slices at least as large as the buffer.
 func TestFrameReaderAdaptiveGrowthAndRemainder(t *testing.T) {
 	// 8 frames of 1200B arriving in one kernel gulp: with a 2KiB start size
 	// the first fill fills fully -> grow -> subsequent fills absorb more.
 	blob := bytes.Repeat([]byte{0xAB}, 8*1200)
 	cr := &chunkReader{data: append([]byte{}, blob...)}
-	r := newFrameReader(cr)
+	r := NewAdaptiveReader(cr)
 
-	if len(r.buf) != minFrameReadBufferSize {
-		t.Fatalf("initial buffer = %d, want %d", len(r.buf), minFrameReadBufferSize)
+	if len(r.buf) != minAdaptiveReadBufferSize {
+		t.Fatalf("initial buffer = %d, want %d", len(r.buf), minAdaptiveReadBufferSize)
 	}
 
 	var got []byte
@@ -59,10 +59,10 @@ func TestFrameReaderAdaptiveGrowthAndRemainder(t *testing.T) {
 	if !bytes.Equal(got, blob) {
 		t.Fatal("streamed bytes mismatch")
 	}
-	if len(r.buf) == minFrameReadBufferSize {
+	if len(r.buf) == minAdaptiveReadBufferSize {
 		t.Fatal("buffer never grew despite sustained full fills")
 	}
-	if len(r.buf) > maxFrameReadBufferSize {
+	if len(r.buf) > maxAdaptiveReadBufferSize {
 		t.Fatalf("buffer grew past cap: %d", len(r.buf))
 	}
 	if grownAt == 0 {
@@ -72,7 +72,7 @@ func TestFrameReaderAdaptiveGrowthAndRemainder(t *testing.T) {
 	// Bypass: a caller slice >= buffer capacity reads straight into it (the
 	// recorded request len equals the slice size and the buffer stays put).
 	cr2 := &chunkReader{data: bytes.Repeat([]byte{0xCD}, 40000)}
-	r2 := newFrameReader(cr2)
+	r2 := NewAdaptiveReader(cr2)
 	// Prime a full fill so lastFillFull is set, then drain the stash so the
 	// buffer is empty.
 	if _, err := r2.Read(make([]byte, 8)); err != nil {
@@ -91,11 +91,11 @@ func TestFrameReaderAdaptiveGrowthAndRemainder(t *testing.T) {
 	// slice size), leaves the buffer untouched, and does not count as
 	// growth evidence.
 	before := len(r2.buf)
-	if _, err := r2.Read(make([]byte, maxFrameReadBufferSize)); err != nil {
+	if _, err := r2.Read(make([]byte, maxAdaptiveReadBufferSize)); err != nil {
 		t.Fatal(err)
 	}
-	if got := cr2.reqs[len(cr2.reqs)-1]; got != maxFrameReadBufferSize {
-		t.Fatalf("last read request = %d, want direct bypass of %d", got, maxFrameReadBufferSize)
+	if got := cr2.reqs[len(cr2.reqs)-1]; got != maxAdaptiveReadBufferSize {
+		t.Fatalf("last read request = %d, want direct bypass of %d", got, maxAdaptiveReadBufferSize)
 	}
 	if len(r2.buf) != before {
 		t.Fatalf("bypass read grew the buffer: %d", len(r2.buf))

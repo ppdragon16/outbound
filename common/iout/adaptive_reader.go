@@ -1,4 +1,4 @@
-package smux
+package iout
 
 import (
 	"io"
@@ -7,15 +7,16 @@ import (
 )
 
 const (
-	// minFrameReadBufferSize is the recvLoop read buffer's starting size:
-	// enough to absorb a burst of small frames without a syscall per frame,
-	// cheap enough that an idle session commits almost nothing.
-	minFrameReadBufferSize = 2 << 10
-	// maxFrameReadBufferSize caps the adaptive growth (see frameReader).
-	maxFrameReadBufferSize = 32 << 10
+	// minAdaptiveReadBufferSize is the reader's starting size: enough to
+	// absorb a burst of small frames without a syscall per frame, cheap
+	// enough that an idle session commits almost nothing.
+	minAdaptiveReadBufferSize = 2 << 10
+	// maxAdaptiveReadBufferSize caps the adaptive growth (see AdaptiveReader).
+	maxAdaptiveReadBufferSize = 32 << 10
 )
 
-// frameReader is recvLoop's buffered reader. It exists because bufio's
+// AdaptiveReader is a buffered reader for hot single-reader loops (protocol
+// session recv/send pump loops). It exists because bufio's
 // buffer is fixed at construction and cannot grow, while the right size
 // depends on the session's live burstiness: an idle control session is fine
 // with 2KiB, a QUIC-video session absorbing multi-frame TCP segments wants
@@ -32,7 +33,7 @@ const (
 //
 // The session's recvLoop is the only reader of the session conn, so there
 // is no concurrency to worry about.
-type frameReader struct {
+type AdaptiveReader struct {
 	conn io.Reader
 	buf  []byte
 	// start/end bracket the unconsumed span of buf left over from the last
@@ -41,8 +42,10 @@ type frameReader struct {
 	lastFillFull bool
 }
 
-func newFrameReader(conn io.Reader) *frameReader {
-	return &frameReader{conn: conn, buf: pool.GetBuffer(minFrameReadBufferSize)}
+// NewAdaptiveReader wraps r. Release must be called exactly once when the
+// caller is done reading - the pooled buffer is only returned then.
+func NewAdaptiveReader(r io.Reader) *AdaptiveReader {
+	return &AdaptiveReader{conn: r, buf: pool.GetBuffer(minAdaptiveReadBufferSize)}
 }
 
 // release returns the buffer to the pool. Call exactly once when the reader
@@ -50,12 +53,14 @@ func newFrameReader(conn io.Reader) *frameReader {
 // made because sessions churn (update-sub, reconnects) and recycled buffers
 // let a new session skip the cold allocation; the lifetime discipline is
 // simple because recvLoop is the only user.
-func (r *frameReader) release() {
+// Release returns the pooled buffer. Call exactly once when the reader is
+// done - i.e. when the owning loop exits. Reads after Release are invalid.
+func (r *AdaptiveReader) Release() {
 	pool.PutBuffer(r.buf)
 	r.buf = nil
 }
 
-func (r *frameReader) Read(p []byte) (n int, err error) {
+func (r *AdaptiveReader) Read(p []byte) (n int, err error) {
 	// Serve from the leftover of the previous fill first.
 	if r.start < r.end {
 		n = copy(p, r.buf[r.start:r.end])
@@ -80,8 +85,8 @@ func (r *frameReader) Read(p []byte) (n int, err error) {
 	// capacity, meaning at least that many bytes were waiting and we may
 	// have left data in the kernel for a second syscall. The old buffer is
 	// recycled back to the pool as part of the swap.
-	if r.lastFillFull && len(r.buf) < maxFrameReadBufferSize {
-		newSize := min(len(r.buf)*2, maxFrameReadBufferSize)
+	if r.lastFillFull && len(r.buf) < maxAdaptiveReadBufferSize {
+		newSize := min(len(r.buf)*2, maxAdaptiveReadBufferSize)
 		pool.PutBuffer(r.buf)
 		r.buf = pool.GetBuffer(newSize)
 	}
