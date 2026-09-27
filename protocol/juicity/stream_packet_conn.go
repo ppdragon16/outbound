@@ -16,6 +16,15 @@ import (
 type PacketConn struct {
 	*Conn
 	domainIpMapping sync.Map
+
+	// writeScratch is an association-private serialization buffer, grown to
+	// the largest frame written and released on Close, so the UDP send path
+	// avoids a shared-pool Get/Put round trip per datagram. Guarded by
+	// writeMu (the release in Close included: returning the buffer to the
+	// pool while a writer still holds it would let an unrelated pooled user
+	// receive memory that is being written).
+	writeScratch []byte
+	writeMu      sync.Mutex
 }
 
 func (c *PacketConn) Write(b []byte) (int, error) {
@@ -108,17 +117,29 @@ func (c *PacketConn) WriteToAddrPort(p []byte, ap netip.AddrPort) (n int, err er
 	if ap.Addr().Is6() {
 		metadata.Type = protocol.MetadataTypeIPv6
 	}
-	buf := pool.GetBuffer(metadata.Len() + 2 + len(p))
-	defer pool.PutBuffer(buf)
-	SealUDP(metadata, buf, p)
-	_, err = c.Conn.Write(buf)
-	if err != nil {
+	need := metadata.Len() + 2 + len(p)
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	if len(c.writeScratch) < need {
+		if c.writeScratch != nil {
+			pool.PutBuffer(c.writeScratch)
+		}
+		c.writeScratch = pool.GetBuffer(need)
+	}
+	buf := SealUDP(metadata, c.writeScratch, p)
+	if _, err = c.Conn.Write(buf); err != nil {
 		return 0, err
 	}
 	return len(p), nil
 }
 
 func (c *PacketConn) Close() error {
+	c.writeMu.Lock()
+	if c.writeScratch != nil {
+		pool.PutBuffer(c.writeScratch)
+		c.writeScratch = nil
+	}
+	c.writeMu.Unlock()
 	return c.Conn.Close()
 }
 

@@ -56,6 +56,15 @@ type udpConn struct {
 
 	receiveMu    sync.Mutex
 	readDeadline P.Deadline
+
+	// writeScratch is a session-private serialization buffer, grown once to
+	// MaxUDPSize and released on Close, so the UDP send path no longer takes
+	// a Get/Put round trip from the shared pool per datagram. Guarded by
+	// writeMu (including the release in Close: handing the buffer back while
+	// a writer still holds it would let an unrelated pooled user receive
+	// memory that is being written).
+	writeScratch []byte
+	writeMu      sync.Mutex
 }
 
 func ToAddrPort(addr net.Addr) (netip.AddrPort, error) {
@@ -203,8 +212,15 @@ func (u *udpConn) WriteToAddrPort(b []byte, ap netip.AddrPort) (n int, err error
 		AddrPort:  ap,
 		Data:      b,
 	}
-	buf := pool.GetBuffer(protocol.MaxUDPSize)
-	defer pool.PutBuffer(buf)
+	u.writeMu.Lock()
+	defer u.writeMu.Unlock()
+	if len(u.writeScratch) < protocol.MaxUDPSize {
+		if u.writeScratch != nil {
+			pool.PutBuffer(u.writeScratch)
+		}
+		u.writeScratch = pool.GetBuffer(protocol.MaxUDPSize)
+	}
+	buf := u.writeScratch
 	err = u.WritePacket(buf, msg)
 	errTooLarge, ok := errors.AsType[*quic.DatagramTooLargeError](err)
 	if ok {
@@ -257,6 +273,12 @@ func (u *udpConn) Close() error {
 		case buf := <-u.ReceiveCh:
 			u.sm.conn.ReleaseDatagram(buf)
 		default:
+			u.writeMu.Lock()
+			if u.writeScratch != nil {
+				pool.PutBuffer(u.writeScratch)
+				u.writeScratch = nil
+			}
+			u.writeMu.Unlock()
 			return nil
 		}
 	}
