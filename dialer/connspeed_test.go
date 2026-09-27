@@ -22,6 +22,7 @@ import (
 	"github.com/daeuniverse/outbound/dialer"
 	_ "github.com/daeuniverse/outbound/dialer/hysteria2"
 	_ "github.com/daeuniverse/outbound/dialer/juicity"
+	_ "github.com/daeuniverse/outbound/dialer/masque"
 	_ "github.com/daeuniverse/outbound/dialer/tuic"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol/direct"
@@ -34,6 +35,7 @@ var connSpeedLinks = map[string]string{
 	"hy2":     "hysteria2://testpass123@127.0.0.1:18443/?insecure=1&sni=hy2.test",
 	"tuic":    "tuic://0af4d518-315d-4980-be5f-22b6e1770d6a:testpass123@127.0.0.1:12444/?congestion_control=bbr&alpn=h3&sni=hy2.test&allow_insecure=1",
 	"juicity": "juicity://0af4d518-315d-4980-be5f-22b6e1770d6a:testpass123@127.0.0.1:13444?sni=hy2.test&allow_insecure=1&congestion_control=bbr",
+	"masque":  "masque://127.0.0.1:19443?insecure=1&sni=hy2.test",
 }
 
 // TestConnSpeed measures, per protocol: the cold dial (QUIC handshake + auth)
