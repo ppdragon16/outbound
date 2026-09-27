@@ -57,6 +57,7 @@ type authObs struct {
 	err         error
 	alpn        string
 	quicVersion string
+	used0RTT    bool
 }
 
 // utlsCert converts a crypto/tls certificate to utls's distinct type.
@@ -125,7 +126,10 @@ func startSpecServerCfg(t *testing.T, password string, alpn []string, qcfg *quic
 					obs <- authObs{err: fmt.Errorf("accept uni: %w", err)}
 					return
 				}
-				o := authObs{alpn: conn.ConnectionState().TLS.NegotiatedProtocol}
+				o := authObs{
+					alpn:     conn.ConnectionState().TLS.NegotiatedProtocol,
+					used0RTT: conn.ConnectionState().Used0RTT,
+				}
 				r := bufio.NewReaderSize(stream, 16<<10)
 				var head [2]byte
 				if _, err := io.ReadFull(r, head[:]); err != nil {
@@ -172,6 +176,62 @@ func newClient(t *testing.T, proxyAddr, uuidStr, password string) netproxy.Diale
 // the live link carries no alpn parameter, so NextProtos is empty.
 func newClientALPN(t *testing.T, proxyAddr, uuidStr, password string, alpn []string) netproxy.Dialer {
 	return newClientFull(t, proxyAddr, uuidStr, password, alpn, 0)
+}
+
+// newClientWithSessionCache mirrors newClientFull but installs a TLS session
+// cache, i.e. exactly the configuration that would let a QUIC client resume
+// and (with DialEarly) authenticate over 0-RTT - which tuic must refuse.
+func newClientWithSessionCache(t *testing.T, proxyAddr, uuidStr, password string) netproxy.Dialer {
+	t.Helper()
+	d, err := protocol.NewDialer("tuic", direct.Direct, protocol.Header{
+		ProxyAddress: proxyAddr,
+		Feature1:     "bbr",
+		TlsConfig: &utls.Config{
+			NextProtos:         []string{"h3"},
+			MinVersion:         utls.VersionTLS13,
+			ServerName:         "127.0.0.1",
+			InsecureSkipVerify: true,
+			ClientSessionCache: utls.NewLRUClientSessionCache(16),
+		},
+		User:     uuidStr,
+		Password: password,
+	})
+	if err != nil {
+		t.Fatalf("build tuic dialer: %v", err)
+	}
+	return d
+}
+
+func TestE2ETuicRefusesSessionCache(t *testing.T) {
+	// The server is started with 0-RTT allowed, so a client that honoured its
+	// cache would resume early and be visible as used0RTT=true.
+	addr, obs := startSpecServerCfg(t, e2ePass, []string{"h3"}, &quic.Config{Allow0RTT: true})
+	d := newClientWithSessionCache(t, addr, e2eUUID, e2ePass)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), authTimeout)
+		_, dialErr := d.DialContext(ctx, "tcp", "1.1.1.1:53")
+		cancel()
+		t.Logf("attempt %d: dial err = %v", attempt, dialErr)
+		select {
+		case o := <-obs:
+			if o.err != nil {
+				t.Fatalf("attempt %d: server could not parse AUTH: %v", attempt, o.err)
+			}
+			if !o.tokenMatch {
+				t.Fatalf("attempt %d: token mismatch (auth would fail)", attempt)
+			}
+			if o.used0RTT {
+				t.Fatalf("attempt %d: connection resumed with 0-RTT despite the cache being refused", attempt)
+			}
+			t.Logf("attempt %d: auth ok, used0RTT=%v", attempt, o.used0RTT)
+		case <-time.After(authTimeout):
+			t.Fatalf("attempt %d: server never saw an AUTH stream", attempt)
+		}
+		// The server closes the connection after reporting, so the next dial
+		// builds a fresh one - exactly the resume scenario.
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // newClientFull mirrors the live link exactly: optional ALPN and the

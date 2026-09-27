@@ -92,12 +92,21 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 			return nil, err
 		}
 	}
+	// tuic must never authenticate over 0-RTT: the v5 AUTH token is the TLS
+	// exporter of the *completed* handshake, so a connection resumed from a
+	// session ticket - which DialEarly hands back as soon as it is usable -
+	// would export a value the server does not agree with (or fail to export
+	// one at all). The server answers that with CloseWithError(0, ""), the
+	// opaque "Application error 0x0 (remote)". Refuse the cache explicitly
+	// here instead of relying on nobody ever configuring one.
+	tlsConf := t.TlsConfig.Clone()
+	tlsConf.ClientSessionCache = nil
 	// Race the QUIC handshake across all resolved addresses (happy-eyeballs).
 	quicConn, err := C.Race(ctx, addrs, func(ctx context.Context, addr net.Addr) (quic.Connection, error) {
 		if t.ReduceRtt {
-			return transport.DialEarly(ctx, addr, t.TlsConfig, t.QuicConfig)
+			return transport.DialEarly(ctx, addr, tlsConf, t.QuicConfig)
 		}
-		return transport.Dial(ctx, addr, t.TlsConfig, t.QuicConfig)
+		return transport.Dial(ctx, addr, tlsConf, t.QuicConfig)
 	}, func(qc quic.Connection) {
 		_ = qc.CloseWithError(0, "")
 	})
@@ -111,6 +120,18 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 		if t.sharedTransportPtr == nil {
 			transport.Close()
 			transport.Conn.Close()
+		}
+		return nil, err
+	}
+
+	// Belt and braces: the token exporter is only final once the handshake
+	// has completed, so never proceed on an early connection (see
+	// ensureFullHandshake).
+	if err := ensureFullHandshake(ctx, quicConn); err != nil {
+		_ = quicConn.CloseWithError(ProtocolError, err.Error())
+		if t.sharedTransportPtr == nil {
+			_ = transport.Close()
+			_ = transport.Conn.Close()
 		}
 		return nil, err
 	}
@@ -156,6 +177,37 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 	}
 	t.quicConn = quicConn
 	return quicConn, nil
+}
+
+// Err0RTTNotUsable is returned when a connection was established with 0-RTT
+// session resumption, which tuic's authentication cannot use: the v5 token is
+// the TLS exporter of the completed handshake, so authenticating early either
+// fails to export the keying material or produces a token the server rejects.
+var Err0RTTNotUsable = errors.New("tuic: refusing a 0-RTT connection: the v5 auth token requires the completed TLS exporter (clear ClientSessionCache for this node, or set reduce_rtt=false)")
+
+// ensureFullHandshake waits for the QUIC handshake to complete and then
+// refuses a connection that used 0-RTT. DialEarly returns as soon as a
+// restored session is usable, i.e. before the handshake finishes; the
+// exporter read at that point is not the value the server will derive, which
+// is why authenticating there surfaces as a bare "Application error 0x0
+// (remote)" from the server's closeWithError instead of an actionable error.
+func ensureFullHandshake(ctx context.Context, quicConn quic.Connection) error {
+	// DialEarly returns a quic.EarlyConnection, which exposes
+	// HandshakeComplete; a plain Dial is already past the handshake, so the
+	// assertion simply does not match there.
+	if early, ok := quicConn.(interface{ HandshakeComplete() <-chan struct{} }); ok {
+		select {
+		case <-early.HandshakeComplete():
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-quicConn.Context().Done():
+			return quicConn.Context().Err()
+		}
+	}
+	if quicConn.ConnectionState().Used0RTT {
+		return Err0RTTNotUsable
+	}
+	return nil
 }
 
 // sendAuthentication writes the v5 AUTH command on a fresh uni stream. The
