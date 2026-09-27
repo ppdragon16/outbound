@@ -1,0 +1,260 @@
+package server_test
+
+// Interop tests: the real outbound masque client (protocol/masque) against
+// this server package, in process. These pin the wire behavior the server
+// must honor - TCP half-close, UDP datagram framing, and the zero_rtt path
+// including datagrams - and double as the deployment smoke test for
+// cmd/masque-server.
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"io"
+	"math/big"
+	"net"
+	"net/netip"
+	"sync"
+	"testing"
+	"time"
+
+	quic "github.com/daeuniverse/quic-go"
+	utls "github.com/refraction-networking/utls"
+
+	masque "github.com/daeuniverse/outbound/protocol/masque"
+	"github.com/daeuniverse/outbound/protocol/masque/server"
+)
+
+// startProxy starts the reference server on loopback and returns its address.
+// conns receives every accepted QUIC connection, so tests can read server-side
+// state (e.g. Used0RTT) after traffic has flowed.
+func startProxy(t *testing.T, conns func(quic.Connection)) string {
+	t.Helper()
+	srv, err := server.New(server.Config{
+		Certificate: cert(t),
+		AllowTarget: func(string, netip.AddrPort) error { return nil },
+		ConnContext: func(ctx context.Context, c quic.Connection) context.Context {
+			if conns != nil {
+				conns(c)
+			}
+			return ctx
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(pc) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return pc.LocalAddr().String()
+}
+
+func cert(t *testing.T) utls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "masque-server-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:     []string{"masque.test"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, &tmpl, &tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return utls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+// startTCPEcho starts a TCP echo that honors half-close: after reading EOF it
+// closes its write side, so a client that CloseWrites still drains the echo.
+func startTCPEcho(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				buf := make([]byte, 2048)
+				for {
+					n, err := c.Read(buf)
+					if n > 0 {
+						if _, werr := c.Write(buf[:n]); werr != nil {
+							return
+						}
+					}
+					if err != nil {
+						if tc, ok := c.(*net.TCPConn); ok {
+							_ = tc.CloseWrite()
+						}
+						_, _ = io.Copy(io.Discard, c)
+						return
+					}
+				}
+			}(c)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// startUDPEcho starts a UDP echo server.
+func startUDPEcho(t *testing.T) *net.UDPAddr {
+	t.Helper()
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	go func() {
+		buf := make([]byte, 65536)
+		for {
+			n, raddr, err := pc.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			if _, err := pc.WriteToUDP(buf[:n], raddr); err != nil {
+				return
+			}
+		}
+	}()
+	return pc.LocalAddr().(*net.UDPAddr)
+}
+
+func newClient(t *testing.T, addr string, opts ...masque.Option) *masque.Client {
+	t.Helper()
+	c, err := masque.NewClient(addr, "masque.test", true, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// TestTCPTunnelHalfClose drives the plain CONNECT path and pins the half-close
+// contract the relay (and our own tcpConn.CloseWrite) depends on.
+func TestTCPTunnelHalfClose(t *testing.T) {
+	proxy := startProxy(t, nil)
+	target := startTCPEcho(t)
+	c := newClient(t, proxy)
+
+	conn, err := c.DialContext(context.Background(), "tcp", target)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("halfclose")); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.(interface{ CloseWrite() error }).CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+	got, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("read after half-close: %v", err)
+	}
+	if string(got) != "halfclose" {
+		t.Fatalf("echoed %q", got)
+	}
+}
+
+// TestUDPTunnelDatagrams drives the CONNECT-UDP path end to end.
+func TestUDPTunnelDatagrams(t *testing.T) {
+	proxy := startProxy(t, nil)
+	target := startUDPEcho(t)
+	c := newClient(t, proxy)
+
+	pc, err := c.ListenPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	if _, err := pc.WriteTo([]byte("datagram-ping"), target); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 128)
+	if err := pc.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, raddr, err := pc.ReadFrom(got)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got[:n]) != "datagram-ping" {
+		t.Fatalf("echoed %q", got[:n])
+	}
+	if raddr.String() != target.String() {
+		t.Fatalf("raddr %v, want %v", raddr, target)
+	}
+}
+
+// TestZeroRTTTunnelIncludingDatagrams is the deployment-shaped proof of the
+// zero_rtt option: a resumed session's CONNECT rides in early data (server
+// sees Used0RTT), and datagrams keep flowing on that same connection.
+func TestZeroRTTTunnelIncludingDatagrams(t *testing.T) {
+	var mu sync.Mutex
+	var conns []quic.Connection
+	proxy := startProxy(t, func(c quic.Connection) {
+		mu.Lock()
+		conns = append(conns, c)
+		mu.Unlock()
+	})
+	target := startUDPEcho(t)
+	targetTCP := startTCPEcho(t)
+	const sni = "zerortt-server.masque.test"
+
+	seed := newClient(t, proxy, masque.WithZeroRTT())
+	if _, err := seed.DialContext(context.Background(), "tcp", targetTCP); err != nil {
+		t.Fatalf("seed dial: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond) // let the session ticket arrive
+
+	// Fresh client = fresh H3 connection, resumed from the ticket.
+	c := newClient(t, proxy, masque.WithZeroRTT())
+	pc, err := c.ListenPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	if _, err := pc.WriteTo([]byte("zerortt-datagram"), target); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, 128)
+	if err := pc.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := pc.ReadFrom(got); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	if len(conns) != 2 {
+		t.Fatalf("server saw %d connections, want 2", len(conns))
+	}
+	first := conns[0].ConnectionState().Used0RTT
+	second := conns[1].ConnectionState().Used0RTT
+	if first {
+		t.Error("first connection has no ticket yet, must not use 0-RTT")
+	}
+	if !second {
+		t.Error("resumed connection must send its requests as 0-RTT early data")
+	}
+}
