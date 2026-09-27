@@ -503,23 +503,20 @@ func (c *Client) tryHandshake(ctx context.Context, pktConn net.PacketConn, remot
 // would race with Alive/Disconnect/ListenPacket, which read it under the lock.
 func (c *Client) applyPostHandshake(resp *http.Response, conn quic.Connection) (udpSM *udpSessionManager, err error) {
 	authResp := protocol.AuthResponseFromHeader(resp.Header)
-	var actualTx uint64
-	if authResp.RxAuto {
-		// Server asks client to use bandwidth detection,
-		// ignore local bandwidth config and use BBRv3 (the default CC)
-		congestion.UseBBRV3(conn)
-	} else {
+	if !authResp.RxAuto {
 		// actualTx = min(serverRx, clientTx)
-		actualTx = authResp.Rx
+		actualTx := authResp.Rx
 		if actualTx == 0 || actualTx > c.config.BandwidthConfig.MaxTx {
 			// Server doesn't have a limit, or our clientTx is smaller than serverRx
 			actualTx = c.config.BandwidthConfig.MaxTx
 		}
 		if actualTx > 0 {
+			// The server pinned the bandwidth, so switch to brutal now.
+			// BBRv3 (the fallback for every other case, including RxAuto and
+			// "we don't know our own bandwidth") is already installed at dial
+			// time via QUICConfig.InitialCongestionControl, so the BBR path
+			// needs no post-handshake swap at all.
 			congestion.UseBrutal(conn, actualTx)
-		} else {
-			// We don't know our own bandwidth either; use BBRv3 (the default CC)
-			congestion.UseBBRV3(conn)
 		}
 	}
 	resp.Body.Close()

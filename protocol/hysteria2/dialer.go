@@ -12,6 +12,7 @@ import (
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/client"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/udphop"
+	"github.com/daeuniverse/outbound/protocol/tuic/congestion"
 )
 
 func init() {
@@ -76,6 +77,14 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	config.ServerAddr = serverAddr
 	config.PortHopping = portHopping
 
+	// Install the default congestion controller (BBRv3) at dial time. The
+	// previous flow let the connection start with a throwaway CUBIC sender
+	// and then swapped controllers after the handshake, while the receive
+	// path was live (a data race, plus a few RTTs on the wrong controller).
+	// brutal - bandwidth pinned by the server's auth response - is the only
+	// controller still installed after the handshake.
+	config.QUICConfig.InitialCongestionControl = congestion.NewInitialSender("", ccPacketSizeAddr(host))
+
 	client, err := client.NewClient(config)
 	if err != nil {
 		return nil, err
@@ -100,4 +109,14 @@ func parseServerAddrString(addrStr string) (host, port string) {
 // We consider a port string to be a port hopping port if it contains "-" or ",".
 func isPortHoppingPort(port string) bool {
 	return strings.Contains(port, "-") || strings.Contains(port, ",")
+}
+
+// ccPacketSizeAddr gives a congestion controller an address to derive its
+// initial packet size from: an IP literal keeps its address family, while a
+// hostname yields nil, which the helper treats as the conservative minimum.
+func ccPacketSizeAddr(host string) net.Addr {
+	if ip := net.ParseIP(host); ip != nil {
+		return &net.UDPAddr{IP: ip}
+	}
+	return nil
 }

@@ -115,7 +115,12 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 		return nil, err
 	}
 
-	common.SetCongestionController(quicConn, t.CongestionController, t.CWND)
+	// BBR/BBRv3 were installed at dial time (QuicConfig.InitialCongestionControl);
+	// only brutal is swapped in after the handshake, because its target
+	// bandwidth is the link's cwnd value.
+	if t.CongestionController == "brutal" && t.CWND > 0 {
+		common.SetCongestionController(quicConn, t.CongestionController, t.CWND)
+	}
 
 	// Authenticate synchronously: tuic v5 requires the AUTH command to be
 	// sent before any other stream, and the async version raced dae's very

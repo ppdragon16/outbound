@@ -12,6 +12,7 @@ import (
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
+	"github.com/daeuniverse/outbound/protocol/tuic/congestion"
 	"github.com/daeuniverse/quic-go"
 	"github.com/google/uuid"
 )
@@ -62,6 +63,8 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	if v, ok := header.Feature2.(int); ok {
 		cwnd = v
 	}
+	// cc names the congestion controller the link asked for ("" = default).
+	cc, _ := header.Feature1.(string)
 	// Pre-resolve proxy addresses (IPv4-first) to seed the candidate cache;
 	// the cache re-resolves when stale or after a failed connect and races
 	// the QUIC handshake across the candidates.
@@ -109,11 +112,20 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 					HandshakeIdleTimeout:           8 * time.Second,
 					CapabilityCallback:             capabilityCallback,
 					Versions:                       protocol.QuicVersions(header.Flags),
+					// Install the configured controller at dial time. The
+					// previous post-handshake SetCongestionControl allocated a
+					// throwaway CUBIC sender, ran the first RTTs on the wrong
+					// controller, and mutated the sent-packet handler while the
+					// connection's receive path was reading it (a data race).
+					// "brutal" is the one case that still swaps after the
+					// handshake: its target bandwidth is a cwnd value that the
+					// config-time helper cannot carry.
+					InitialCongestionControl: congestion.NewInitialSender(cc, proxyAddrs[0]),
 				},
 				Uuid:                  id,
 				Password:              header.Password,
 				UdpRelayMode:          udpRelayMode,
-				CongestionController:  header.Feature1.(string),
+				CongestionController:  cc,
 				ReduceRtt:             true,
 				CWND:                  uint64(cwnd),
 				MaxUdpRelayPacketSize: maxDatagramFrameSize,
