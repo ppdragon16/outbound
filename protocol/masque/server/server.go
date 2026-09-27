@@ -110,25 +110,42 @@ func (s *Server) Close() error {
 
 // ServeHTTP dispatches one request stream: plain CONNECT relays TCP,
 // extended CONNECT relays UDP datagrams.
+//
+// The request stream is hijacked only after every check has passed and the
+// success status is committed: http3's HTTPStream() flushes, which commits a
+// default 200 OK when no status was written yet, and a later WriteHeader is
+// then a no-op - validating after hijacking would silently turn rejections
+// into successful CONNECTs.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodConnect {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	str, ok := w.(http3.HTTPStreamer).HTTPStream().(http3.Stream)
+	if r.Proto == connectUDPProtocol {
+		s.serveUDP(w, r)
+		return
+	}
+	s.serveTCP(w, r)
+}
+
+// hijackStream commits a 200 response and takes over the raw stream. Call it
+// only once the request is known to be servable.
+func hijackStream(w http.ResponseWriter) (http3.Stream, bool) {
+	hijacker, ok := w.(http3.HTTPStreamer)
 	if !ok {
 		w.WriteHeader(http.StatusInternalServerError)
-		return
+		return nil, false
 	}
-	if r.Proto == connectUDPProtocol {
-		s.serveUDP(w, r, str)
-		return
+	w.WriteHeader(http.StatusOK)
+	str, ok := hijacker.HTTPStream().(http3.Stream)
+	if !ok {
+		return nil, false
 	}
-	s.serveTCP(w, r, str)
+	return str, true
 }
 
 // serveTCP relays a plain CONNECT as a raw TCP tunnel.
-func (s *Server) serveTCP(w http.ResponseWriter, r *http.Request, str http3.Stream) {
+func (s *Server) serveTCP(w http.ResponseWriter, r *http.Request) {
 	target, err := parseTarget("tcp", r.Host, s.conf.AllowTarget)
 	if err != nil {
 		w.WriteHeader(http.StatusForbidden)
@@ -142,7 +159,11 @@ func (s *Server) serveTCP(w http.ResponseWriter, r *http.Request, str http3.Stre
 		return
 	}
 	defer up.Close()
-	w.WriteHeader(http.StatusOK)
+
+	str, ok := hijackStream(w)
+	if !ok {
+		return
+	}
 
 	// Client half-close (a FIN on the stream) must become a TCP FIN, and a
 	// TCP FIN must finish the stream - otherwise either side lingers until
@@ -160,7 +181,7 @@ func (s *Server) serveTCP(w http.ResponseWriter, r *http.Request, str http3.Stre
 }
 
 // serveUDP relays an extended CONNECT-UDP flow as datagrams to one target.
-func (s *Server) serveUDP(w http.ResponseWriter, r *http.Request, str http3.Stream) {
+func (s *Server) serveUDP(w http.ResponseWriter, r *http.Request) {
 	target, err := parseUDPPath(r.URL.Path)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -182,7 +203,10 @@ func (s *Server) serveUDP(w http.ResponseWriter, r *http.Request, str http3.Stre
 	defer up.Close()
 
 	w.Header().Set("Capsule-Protocol", "?1")
-	w.WriteHeader(http.StatusOK)
+	str, ok := hijackStream(w)
+	if !ok {
+		return
+	}
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()

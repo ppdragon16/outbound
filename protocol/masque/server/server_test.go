@@ -13,10 +13,12 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"io"
 	"math/big"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -53,6 +55,86 @@ func startProxy(t *testing.T, conns func(quic.Connection)) string {
 	go func() { _ = srv.Serve(pc) }()
 	t.Cleanup(func() { _ = srv.Close() })
 	return pc.LocalAddr().String()
+}
+
+// startProxyWithGate is startProxy with a target gate, for the rejection paths.
+func startProxyWithGate(t *testing.T, allow func(network string, addr netip.AddrPort) error) string {
+	t.Helper()
+	srv, err := server.New(server.Config{
+		Certificate: cert(t),
+		AllowTarget: allow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(pc) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	return pc.LocalAddr().String()
+}
+
+// TestTCPTargetDeniedIsDelivered pins the rejection path: a denied target must
+// reach the client as a 403. Hijacking the stream before validating would
+// commit a default 200 (http3's HTTPStream flushes), turning the refusal into a
+// successful CONNECT.
+func TestTCPTargetDeniedIsDelivered(t *testing.T) {
+	denied := errors.New("denied")
+	proxy := startProxyWithGate(t, func(string, netip.AddrPort) error { return denied })
+	c := newClient(t, proxy)
+
+	_, err := c.DialContext(context.Background(), "tcp", "127.0.0.1:19099")
+	if err == nil {
+		t.Fatal("dial succeeded against a target the server refuses")
+	}
+	if !strings.Contains(err.Error(), "403") {
+		t.Fatalf("err = %v, want a 403 CONNECT rejection", err)
+	}
+}
+
+// TestTCPUpstreamFailureIsDelivered covers the other pre-hijack failure: the
+// target is allowed but unreachable, so the client must see a 502.
+func TestTCPUpstreamFailureIsDelivered(t *testing.T) {
+	// Nothing listens on this port.
+	dead, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := dead.Addr().String()
+	dead.Close()
+
+	proxy := startProxy(t, nil)
+	c := newClient(t, proxy)
+	_, err = c.DialContext(context.Background(), "tcp", target)
+	if err == nil {
+		t.Fatal("dial succeeded against an unreachable target")
+	}
+	if !strings.Contains(err.Error(), "502") {
+		t.Fatalf("err = %v, want a 502 CONNECT rejection", err)
+	}
+}
+
+// TestUDPTargetDeniedIsDelivered is the CONNECT-UDP counterpart.
+func TestUDPTargetDeniedIsDelivered(t *testing.T) {
+	denied := errors.New("denied")
+	proxy := startProxyWithGate(t, func(string, netip.AddrPort) error { return denied })
+	target := startUDPEcho(t)
+	c := newClient(t, proxy)
+
+	pc, err := c.ListenPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	_, err = pc.WriteTo([]byte("denied"), target)
+	if err == nil {
+		t.Fatal("CONNECT-UDP succeeded against a target the server refuses")
+	}
+	if !strings.Contains(err.Error(), "403") {
+		t.Fatalf("err = %v, want a 403 CONNECT-UDP rejection", err)
+	}
 }
 
 func cert(t *testing.T) utls.Certificate {
