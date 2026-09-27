@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -116,9 +117,24 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 
 	common.SetCongestionController(quicConn, t.CongestionController, t.CWND)
 
-	go func() {
-		_ = t.sendAuthentication(quicConn)
-	}()
+	// Authenticate synchronously: tuic v5 requires the AUTH command to be
+	// sent before any other stream, and the async version raced dae's very
+	// first connect stream - the server answered by closing the connection
+	// with application error 0x0, surfacing as a failed DNS connectivity
+	// check ("failed to read DNS resp payload length"). The auth uni-stream
+	// write is local and buffered, so doing it inline costs nothing extra.
+	if err := t.sendAuthentication(quicConn); err != nil {
+		// The caller holds connMutex and owns cleanup: sendAuthentication
+		// must not call deferQuicConn (that re-enters forceClose and
+		// deadlocks on this mutex). Tear the connection down here; a shared
+		// transport belongs to other clients, so only its connection dies.
+		_ = quicConn.CloseWithError(ProtocolError, err.Error())
+		if t.sharedTransportPtr == nil {
+			_ = transport.Close()
+			_ = transport.Conn.Close()
+		}
+		return nil, err
+	}
 
 	if t.udp && t.UdpRelayMode == common.QUIC {
 		go func() {
@@ -137,10 +153,11 @@ func (t *clientImpl) getQuicConn(ctx context.Context, dialer netproxy.Dialer, di
 	return quicConn, nil
 }
 
+// sendAuthentication writes the v5 AUTH command on a fresh uni stream. The
+// caller (getQuicConn) holds connMutex until it returns and owns teardown on
+// failure, so this function must NOT call deferQuicConn: that would re-enter
+// forceClose and deadlock on the same mutex.
 func (t *clientImpl) sendAuthentication(quicConn quic.Connection) (err error) {
-	defer func() {
-		t.deferQuicConn(quicConn, err)
-	}()
 	stream, err := quicConn.OpenUniStream()
 	if err != nil {
 		return err
@@ -251,6 +268,8 @@ func (t *clientImpl) handleMessage(quicConn quic.Connection) (err error) {
 			// Packet not dispatched: release pool-backed resources.
 			packet.Release()
 		case HeartbeatType:
+			quicConn.ReleaseDatagram(message)
+		default:
 			quicConn.ReleaseDatagram(message)
 		}
 	}
@@ -428,7 +447,16 @@ func (t *clientImpl) ListenPacketWithDialer(ctx context.Context, metadata *proto
 			break
 		}
 	}
+	// targetAddrPort is parsed once here (H4) so net.Conn-form Write() does
+	// not re-parse the target string per datagram.
+	var targetAddrPort netip.AddrPort
+	if metadata.CachedAddr.IsValid() {
+		targetAddrPort = netip.AddrPortFrom(metadata.CachedAddr.Unmap(), metadata.Port)
+	} else if ap, perr := netip.ParseAddr(metadata.Hostname); perr == nil {
+		targetAddrPort = netip.AddrPortFrom(ap.Unmap(), metadata.Port)
+	}
 	pc := &quicStreamPacketConn{
+		targetAddrPort:        targetAddrPort,
 		connId:                connId,
 		quicConn:              quicConn,
 		incomingPackets:       incomingPackets,

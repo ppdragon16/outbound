@@ -1,6 +1,7 @@
 package tuic
 
 import (
+	"errors"
 	"net"
 	"net/netip"
 	"sync"
@@ -71,7 +72,10 @@ func (p *Packets) Close() error {
 type quicStreamPacketConn struct {
 	mu sync.Mutex
 
-	target string
+	// targetAddrPort is the fixed datagram destination, parsed once at
+	// association creation so net.Conn-form Write() does not re-parse the
+	// target string per packet (H4).
+	targetAddrPort netip.AddrPort
 
 	connId          uint16
 	quicConn        quic.Connection
@@ -85,7 +89,15 @@ type quicStreamPacketConn struct {
 
 	closeOnce sync.Once
 	closeErr  error
-	closed    bool
+	// closed is read from the send path (WriteToAddrPort) and written by
+	// Close, so it must be atomic; a plain bool is a data race.
+	closed atomic.Bool
+
+	// writeScratch is a conn-private serialization buffer (H3): grown to
+	// this association's peak frame size and reused, avoiding a shared-pool
+	// round trip per datagram. Guarded by writeMu; nilled on close.
+	writeScratch []byte
+	writeMu      sync.Mutex
 
 	// deFraggers reassembles fragmented packets by PKT_ID.
 	// Only accessed from the single ReadFromAddrPort reader goroutine;
@@ -99,9 +111,24 @@ type quicStreamPacketConn struct {
 	deadlineTimer *time.Timer
 }
 
+// growScratch ensures the conn-private serialization buffer holds at least
+// need bytes, recycling the old buffer back to the pool when growing. The
+// scratch lives for the association's lifetime (Get on first grow, Put on
+// close), so the pool round trip is per association, not per datagram.
+// Caller must hold writeMu.
+func (q *quicStreamPacketConn) growScratch(need int) {
+	if len(q.writeScratch) >= need {
+		return
+	}
+	if q.writeScratch != nil {
+		pool.PutBuffer(q.writeScratch)
+	}
+	q.writeScratch = pool.GetBuffer(need)
+}
+
 func (q *quicStreamPacketConn) Close() error {
 	q.closeOnce.Do(func() {
-		q.closed = true
+		q.closed.Store(true)
 		q.closeErr = q.close()
 	})
 	return q.closeErr
@@ -124,6 +151,20 @@ func (q *quicStreamPacketConn) close() (err error) {
 		pkts := q.incomingPackets
 		q.incomingPackets = nil
 		pkts.Close()
+
+		// Return the conn-private write scratch (H3) to the pool. This must
+		// take writeMu: a concurrent WriteToAddrPort may still be
+		// serializing into the buffer, and handing it back to the shared
+		// pool while a writer holds it lets an unrelated pooled user (for
+		// example the v5 AUTH frame's PooledBuffer) receive memory that is
+		// still being written - which the server answers with
+		// CloseWithError(0, "") after a token mismatch.
+		q.writeMu.Lock()
+		if q.writeScratch != nil {
+			pool.PutBuffer(q.writeScratch)
+			q.writeScratch = nil
+		}
+		q.writeMu.Unlock()
 
 		// Best-effort: tell the server to release this UDP association.
 		// If it fails (stream limit, dead conn, etc.), the server
@@ -301,7 +342,7 @@ func (q *quicStreamPacketConn) WriteToAddrPort(p []byte, ap netip.AddrPort) (n i
 	if len(p) > 0xffff { // uint16 max
 		return 0, &quic.DatagramTooLargeError{MaxDataLen: 0xffff}
 	}
-	if q.closed {
+	if q.closed.Load() {
 		return 0, net.ErrClosed
 	}
 	if q.deferQuicConnFn != nil {
@@ -309,11 +350,15 @@ func (q *quicStreamPacketConn) WriteToAddrPort(p []byte, ap netip.AddrPort) (n i
 			q.deferQuicConnFn(q.quicConn, err)
 		}()
 	}
+	// Serialize into the conn-private scratch (H3): one pooled-buffer round
+	// trip per datagram removed. Guarded by writeMu.
+	q.writeMu.Lock()
+	defer q.writeMu.Unlock()
 	pktId := uint16(fastrand.Uint32())
 	switch q.udpRelayMode {
 	case common.QUIC:
-		buf := buildPacketBuf(q.connId, pktId, 1, 0, p, ap)
-		defer pool.PutBuffer(buf)
+		q.growScratch(PacketOverHead + len(p))
+		buf := writePacketBufInto(q.writeScratch, q.connId, pktId, 1, 0, p, ap)
 		stream, err := q.quicConn.OpenUniStream()
 		if err != nil {
 			return 0, err
@@ -330,9 +375,9 @@ func (q *quicStreamPacketConn) WriteToAddrPort(p []byte, ap netip.AddrPort) (n i
 				return 0, err
 			}
 		} else {
-			buf := buildPacketBuf(q.connId, pktId, 1, 0, p, ap)
+			q.growScratch(PacketOverHead + len(p))
+			buf := writePacketBufInto(q.writeScratch, q.connId, pktId, 1, 0, p, ap)
 			err = q.quicConn.SendDatagram(buf)
-			pool.PutBuffer(buf)
 			// SendDatagram returns *DatagramTooLargeError directly (unwrapped);
 			// use a type assertion instead of errors.As to avoid the per-send
 			// interface-boxing allocation that errors.As(err, &target) incurs.
@@ -359,11 +404,10 @@ func (conn *quicStreamPacketConn) Read(b []byte) (n int, err error) {
 }
 
 func (conn *quicStreamPacketConn) Write(b []byte) (n int, err error) {
-	ap, err := netip.ParseAddrPort(conn.target)
-	if err != nil {
-		return 0, err
+	if !conn.targetAddrPort.IsValid() {
+		return 0, errors.New("tuic: association has no valid target address")
 	}
-	return conn.WriteToAddrPort(b, ap)
+	return conn.WriteToAddrPort(b, conn.targetAddrPort)
 }
 
 var _ net.PacketConn = (*quicStreamPacketConn)(nil)

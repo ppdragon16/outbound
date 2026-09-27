@@ -54,6 +54,50 @@ func buildPacketBuf(connId, pktId uint16, fragTotal, fragId uint8, data []byte, 
 	return buf
 }
 
+// writePacketBufInto serializes a full packet into the caller's buffer
+// (which must be at least PacketOverHead+len(data)) and returns the used
+// subslice. Conn-private scratch version of buildPacketBuf: the UDP send
+// path reuses one buffer per association instead of a shared-pool round
+// trip per datagram.
+func writePacketBufInto(buf []byte, connId, pktId uint16, fragTotal, fragId uint8, data []byte, addr netip.AddrPort) []byte {
+	var addrType byte
+	var addrRaw []byte
+	if addr.Addr().Is4() {
+		addrType = AtypIPv4
+		addrRaw = addr.Addr().AsSlice()
+	} else {
+		addrType = AtypIPv6
+		addrRaw = addr.Addr().AsSlice()
+	}
+	off := 0
+	buf[off] = Ver5
+	off++
+	buf[off] = byte(PacketType)
+	off++
+	binary.BigEndian.PutUint16(buf[off:], connId)
+	off += 2
+	binary.BigEndian.PutUint16(buf[off:], pktId)
+	off += 2
+	buf[off] = fragTotal
+	off++
+	buf[off] = fragId
+	off++
+	binary.BigEndian.PutUint16(buf[off:], uint16(len(data)))
+	off += 2
+	buf[off] = addrType
+	off++
+	copy(buf[off:], addrRaw)
+	off += len(addrRaw)
+	binary.BigEndian.PutUint16(buf[off:], addr.Port())
+	off += 2
+	off += copy(buf[off:], data)
+	// The returned slice must include the payload: sing-quic's decoder
+	// rejects any datagram whose remaining bytes after the address differ
+	// from the declared dataLength (io.ErrUnexpectedEOF), and the server
+	// turns that into CloseWithError(0, "").
+	return buf[:off]
+}
+
 // buildPacketBufAddrNone builds a tuic packet without address (ATYP_NONE).
 // Used for non-first fragments of a fragmented UDP packet.
 func buildPacketBufAddrNone(connId, pktId uint16, fragTotal, fragId uint8, data []byte) []byte {
