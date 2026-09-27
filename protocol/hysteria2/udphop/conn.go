@@ -13,6 +13,7 @@ import (
 	"github.com/daeuniverse/outbound/pkg/oops"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/net/ipv4"
 )
 
 const (
@@ -301,6 +302,112 @@ func (u *udpHopPacketConn) SetWriteDeadline(t time.Time) error {
 }
 
 // UDP-specific methods below
+
+// oobWriteMsgUDP is the subset of *net.UDPConn that carries GSO/ECN
+// ancillary data. Forwarding WriteMsgUDP's oob to the real socket is what
+// keeps quic-go's GSO batching alive across the hop wrapper.
+type oobWriteMsgUDP interface {
+	WriteMsgUDP(b, oob []byte, addr *net.UDPAddr) (n int, oobn int, err error)
+}
+
+// ReadMsgUDP implements quic-go fork's OOBCapablePacketConn. quic-go's
+// oobConn never calls this for reads (it uses ReadBatch via the unexported
+// batchConn interface), but the method must exist so the type assertion in
+// quic.wrapConn succeeds. It drains from the recvQueue to stay consistent
+// with ReadFrom and avoid racing the recvLoop on the underlying socket.
+func (u *udpHopPacketConn) ReadMsgUDP(b, oob []byte) (n, oobn, flags int, addr *net.UDPAddr, err error) {
+	_ = oob
+	n, src, err := u.ReadFrom(b)
+	if err != nil {
+		return 0, 0, 0, nil, err
+	}
+	udpAddr, _ := src.(*net.UDPAddr)
+	if udpAddr == nil {
+		udpAddr = &net.UDPAddr{}
+	}
+	return n, 0, 0, udpAddr, nil
+}
+
+// WriteMsgUDP implements quic-go fork's OOBCapablePacketConn. Forwarding to
+// the underlying connected socket preserves the GSO/ECN ancillary data
+// quic-go attaches, so a single sendmsg can segment many QUIC datagrams —
+// this is the whole point of satisfying the interface. The addr argument is
+// ignored: the underlying socket is connected to the active hop, and quic-go
+// 's addr may lag behind an in-flight hop. A proxied (non-socket) transport
+// degrades to a plain Write without GSO.
+func (u *udpHopPacketConn) WriteMsgUDP(b, oob []byte, _ *net.UDPAddr) (n, oobn int, err error) {
+	u.connMutex.RLock()
+	defer u.connMutex.RUnlock()
+	if u.ctx.Err() != nil {
+		return 0, 0, net.ErrClosed
+	}
+	if wc, ok := u.currentConn.(oobWriteMsgUDP); ok {
+		// The socket is connected; a nil addr sends to the connected peer.
+		return wc.WriteMsgUDP(b, oob, nil)
+	}
+	nn, err := u.currentConn.Write(b)
+	return nn, 0, err
+}
+
+// ReadBatch implements quic-go fork's (unexported) batchConn interface via
+// Go's structural typing. When present, quic-go's oobConn routes reads
+// through it instead of per-packet ReadMsgUDP — and this is critical for
+// port hopping: a kernel-bound batch reader (ipv4.NewPacketConn on the
+// current fd) would pin itself to the first hop's fd and silently stop
+// receiving after every hop. Draining the shared recvQueue stays correct
+// across hops while still handing quic-go a batch of packets per wakeup.
+func (u *udpHopPacketConn) ReadBatch(ms []ipv4.Message, flags int) (int, error) {
+	_ = flags
+	if len(ms) == 0 {
+		return 0, nil
+	}
+	select {
+	case <-u.ctx.Done():
+		return 0, net.ErrClosed
+	case p := <-u.recvQueue:
+		if p.Err != nil {
+			return 0, p.Err
+		}
+		count := u.fillBatchMessage(&ms[0], &p)
+		// Drain any further queued packets without blocking so quic-go can
+		// process a burst in a single receive-loop iteration.
+		for count < len(ms) {
+			select {
+			case p := <-u.recvQueue:
+				if p.Err != nil {
+					return count, p.Err
+				}
+				count += u.fillBatchMessage(&ms[count], &p)
+			default:
+				return count, nil
+			}
+		}
+		return count, nil
+	}
+}
+
+// fillBatchMessage copies one queued packet into an ipv4.Message slot and
+// recycles its pool buffer. Returns 1 on success, 0 if the caller provided
+// no usable buffer (the packet is dropped either way).
+func (u *udpHopPacketConn) fillBatchMessage(msg *ipv4.Message, p *udpPacket) int {
+	if len(msg.Buffers) == 0 || len(msg.Buffers[0]) == 0 {
+		pool.PutBuffer(p.Buf)
+		return 0
+	}
+	n := copy(msg.Buffers[0], p.Buf[:p.N])
+	pool.PutBuffer(p.Buf)
+	msg.N = n
+	msg.NN = 0
+	msg.Flags = 0
+	addr := p.Addr
+	if addr == nil {
+		u.connMutex.RLock()
+		addr = u.currentConn.RemoteAddr()
+		u.connMutex.RUnlock()
+	}
+	msg.Addr = addr
+	return 1
+}
 
 func (u *udpHopPacketConn) SetReadBuffer(bytes int) error {
 	u.connMutex.Lock()

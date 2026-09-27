@@ -99,7 +99,7 @@ func (u *udpConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err erro
 				return 0, netip.AddrPort{}, io.EOF
 			}
 			if err := protocol.ParseUDPMessage(datagram, &msg); err != nil {
-				pool.PutBuffer(datagram)
+				u.sm.conn.ReleaseDatagram(datagram)
 				continue
 			}
 			msg.DataBuf = datagram // set after Parse; it resets to nil
@@ -108,12 +108,12 @@ func (u *udpConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err erro
 					// The datagram is consumed either way; a short caller
 					// buffer must surface as ErrShortBuffer, not as a
 					// silently truncated packet.
-					pool.PutBuffer(datagram)
+					u.sm.conn.ReleaseDatagram(datagram)
 					return 0, msg.AddrPort, io.ErrShortBuffer
 				}
 				// Single fragment: copy and release immediately.
 				n = copy(p, msg.Data)
-				pool.PutBuffer(datagram)
+				u.sm.conn.ReleaseDatagram(datagram)
 				return n, msg.AddrPort, nil
 			}
 			// Fragmented: reassemble by PacketID. Each PacketID gets its own
@@ -140,14 +140,14 @@ func (u *udpConn) feedDefrag(m *protocol.UDPMessage, p []byte) (int, bool) {
 		if u.deFraggers == nil {
 			u.deFraggers = make(map[uint16]*frag.Defragger, 2)
 		}
-		d = frag.GetDefragger(pool.PutBuffer)
+		d = frag.GetDefragger(u.sm.releaseQuicBuf)
 		d.ExpiresAt = now.Add(defraggerTimeout)
 		u.deFraggers[m.PacketID] = d
 	} else if now.After(d.ExpiresAt) {
 		// Previous reassembly was abandoned (a fragment was lost); replace
 		// the stale Defragger, releasing its retained buffers.
 		d.Put()
-		d = frag.GetDefragger(pool.PutBuffer)
+		d = frag.GetDefragger(u.sm.releaseQuicBuf)
 		d.ExpiresAt = now.Add(defraggerTimeout)
 		u.deFraggers[m.PacketID] = d
 	}
@@ -247,14 +247,15 @@ func (u *udpConn) Close() error {
 	u.receiveMu.Lock()
 	u.releaseDeFraggers()
 	u.receiveMu.Unlock()
-	// Drain datagrams still queued for this session and return their pooled
-	// buffers. connMap.Delete happened above, so no new feed() can target this
-	// session; anything left in ReceiveCh will never be read again and would
-	// otherwise leak its pool buffer (up to udpMessageChanSize per session).
+	// Drain datagrams still queued for this session and release them back to
+	// quic-go. connMap.Delete happened above, so no new feed() can target
+	// this session; anything left in ReceiveCh will never be read again and
+	// would otherwise leak its quic-go datagram buffer (up to
+	// udpMessageChanSize per session).
 	for {
 		select {
 		case buf := <-u.ReceiveCh:
-			pool.PutBuffer(buf)
+			u.sm.conn.ReleaseDatagram(buf)
 		default:
 			return nil
 		}
@@ -321,6 +322,12 @@ func (m *udpSessionManager) run() error {
 	}
 }
 
+// releaseQuicBuf is the Defragger release hook: fragment buffers alias
+// quic-go datagram storage and must go back to quic-go's pool.
+func (m *udpSessionManager) releaseQuicBuf(b []byte) {
+	m.conn.ReleaseDatagram(b)
+}
+
 func (m *udpSessionManager) Close() {
 	m.cancel()
 }
@@ -343,18 +350,17 @@ func (m *udpSessionManager) feed(datagram []byte) {
 		return
 	}
 
-	// Copy into a pool buffer so the quic-go buffer can be released
-	// immediately — avoids exhausting the bounded datagramBufPool.
-	buf := pool.GetBuffer(len(datagram))
-	copy(buf, datagram)
-	m.conn.ReleaseDatagram(datagram)
-
+	// Zero-copy: the quic-go datagram buffer itself travels down the
+	// channel, and the consumer releases it back to quic-go's datagram pool
+	// via ReleaseDatagram when done. (Previously the datagram was memcpy'd
+	// into a pool buffer to release the quic buffer early — one full-packet
+	// copy per datagram on the hot path.)
 	select {
-	case conn.(*udpConn).ReceiveCh <- buf:
+	case conn.(*udpConn).ReceiveCh <- datagram:
 		// OK
 	default:
 		// Channel full, drop the message.
-		pool.PutBuffer(buf)
+		m.conn.ReleaseDatagram(datagram)
 	}
 }
 
