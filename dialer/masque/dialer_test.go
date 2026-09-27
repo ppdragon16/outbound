@@ -11,11 +11,13 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
+	quic "github.com/daeuniverse/quic-go"
 	"github.com/daeuniverse/quic-go/http3"
 	utls "github.com/refraction-networking/utls"
 )
@@ -68,11 +70,88 @@ func TestParseMasqueURLQuicV2(t *testing.T) {
 	}
 }
 
+func TestParseMasqueURLZeroRTT(t *testing.T) {
+	for _, link := range []string{
+		"masque://proxy.example.com:443?zero_rtt=1",
+		"masque://proxy.example.com:443?zero-rtt=true",
+		"masque://proxy.example.com:443?0rtt=1",
+		"masque://proxy.example.com:443?reduce_rtt=1",
+	} {
+		d, _, err := NewMasque(link)
+		if err != nil {
+			t.Fatalf("%s: %v", link, err)
+		}
+		if !d.(*Masque).ZeroRTT {
+			t.Errorf("%s: ZeroRTT must be set", link)
+		}
+	}
+	d, _, err := NewMasque("masque://proxy.example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.(*Masque).ZeroRTT {
+		t.Error("ZeroRTT must default to false")
+	}
+}
+
+// TestDialerZeroRTT checks that the link flag reaches the wire: a second
+// connection to the same proxy resumes the session and sends the CONNECT as
+// 0-RTT early data.
+func TestDialerZeroRTT(t *testing.T) {
+	proxy := startEchoProxyWith(t, nil)
+	const sni = "zerortt-dialer.masque.test"
+
+	d, err := NewDialer(nil, proxy.addr, sni, true, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTripEcho(t, d)
+	time.Sleep(200 * time.Millisecond) // let the session ticket arrive
+
+	// A fresh dialer opens a fresh H3 connection; it must resume with 0-RTT.
+	d2, err := NewDialer(nil, proxy.addr, sni, true, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTripEcho(t, d2)
+
+	got := proxy.observed()
+	if len(got) != 2 {
+		t.Fatalf("proxy saw %d CONNECT requests, want 2 (%v)", len(got), got)
+	}
+	if got[0] {
+		t.Error("first connection has no ticket yet, must not use 0-RTT")
+	}
+	if !got[1] {
+		t.Error("dialer with zero_rtt must resume with 0-RTT early data")
+	}
+}
+
+// roundTripEcho writes and reads one payload through a CONNECT tunnel.
+func roundTripEcho(t *testing.T, d netproxy.Dialer) {
+	t.Helper()
+	conn, err := d.DialContext(context.Background(), "tcp", "echo.example.com:7")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("zerortt")); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]byte, len("zerortt"))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "zerortt" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 // TestDialerEndToEnd exercises the netproxy.Dialer surface against a real
 // HTTP/3 CONNECT proxy.
 func TestDialerEndToEnd(t *testing.T) {
 	addr := startEchoProxy(t)
-	d, err := NewDialer(nil, addr, "masque.test", true, false)
+	d, err := NewDialer(nil, addr, "masque.test", true, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,18 +190,46 @@ func TestDialerEndToEnd(t *testing.T) {
 }
 
 func TestDialerRequiresAddress(t *testing.T) {
-	if _, err := NewDialer(nil, "", "", false, false); err == nil {
+	if _, err := NewDialer(nil, "", "", false, false, false); err == nil {
 		t.Fatal("empty address must be rejected")
 	}
+}
+
+// echoProxy serves plain HTTP/3 CONNECT with an echo tunnel and records, per
+// CONNECT request, whether the client resumed with 0-RTT early data.
+type echoProxy struct {
+	addr string
+
+	mu       sync.Mutex
+	used0RTT []bool
+}
+
+func (p *echoProxy) observed() []bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]bool(nil), p.used0RTT...)
 }
 
 // startEchoProxy serves plain HTTP/3 CONNECT with an echo tunnel.
 func startEchoProxy(t *testing.T) string {
 	t.Helper()
+	return startEchoProxyWith(t, nil).addr
+}
+
+// startEchoProxyWith starts the echo proxy; allow0RTT, when non-nil, overrides
+// the http3.Server default (which is to accept 0-RTT).
+func startEchoProxyWith(t *testing.T, allow0RTT *bool) *echoProxy {
+	t.Helper()
+	p := &echoProxy{}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
+		}
+		if conn, ok := r.Context().Value(echoConnKey{}).(quic.Connection); ok {
+			p.mu.Lock()
+			p.used0RTT = append(p.used0RTT, conn.ConnectionState().Used0RTT)
+			p.mu.Unlock()
 		}
 		str := w.(http3.HTTPStreamer).HTTPStream()
 		w.WriteHeader(http.StatusOK)
@@ -142,15 +249,25 @@ func startEchoProxy(t *testing.T) string {
 	server := &http3.Server{
 		Handler:   handler,
 		TLSConfig: &utls.Config{Certificates: []utls.Certificate{selfSignedCert(t)}},
+		ConnContext: func(ctx context.Context, c quic.Connection) context.Context {
+			return context.WithValue(ctx, echoConnKey{}, c)
+		},
+	}
+	if allow0RTT != nil {
+		server.QUICConfig = &quic.Config{Allow0RTT: *allow0RTT}
 	}
 	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
 	if err != nil {
 		t.Fatal(err)
 	}
+	p.addr = pc.LocalAddr().String()
 	go func() { _ = server.Serve(pc) }()
 	t.Cleanup(func() { _ = server.Close() })
-	return pc.LocalAddr().String()
+	return p
 }
+
+// echoConnKey carries the QUIC connection into the CONNECT handler.
+type echoConnKey struct{}
 
 func selfSignedCert(t *testing.T) utls.Certificate {
 	t.Helper()

@@ -6,6 +6,7 @@ import (
 
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
+	"github.com/daeuniverse/outbound/protocol"
 )
 
 func init() {
@@ -22,6 +23,10 @@ type Masque struct {
 	Insecure bool
 	// QuicV2 offers QUIC v2 (RFC 9369) in the first packet.
 	QuicV2 bool
+	// ZeroRTT sends the first CONNECT / CONNECT-UDP request as QUIC 0-RTT
+	// early data on a resumed session (one round trip less on reconnect).
+	// Opt-in because early data is replayable.
+	ZeroRTT bool
 }
 
 // NewMasque builds a Masque from a link.
@@ -64,6 +69,7 @@ func parseMasqueURL(link string) (*Masque, error) {
 		Sni:      sni,
 		Insecure: u.Query().Get("insecure") == "1",
 		QuicV2:   quicV2Requested(u.Query()),
+		ZeroRTT:  protocol.ZeroRTTRequested(u.Query()),
 	}, nil
 }
 
@@ -82,5 +88,5 @@ func (s *Masque) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer
 	if option != nil && option.AllowInsecure {
 		insecure = true
 	}
-	return NewDialer(parentDialer, s.Host, s.Sni, insecure, s.QuicV2)
+	return NewDialer(parentDialer, s.Host, s.Sni, insecure, s.QuicV2, s.ZeroRTT)
 }

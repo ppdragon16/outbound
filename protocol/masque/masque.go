@@ -9,6 +9,7 @@ package masque
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -54,6 +55,11 @@ type Client struct {
 	// version-negotiation fallback.
 	preferV2 bool
 
+	// zeroRTT sends the CONNECT / CONNECT-UDP request as QUIC 0-RTT early
+	// data on a resumed session. It is cleared for good when the proxy
+	// refuses the early data (see abandonEarlyData).
+	zeroRTT bool
+
 	mu     sync.Mutex
 	conn   *http3.ClientConn
 	closed bool
@@ -71,6 +77,17 @@ func WithAuthority(authority string) Option {
 // WithQuicV2 offers QUIC v2 first (RFC 9369), with v1 kept for fallback.
 func WithQuicV2(prefer bool) Option {
 	return func(c *Client) { c.preferV2 = prefer }
+}
+
+// WithZeroRTT opts into QUIC 0-RTT: on a resumed session the first CONNECT or
+// CONNECT-UDP request rides in early data, saving one round trip to the proxy.
+//
+// Early data is replayable by an observer, so this stays opt-in per outbound.
+// It also needs the proxy to accept 0-RTT (quic.Config.Allow0RTT, which
+// http3.Server enables by default); when the proxy refuses, the request is
+// retried once on a fresh connection without early data.
+func WithZeroRTT() Option {
+	return func(c *Client) { c.zeroRTT = true }
 }
 
 // WithPacketConnDialer routes the QUIC layer through the given packet conn
@@ -106,6 +123,11 @@ func NewClient(addr string, sni string, allowInsecure bool, opts ...Option) (*Cl
 	for _, opt := range opts {
 		opt(c)
 	}
+	if c.zeroRTT {
+		// 0-RTT needs a session ticket to resume from; without a cache
+		// DialEarly never resumes and the request is never sent early.
+		c.tlsConf.ClientSessionCache = protocol.ZeroRTTSessionCache()
+	}
 	if c.preferV2 {
 		c.quicConf.Versions = protocol.QuicVersions(protocol.Flags_Quic_PreferV2)
 	}
@@ -127,7 +149,7 @@ func (c *Client) ensureConn(ctx context.Context) (*http3.ClientConn, error) {
 		QUICConfig:      c.quicConf,
 		EnableDatagrams: true,
 	}
-	var qconn quic.EarlyConnection
+	var qconn quic.Connection
 	if c.dialUDP != nil {
 		pconn, err := c.dialUDP(ctx, c.addr)
 		if err != nil {
@@ -139,14 +161,22 @@ func (c *Client) ensureConn(ctx context.Context) (*http3.ClientConn, error) {
 			return nil, fmt.Errorf("masque: resolve proxy: %w", err)
 		}
 		qt := &quic.Transport{Conn: pconn}
-		qconn, err = qt.DialEarly(ctx, udpAddr, c.tlsConf, c.quicConf)
+		if c.zeroRTT {
+			qconn, err = qt.DialEarly(ctx, udpAddr, c.tlsConf, c.quicConf)
+		} else {
+			qconn, err = qt.Dial(ctx, udpAddr, c.tlsConf, c.quicConf)
+		}
 		if err != nil {
 			pconn.Close()
 			return nil, fmt.Errorf("masque: dial quic: %w", err)
 		}
 	} else {
 		var err error
-		qconn, err = quic.DialAddrEarly(ctx, c.addr, c.tlsConf, c.quicConf)
+		if c.zeroRTT {
+			qconn, err = quic.DialAddrEarly(ctx, c.addr, c.tlsConf, c.quicConf)
+		} else {
+			qconn, err = quic.DialAddr(ctx, c.addr, c.tlsConf, c.quicConf)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("masque: dial quic: %w", err)
 		}
@@ -155,30 +185,85 @@ func (c *Client) ensureConn(ctx context.Context) (*http3.ClientConn, error) {
 	return c.conn, nil
 }
 
+// openConnectStream opens a CONNECT (op "CONNECT") or CONNECT-UDP (op
+// "CONNECT-UDP") request stream on the shared H3 connection, sends req and
+// waits for the response headers. The stream is left open for tunneling; the
+// caller owns it and must cancel it if the response is not a success.
+//
+// When the proxy refuses the 0-RTT early data of the shared connection
+// (quic.Err0RTTRejected), that connection is dropped and the request is
+// retried once on a fresh connection that does not use early data.
+func (c *Client) openConnectStream(ctx context.Context, op string, req func() *http.Request) (http3.RequestStream, *http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		str, rsp, err := c.tryConnectStream(ctx, op, req)
+		if err == nil {
+			return str, rsp, nil
+		}
+		if attempt == 0 && c.abandonEarlyData(err) {
+			continue
+		}
+		return nil, nil, err
+	}
+}
+
+// tryConnectStream performs one request attempt on the current connection.
+func (c *Client) tryConnectStream(ctx context.Context, op string, req func() *http.Request) (http3.RequestStream, *http.Response, error) {
+	cc, err := c.ensureConn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	str, err := cc.OpenRequestStream(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("masque: open stream: %w", err)
+	}
+	if err := str.SendRequestHeader(req()); err != nil {
+		str.CancelWrite(0)
+		return nil, nil, fmt.Errorf("masque: send %s: %w", op, err)
+	}
+	rsp, err := str.ReadResponse()
+	if err != nil {
+		str.CancelWrite(0)
+		return nil, nil, fmt.Errorf("masque: read %s response: %w", op, err)
+	}
+	return str, rsp, nil
+}
+
+// abandonEarlyData turns 0-RTT off after the proxy refused the early data of
+// the shared connection, and reports whether the caller should retry without
+// early data. Turning it off also stops the other requests in flight on that
+// rejected connection from all retrying: whoever observes the rejection first
+// retries, the rest fail fast.
+func (c *Client) abandonEarlyData(err error) bool {
+	if !errors.Is(err, quic.Err0RTTRejected) {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.zeroRTT {
+		return false
+	}
+	c.zeroRTT = false
+	if c.conn != nil {
+		_ = c.conn.CloseWithError(0, "0-RTT rejected")
+		c.conn = nil
+	}
+	return true
+}
+
 // DialContext opens a TCP tunnel via a plain HTTP/3 CONNECT to address.
 func (c *Client) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
 	if network != "tcp" {
 		return nil, fmt.Errorf("masque: unsupported network %q, only tcp", network)
 	}
-	cc, err := c.ensureConn(ctx)
+	str, rsp, err := c.openConnectStream(ctx, "CONNECT", func() *http.Request {
+		return &http.Request{
+			Method: http.MethodConnect,
+			URL:    &url.URL{Host: address},
+			Host:   address,
+		}
+	})
 	if err != nil {
 		return nil, err
-	}
-	str, err := cc.OpenRequestStream(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("masque: open stream: %w", err)
-	}
-	req := &http.Request{
-		Method: http.MethodConnect,
-		URL:    &url.URL{Host: address},
-		Host:   address,
-	}
-	if err := str.SendRequestHeader(req); err != nil {
-		return nil, fmt.Errorf("masque: send CONNECT: %w", err)
-	}
-	rsp, err := str.ReadResponse()
-	if err != nil {
-		return nil, fmt.Errorf("masque: read CONNECT response: %w", err)
 	}
 	if rsp.StatusCode < 200 || rsp.StatusCode > 299 {
 		str.CancelWrite(0)

@@ -50,33 +50,23 @@ type udpFlow struct {
 
 // openFlow establishes a CONNECT-UDP tunnel toward raddr.
 func (c *Client) openFlow(ctx context.Context, raddr *net.UDPAddr) (*udpFlow, error) {
-	cc, err := c.ensureConn(ctx)
+	str, rsp, err := c.openConnectStream(ctx, "CONNECT-UDP", func() *http.Request {
+		return &http.Request{
+			Method: http.MethodConnect,
+			Proto:  connectUDPProtocol,
+			URL: &url.URL{
+				Scheme: "https",
+				Host:   c.authority,
+				Path:   udpPath(raddr.IP.String(), raddr.Port),
+			},
+			Host: c.authority,
+			Header: http.Header{
+				"capsule-protocol": []string{"?1"},
+			},
+		}
+	})
 	if err != nil {
 		return nil, err
-	}
-	str, err := cc.OpenRequestStream(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("masque: open stream: %w", err)
-	}
-	req := &http.Request{
-		Method: http.MethodConnect,
-		Proto:  connectUDPProtocol,
-		URL: &url.URL{
-			Scheme: "https",
-			Host:   c.authority,
-			Path:   udpPath(raddr.IP.String(), raddr.Port),
-		},
-		Host: c.authority,
-		Header: http.Header{
-			"capsule-protocol": []string{"?1"},
-		},
-	}
-	if err := str.SendRequestHeader(req); err != nil {
-		return nil, fmt.Errorf("masque: send CONNECT-UDP: %w", err)
-	}
-	rsp, err := str.ReadResponse()
-	if err != nil {
-		return nil, fmt.Errorf("masque: read CONNECT-UDP response: %w", err)
 	}
 	if rsp.StatusCode < 200 || rsp.StatusCode > 299 {
 		str.CancelWrite(0)

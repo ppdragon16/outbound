@@ -23,6 +23,7 @@ type Dialer struct {
 	sni           string
 	allowInsecure bool
 	preferV2      bool
+	zeroRTT       bool
 
 	mu  sync.Mutex
 	ins *masque.Client
@@ -30,8 +31,9 @@ type Dialer struct {
 
 // NewDialer returns a MASQUE dialer. sni is the TLS SNI (empty = proxy
 // host); allowInsecure skips certificate verification; preferV2 offers QUIC v2
-// (RFC 9369) in the first packet.
-func NewDialer(parent netproxy.Dialer, addr, sni string, allowInsecure, preferV2 bool) (*Dialer, error) {
+// (RFC 9369) in the first packet; zeroRTT sends the first request as QUIC 0-RTT
+// early data on a resumed session.
+func NewDialer(parent netproxy.Dialer, addr, sni string, allowInsecure, preferV2, zeroRTT bool) (*Dialer, error) {
 	if addr == "" {
 		return nil, fmt.Errorf("masque: proxy address is required")
 	}
@@ -43,6 +45,7 @@ func NewDialer(parent netproxy.Dialer, addr, sni string, allowInsecure, preferV2
 		sni:           sni,
 		allowInsecure: allowInsecure,
 		preferV2:      preferV2,
+		zeroRTT:       zeroRTT,
 	}, nil
 }
 
@@ -53,7 +56,11 @@ func (d *Dialer) client() (*masque.Client, error) {
 	if d.ins != nil {
 		return d.ins, nil
 	}
-	c, err := masque.NewClient(d.addr, d.sni, d.allowInsecure, masque.WithQuicV2(d.preferV2))
+	opts := []masque.Option{masque.WithQuicV2(d.preferV2)}
+	if d.zeroRTT {
+		opts = append(opts, masque.WithZeroRTT())
+	}
+	c, err := masque.NewClient(d.addr, d.sni, d.allowInsecure, opts...)
 	if err != nil {
 		return nil, err
 	}
