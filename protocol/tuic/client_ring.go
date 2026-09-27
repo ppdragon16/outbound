@@ -1,168 +1,76 @@
 package tuic
 
 import (
-	"container/list"
 	"context"
 	"errors"
 	"net"
 	"strings"
-	"sync"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
+	"github.com/daeuniverse/outbound/protocol/infra/clientring"
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
 )
 
+// clientRing is a thin facade over the shared infra ring, preserving the
+// protocol-facing API (DialContextWithDialer / ListenPacketWithDialer /
+// Close). The former hand-rolled mutex ring held its lock across the whole
+// QUIC handshake on failover, blocking every new connection on the dialer
+// for the duration; the shared ring waits on a context-aware semaphore
+// permit instead, so a cancelled caller returns immediately.
 type clientRing struct {
-	mu        sync.Mutex
-	ring      *list.List
-	current   *list.Element
-	newClient func(capabilityCallback func(n int64)) *clientImpl
-	reserved  int64
-}
-
-type clientRingNode struct {
-	cli *clientImpl
-	// capability is protected by quic RWMutex.
-	capability int64
+	ring     *clientring.Ring[*clientImpl]
+	reserved int64
 }
 
 func newClientRing(newClient func(capabilityCallback func(n int64)) *clientImpl, reserved int64) *clientRing {
-	ring := list.New().Init()
 	return &clientRing{
-		mu:        sync.Mutex{},
-		ring:      ring,
-		current:   nil,
-		newClient: newClient,
-		reserved:  reserved,
+		reserved: reserved,
+		ring: clientring.New(
+			newClient,
+			func(cli *clientImpl, fn func()) { cli.setOnClose(fn) },
+			func(cli *clientImpl) error { cli.Close(); return nil },
+			reserved,
+			isFailoverErr,
+		),
 	}
 }
 
+// isFailoverErr classifies the errors that justify walking to the next
+// client once every existing client has been tried: stream exhaustion
+// (matched by message, as quic-go surfaces it wrapped in transport errors),
+// a closed client, or the capability hold gate.
+func isFailoverErr(err error) bool {
+	return errors.Is(err, common.ErrClientClosed) ||
+		errors.Is(err, common.ErrHoldOn) ||
+		strings.Contains(err.Error(), common.ErrTooManyOpenStreams.Error())
+}
+
 func (r *clientRing) DialContextWithDialer(ctx context.Context, metadata *protocol.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (conn net.Conn, err error) {
-	defer func() {
-		r.ring.Len()
-	}()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	newCurrent := r.current
-	err = r._tryNext(&newCurrent, func(node *clientRingNode) error {
-		if node.capability != -1 && node.capability <= r.reserved {
+	err = r.ring.TryNextContext(ctx, func(node *clientring.Node[*clientImpl]) error {
+		if cap := node.Capability(); cap != -1 && cap <= r.reserved {
 			return common.ErrHoldOn
 		}
-		conn, err = node.cli.DialContextWithDialer(ctx, metadata, dialer, dialFn)
+		conn, err = node.Client.DialContextWithDialer(ctx, metadata, dialer, dialFn)
 		return err
 	})
-	r.current = newCurrent
 	return conn, err
 }
 
 func (r *clientRing) ListenPacketWithDialer(ctx context.Context, metadata *protocol.Metadata, dialer netproxy.Dialer, dialFn common.DialFunc) (conn net.PacketConn, err error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	newCurrent := r.current
-	err = r._tryNext(&newCurrent, func(node *clientRingNode) error {
-		if node.capability != -1 && node.capability <= r.reserved {
+	err = r.ring.TryNextContext(ctx, func(node *clientring.Node[*clientImpl]) error {
+		if cap := node.Capability(); cap != -1 && cap <= r.reserved {
 			return common.ErrHoldOn
 		}
-		conn, err = node.cli.ListenPacketWithDialer(ctx, metadata, dialer, dialFn)
+		conn, err = node.Client.ListenPacketWithDialer(ctx, metadata, dialer, dialFn)
 		return err
 	})
-	r.current = newCurrent
 	return conn, err
-}
-
-func (r *clientRing) _tryNext(current **list.Element, f func(cli *clientRingNode) error) (err error) {
-	var cli *clientRingNode
-	if *current == nil {
-		goto getNew
-	}
-	cli = (*current).Value.(*clientRingNode)
-	err = f(cli)
-	if err == nil {
-		// OK.
-		return nil
-	}
-
-	// Expected error: too many open streams.
-	*current = (*current).Next()
-	// NOTICE: Add the bellow code to reuse previous clients.
-	{
-		if *current == nil {
-			*current = r.ring.Front()
-		}
-	}
-
-	if *current == r.current {
-		// Clients are exhausted.
-		if strings.Contains(err.Error(), common.ErrTooManyOpenStreams.Error()) || errors.Is(err, common.ErrClientClosed) || errors.Is(err, common.ErrHoldOn) {
-			goto getNew
-		}
-		// Not the expected error.
-		return err
-	}
-
-	return r._tryNext(current, f)
-
-getNew:
-	newNode := &clientRingNode{
-		cli:        nil,
-		capability: -1,
-	}
-	newCli := r.newClient(func(n int64) { newNode.capability = n })
-	newNode.cli = newCli
-	r.current = r._insertAfterCurrent(newNode)
-	*current = r.current
-	return f(newNode)
-}
-
-func (r *clientRing) _insertAfterCurrent(node *clientRingNode) (elem *list.Element) {
-	if r.current == nil {
-		elem = r.ring.PushBack(node)
-		r.current = elem
-	} else {
-		elem = r.ring.InsertAfter(node, r.current)
-	}
-	node.cli.setOnClose(func() {
-		r.passiveRemove(elem)
-	})
-	return elem
-}
-
-func (r *clientRing) passiveRemove(elem *list.Element) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if elem.Value == nil {
-		// Removed.
-		return
-	}
-	elem.Value = nil
-	if r.current == elem {
-		r.current = elem.Next()
-	}
-	r.ring.Remove(elem)
 }
 
 // Close closes all clientImpls in the ring and clears the ring.
 // It is called when the parent Dialer is being permanently removed
 // (e.g. via update-sub or daemon shutdown).
 func (r *clientRing) Close() {
-	// Collect all clients under the lock, then release and close them
-	// individually. We must NOT hold r.mu while calling cli.Close() because
-	// clientImpl.forceClose triggers onClose -> passiveRemove which
-	// tries to acquire r.mu.
-	r.mu.Lock()
-	clients := make([]*clientImpl, 0)
-	for e := r.ring.Front(); e != nil; e = e.Next() {
-		if e.Value != nil {
-			clients = append(clients, e.Value.(*clientRingNode).cli)
-			e.Value = nil // prevent passiveRemove from operating on this element
-		}
-	}
-	r.ring.Init()
-	r.current = nil
-	r.mu.Unlock()
-
-	for _, cli := range clients {
-		cli.Close()
-	}
+	_ = r.ring.Close()
 }
