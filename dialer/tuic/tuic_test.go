@@ -81,3 +81,24 @@ func TestTuicURLRoundTripWithCwnd(t *testing.T) {
 		})
 	}
 }
+
+func TestTuicURLZeroRTT(t *testing.T) {
+	// zero_rtt_handshake is the sing-box spelling; the others are the shared
+	// helper's aliases. All must reach the flag.
+	for _, param := range []string{"zero_rtt", "zero_rtt_handshake", "zerortt", "0rtt"} {
+		parsed, err := ParseTuicURL("tuic://uuid:pass@example.com:443?" + param + "=1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !parsed.ZeroRTT {
+			t.Fatalf("%s=1 must enable 0-RTT", param)
+		}
+	}
+	parsed, err := ParseTuicURL("tuic://uuid:pass@example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.ZeroRTT {
+		t.Fatal("0-RTT must be opt-in")
+	}
+}

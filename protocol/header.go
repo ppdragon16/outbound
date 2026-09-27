@@ -32,3 +32,11 @@ const (
 //
 // The value is explicit because the iota groups above reuse the same bit space.
 const Flags_Quic_PreferV2 Flags = 1 << 8
+
+// Flags_Quic_ZeroRTT opts a QUIC-based outbound into TLS session resumption
+// with 0-RTT: the client keeps a session cache and dials with DialEarly, so a
+// reconnecting connection resumes from the ticket the server issued. Only
+// meaningful for protocols whose first request tolerates (or, like tuic, is
+// deferred until after the handshake anyway); early data is replayable, so it
+// stays opt-in per link.
+const Flags_Quic_ZeroRTT Flags = 1 << 9

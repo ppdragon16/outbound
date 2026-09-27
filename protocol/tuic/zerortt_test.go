@@ -36,7 +36,7 @@ func TestEnsureFullHandshakeAcceptsCompletedHandshake(t *testing.T) {
 	done := make(chan struct{})
 	close(done)
 	conn := &fakeQuicConn{handshake: done, ctx: context.Background()}
-	if err := ensureFullHandshake(context.Background(), conn); err != nil {
+	if err := ensureFullHandshake(context.Background(), conn, false); err != nil {
 		t.Fatalf("completed, non-0-RTT handshake rejected: %v", err)
 	}
 }
@@ -52,9 +52,25 @@ func TestEnsureFullHandshakeRefuses0RTT(t *testing.T) {
 		ctx:       context.Background(),
 		state:     quic.ConnectionState{Used0RTT: true},
 	}
-	err := ensureFullHandshake(context.Background(), conn)
+	err := ensureFullHandshake(context.Background(), conn, false)
 	if !errors.Is(err, Err0RTTNotUsable) {
 		t.Fatalf("err = %v, want Err0RTTNotUsable", err)
+	}
+}
+
+// The same connection is fine when the link opted into 0-RTT: the AUTH token
+// is derived after the completed handshake either way, so a resumed
+// connection authenticates exactly like a fresh one.
+func TestEnsureFullHandshakeAccepts0RTTWhenOptedIn(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	conn := &fakeQuicConn{
+		handshake: done,
+		ctx:       context.Background(),
+		state:     quic.ConnectionState{Used0RTT: true},
+	}
+	if err := ensureFullHandshake(context.Background(), conn, true); err != nil {
+		t.Fatalf("opted-in 0-RTT connection rejected: %v", err)
 	}
 }
 
@@ -63,14 +79,14 @@ func TestEnsureFullHandshakeGivesUpOnCancelledHandshake(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	conn := &fakeQuicConn{handshake: make(chan struct{}), ctx: context.Background()}
-	if err := ensureFullHandshake(ctx, conn); !errors.Is(err, context.Canceled) {
+	if err := ensureFullHandshake(ctx, conn, false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
 
 	connCtx, connCancel := context.WithCancel(context.Background())
 	connCancel()
 	conn = &fakeQuicConn{handshake: make(chan struct{}), ctx: connCtx}
-	if err := ensureFullHandshake(context.Background(), conn); !errors.Is(err, context.Canceled) {
+	if err := ensureFullHandshake(context.Background(), conn, false); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want the connection's own error", err)
 	}
 }
@@ -78,11 +94,11 @@ func TestEnsureFullHandshakeGivesUpOnCancelledHandshake(t *testing.T) {
 // A plain Dial result carries no HandshakeComplete method; there the
 // handshake is already done, so the check must pass without waiting.
 func TestEnsureFullHandshakeSkipsPlainDial(t *testing.T) {
-	if err := ensureFullHandshake(context.Background(), &plainConn{}); err != nil {
+	if err := ensureFullHandshake(context.Background(), &plainConn{}, false); err != nil {
 		t.Fatalf("plain Dial result rejected: %v", err)
 	}
 	// ...but a plain conn reporting 0-RTT (a future dial path) is still refused.
-	err := ensureFullHandshake(context.Background(), &plainConn{state: quic.ConnectionState{Used0RTT: true}})
+	err := ensureFullHandshake(context.Background(), &plainConn{state: quic.ConnectionState{Used0RTT: true}}, false)
 	if !errors.Is(err, Err0RTTNotUsable) {
 		t.Fatalf("err = %v, want Err0RTTNotUsable", err)
 	}
@@ -95,7 +111,7 @@ func TestEnsureFullHandshakeRespectsDeadline(t *testing.T) {
 	defer cancel()
 	conn := &fakeQuicConn{handshake: make(chan struct{}), ctx: context.Background()}
 	start := time.Now()
-	err := ensureFullHandshake(ctx, conn)
+	err := ensureFullHandshake(ctx, conn, false)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
 	}

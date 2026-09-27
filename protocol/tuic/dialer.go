@@ -127,6 +127,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 				UdpRelayMode:          udpRelayMode,
 				CongestionController:  cc,
 				ReduceRtt:             true,
+				ZeroRTT:               header.Flags&protocol.Flags_Quic_ZeroRTT != 0,
 				CWND:                  uint64(cwnd),
 				MaxUdpRelayPacketSize: maxDatagramFrameSize,
 			},

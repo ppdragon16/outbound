@@ -44,11 +44,12 @@ type queryValues interface {
 	Get(string) string
 }
 
-// ZeroRTTRequested reports whether a link's query opts into 0-RTT. 0-RTT data
-// is replayable by an observer, so it stays opt-in per outbound rather than
-// being switched on globally.
+// ZeroRTTRequested reports whether a link's query opts into 0-RTT. Accepted
+// keys: zero_rtt, zero-rtt, zerortt, 0rtt, reduce_rtt, and zero_rtt_handshake
+// (the sing-box spelling). 0-RTT data is replayable by an observer, so it
+// stays opt-in per outbound rather than being switched on globally.
 func ZeroRTTRequested(q queryValues) bool {
-	for _, key := range []string{"zero_rtt", "zero-rtt", "zerortt", "0rtt", "reduce_rtt"} {
+	for _, key := range []string{"zero_rtt", "zero-rtt", "zerortt", "0rtt", "reduce_rtt", "zero_rtt_handshake"} {
 		if v := q.Get(key); v == "1" || v == "true" {
 			return true
 		}

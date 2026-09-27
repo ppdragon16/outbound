@@ -31,6 +31,9 @@ type Tuic struct {
 	CongestionControl string
 	// QuicV2 offers QUIC v2 (RFC 9369) in the first packet.
 	QuicV2 bool
+	// ZeroRTT keeps a TLS session cache and resumes connections (the server
+	// needs zero_rtt_handshake). Opt-in because 0-RTT data is replayable.
+	ZeroRTT bool
 	// Cwnd is the congestion_control parameter: for "brutal" it carries the
 	// target bandwidth in bytes per second (community convention, matching
 	// sing-box and the tuic brutal forks).
@@ -62,6 +65,9 @@ func (s *Tuic) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer) 
 	}
 	if s.QuicV2 {
 		flags |= protocol.Flags_Quic_PreferV2
+	}
+	if s.ZeroRTT {
+		flags |= protocol.Flags_Quic_ZeroRTT
 	}
 	if d, err = protocol.NewDialer("tuic", d, protocol.Header{
 		ProxyAddress: net.JoinHostPort(s.Server, strconv.Itoa(s.Port)),
@@ -147,6 +153,7 @@ func ParseTuicURL(u string) (data *Tuic, err error) {
 		DisableSni:        disableSni,
 		CongestionControl: t.Query().Get("congestion_control"),
 		QuicV2:            QuicV2Requested(t.Query()),
+		ZeroRTT:           protocol.ZeroRTTRequested(t.Query()),
 		Cwnd:              cwndFromQuery(t),
 		Alpn:              alpn,
 		UdpRelayMode:      strings.ToLower(t.Query().Get("udp_relay_mode")),
