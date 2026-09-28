@@ -23,7 +23,6 @@ import (
 	"github.com/daeuniverse/quic-go/http3"
 	utls "github.com/refraction-networking/utls"
 
-
 	"github.com/daeuniverse/outbound/protocol"
 )
 
@@ -67,6 +66,13 @@ type Client struct {
 	// refuses the early data (see abandonEarlyData).
 	zeroRTT bool
 
+	// initialPacketSize is the QUIC Initial packet size (the path MTU budget
+	// in use before discovery). Zero keeps the safe protocol default (1280),
+	// which fits every path; a larger value (e.g. 1452 on a 1500-MTU path)
+	// makes big datagrams deliverable immediately, but drops the handshake on
+	// paths whose MTU cannot carry it. See WithMTU.
+	initialPacketSize int
+
 	mu     sync.Mutex
 	conn   *http3.ClientConn
 	closed bool
@@ -97,6 +103,19 @@ func WithZeroRTT() Option {
 	return func(c *Client) { c.zeroRTT = true }
 }
 
+// WithMTU sets the QUIC Initial packet size, i.e. the path MTU budget this
+// client starts from (before MTU discovery). Use it when the path is known to
+// carry 1500-byte datagrams (link parameter mtu=1452) so that datagrams up to
+// the relay cap are deliverable from the first packet instead of after path
+// MTU discovery converges.
+//
+// Leave it unset on unknown paths: an oversized Initial packet is dropped by
+// any hop whose MTU is smaller and the handshake never completes
+// ("timeout: no recent network activity").
+func WithMTU(mtu int) Option {
+	return func(c *Client) { c.initialPacketSize = mtu }
+}
+
 // WithPacketConnDialer routes the QUIC layer through the given packet conn
 // factory, allowing MASQUE to be stacked on top of another UDP path.
 func WithPacketConnDialer(fn func(ctx context.Context, addr string) (net.PacketConn, error)) Option {
@@ -123,11 +142,6 @@ func NewClient(addr string, sni string, allowInsecure bool, opts ...Option) (*Cl
 		quicConf: &quic.Config{
 			MaxIdleTimeout:  idleTimeout,
 			EnableDatagrams: true,
-			// Start with the standard QUIC maximum packet size: the UDP relay
-			// cap (maxDatagramSize) is only deliverable once the path MTU
-			// estimate covers it, and DPLPMTUD would otherwise take a few
-			// seconds after every reconnect to raise it past 1200.
-			InitialPacketSize: 1452,
 		},
 		alive: atomic.Bool{},
 	}
@@ -135,12 +149,14 @@ func NewClient(addr string, sni string, allowInsecure bool, opts ...Option) (*Cl
 	for _, opt := range opts {
 		opt(c)
 	}
-	fmt.Printf("[debug] masque client quicConf.InitialPacketSize = %d\n", c.quicConf.InitialPacketSize)
 
 	if c.zeroRTT {
 		// 0-RTT needs a session ticket to resume from; without a cache
 		// DialEarly never resumes and the request is never sent early.
 		c.tlsConf.ClientSessionCache = protocol.ZeroRTTSessionCache()
+	}
+	if c.initialPacketSize > 0 {
+		c.quicConf.InitialPacketSize = uint16(c.initialPacketSize)
 	}
 	if c.preferV2 {
 		c.quicConf.Versions = protocol.QuicVersions(protocol.Flags_Quic_PreferV2)

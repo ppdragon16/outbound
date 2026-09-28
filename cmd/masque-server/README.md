@@ -90,6 +90,7 @@ masque-server -listen :443 -cert /etc/masque/fullchain.pem -key /etc/masque/priv
 | `-cert` | — | TLS certificate (PEM), required; chain file if the issuer sends intermediates |
 | `-key` | — | TLS private key (PEM), required |
 | `-idle-timeout` | `5m` | how long a UDP flow may stay silent before its relay is dropped |
+| `-mtu` | `0` | QUIC Initial packet size (path MTU budget); `0` keeps the safe default 1280. Set only after measuring the path (see [Path MTU](#path-mtu-and-the-udp-relay-budget)) |
 | `-allow-targets` | empty | comma-separated CIDRs of allowed relay targets; empty allows all (**open relay**) |
 | `-v` | off | log every relayed target and rejection |
 
@@ -174,10 +175,49 @@ masque://proxy.example.com:443?sni=proxy.example.com&zero_rtt=1#masque-node
 | `sni` / `peer` | TLS SNI (defaults to the proxy host) |
 | `insecure=1` | skip certificate verification (self-signed deployments) |
 | `zero_rtt=1` | send the first CONNECT / CONNECT-UDP as QUIC 0-RTT early data on a resumed session |
+| `mtu` | QUIC Initial packet size, e.g. `mtu=1452` on a path that carries 1500-byte datagrams (see [Path MTU](#path-mtu-and-the-udp-relay-budget)) |
 
 `zero_rtt` needs the server to accept 0-RTT; this server does by default
 (`http3.Server` sets `Allow0RTT: true` unless a custom `QUICConfig` is given).
 Early data is replayable, which is why it stays opt-in per link.
+
+## Path MTU and the UDP relay budget
+
+UDP datagrams travel one per QUIC datagram, so the tunnel's budget is the outer
+path MTU minus roughly 50 bytes of IPv6/UDP/QUIC headers and framing. The server
+accepts inner datagrams up to 1400 bytes; whether they are deliverable depends
+on the path.
+
+Both ends start from the QUIC default Initial packet size (1280), which fits
+every path, and rely on QUIC path MTU discovery to raise the budget. Discovery
+needs the socket's don't-fragment capability and needs traffic to probe, so
+large datagrams can be dropped for the first seconds after a connection (or
+until other traffic drives the probes). The inner connection (typically a
+browser's QUIC) sees those drops as loss and shrinks its own packet size, which
+is the normal tunnel MTU trade-off.
+
+If the path is known to carry 1500-byte datagrams, start bigger on both ends so
+the full budget is available immediately:
+
+```sh
+# server
+masque-server -listen :7443 -cert ... -key ... -mtu 1452
+# client link
+masque://[2001:db8::1]:7443?sni=proxy.example.com&mtu=1452&zero_rtt=1#node
+```
+
+Measure before setting it: an Initial packet of `mtu` bytes needs `mtu + 48`
+bytes of path MTU (IPv6) or `mtu + 28` (IPv4), and an oversized Initial is
+dropped by any hop whose MTU is smaller, after which the handshake never
+completes (`timeout: no recent network activity`). From the client host:
+
+```sh
+ping -6 -M do -s 1400 proxy.example.com   # succeeds => path MTU >= 1448
+ping -6 -M do -s 1452 proxy.example.com   # succeeds => mtu=1452 is safe
+```
+
+Leave `mtu` unset when unsure: the handshake always works and the budget grows
+to whatever the path supports.
 
 ## Security
 

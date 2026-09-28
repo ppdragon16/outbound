@@ -2,6 +2,7 @@ package masque
 
 import (
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/daeuniverse/outbound/dialer"
@@ -27,6 +28,10 @@ type Masque struct {
 	// early data on a resumed session (one round trip less on reconnect).
 	// Opt-in because early data is replayable.
 	ZeroRTT bool
+	// MTU is the QUIC Initial packet size (path MTU budget) from ?mtu=1452.
+	// Zero keeps the safe default (1280), which fits every path; set it only
+	// when the path is known to carry 1500-byte datagrams.
+	MTU int
 }
 
 // NewMasque builds a Masque from a link.
@@ -70,7 +75,23 @@ func parseMasqueURL(link string) (*Masque, error) {
 		Insecure: u.Query().Get("insecure") == "1",
 		QuicV2:   quicV2Requested(u.Query()),
 		ZeroRTT:  protocol.ZeroRTTRequested(u.Query()),
+		MTU:      mtuRequested(u.Query()),
 	}, nil
+}
+
+// mtuRequested parses ?mtu=1452 into an Initial packet size, ignoring values
+// quic-go would refuse to use (it clamps to [1200, 65535] anyway, but a silent
+// clamp would make the link parameter look effective when it is not).
+func mtuRequested(q url.Values) int {
+	v := q.Get("mtu")
+	if v == "" {
+		return 0
+	}
+	mtu, err := strconv.Atoi(v)
+	if err != nil || mtu < 1200 || mtu > 65535 {
+		return 0
+	}
+	return mtu
 }
 
 // quicV2Requested reports whether the link asks for QUIC v2 first.
@@ -88,5 +109,5 @@ func (s *Masque) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer
 	if option != nil && option.AllowInsecure {
 		insecure = true
 	}
-	return NewDialer(parentDialer, s.Host, s.Sni, insecure, s.QuicV2, s.ZeroRTT)
+	return NewDialer(parentDialer, s.Host, s.Sni, insecure, s.QuicV2, s.ZeroRTT, s.MTU)
 }

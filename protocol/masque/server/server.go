@@ -57,6 +57,12 @@ type Config struct {
 	AllowTarget func(network string, addr netip.AddrPort) error
 	// Logger receives per-connection warnings; nil logging is fine.
 	Logger *slog.Logger
+	// InitialPacketSize sets the QUIC Initial packet size (path MTU budget) of
+	// the server's connections. Zero keeps the safe protocol default (1280); a
+	// larger value (e.g. 1452 on a 1500-MTU path) lets the relay carry the full
+	// datagram budget from the first packet, but breaks the handshake with
+	// clients whose path MTU cannot carry it.
+	InitialPacketSize int
 	// ConnContext, when set, is called with each accepted QUIC connection,
 	// mirroring http3.Server.ConnContext. Use it to tag request contexts with
 	// connection state (e.g. for metrics).
@@ -82,10 +88,15 @@ func New(conf Config) (*Server, error) {
 	if conf.Logger == nil {
 		conf.Logger = slog.New(slog.DiscardHandler)
 	}
+	quicConf := &quic.Config{Allow0RTT: true}
+	if conf.InitialPacketSize > 0 {
+		quicConf.InitialPacketSize = uint16(conf.InitialPacketSize)
+	}
 	s := &Server{conf: conf, log: conf.Logger}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.h3 = &http3.Server{
-		Handler: s,
+		Handler:    s,
+		QUICConfig: quicConf,
 		// EnableDatagrams is what the client's CONNECT-UDP datagrams ride
 		// on; without it ReceiveDatagram/SendDatagram fail.
 		EnableDatagrams: true,

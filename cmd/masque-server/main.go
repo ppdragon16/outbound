@@ -24,6 +24,7 @@ func main() {
 	certFile := flag.String("cert", "", "TLS certificate (PEM)")
 	keyFile := flag.String("key", "", "TLS private key (PEM)")
 	idle := flag.Duration("idle-timeout", 5*time.Minute, "UDP flow idle timeout")
+	mtu := flag.Int("mtu", 0, "QUIC Initial packet size (path MTU budget); 0 = safe default 1280, 1452 for 1500-MTU paths")
 	allowTargets := flag.String("allow-targets", "", "comma-separated CIDRs of relayable targets; empty allows all (open relay!)")
 	verbose := flag.Bool("v", false, "log every relayed target")
 	flag.Parse()
@@ -70,10 +71,11 @@ func main() {
 	}
 
 	srv, err := server.New(server.Config{
-		Certificate: utls.Certificate{Certificate: cert.Certificate, PrivateKey: cert.PrivateKey},
-		IdleTimeout: *idle,
-		AllowTarget: allow,
-		Logger:      logger,
+		Certificate:       utls.Certificate{Certificate: cert.Certificate, PrivateKey: cert.PrivateKey},
+		IdleTimeout:       *idle,
+		InitialPacketSize: *mtu,
+		AllowTarget:       allow,
+		Logger:            logger,
 	})
 	if err != nil {
 		log.Fatalf("build server: %v", err)

@@ -101,7 +101,7 @@ func TestDialerZeroRTT(t *testing.T) {
 	proxy := startEchoProxyWith(t, nil)
 	const sni = "zerortt-dialer.masque.test"
 
-	d, err := NewDialer(nil, proxy.addr, sni, true, false, true)
+	d, err := NewDialer(nil, proxy.addr, sni, true, false, true, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestDialerZeroRTT(t *testing.T) {
 	time.Sleep(200 * time.Millisecond) // let the session ticket arrive
 
 	// A fresh dialer opens a fresh H3 connection; it must resume with 0-RTT.
-	d2, err := NewDialer(nil, proxy.addr, sni, true, false, true)
+	d2, err := NewDialer(nil, proxy.addr, sni, true, false, true, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func roundTripEcho(t *testing.T, d netproxy.Dialer) {
 // HTTP/3 CONNECT proxy.
 func TestDialerEndToEnd(t *testing.T) {
 	addr := startEchoProxy(t)
-	d, err := NewDialer(nil, addr, "masque.test", true, false, false)
+	d, err := NewDialer(nil, addr, "masque.test", true, false, false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +194,7 @@ func TestDialerEndToEnd(t *testing.T) {
 }
 
 func TestDialerRequiresAddress(t *testing.T) {
-	if _, err := NewDialer(nil, "", "", false, false, false); err == nil {
+	if _, err := NewDialer(nil, "", "", false, false, false, 0); err == nil {
 		t.Fatal("empty address must be rejected")
 	}
 }
@@ -300,3 +300,25 @@ var (
 	_ netproxy.Dialer = (*Dialer)(nil)
 	_ dialer.Dialer   = (*Masque)(nil)
 )
+
+func TestParseMasqueURLMTU(t *testing.T) {
+	for _, tc := range []struct {
+		link string
+		want int
+	}{
+		{"masque://proxy.example.com:443?mtu=1452", 1452},
+		{"masque://proxy.example.com:443?mtu=1440", 1440},
+		{"masque://proxy.example.com:443", 0},
+		{"masque://proxy.example.com:443?mtu=999", 0},   // below the QUIC minimum
+		{"masque://proxy.example.com:443?mtu=abc", 0},   // unparsable
+		{"masque://proxy.example.com:443?mtu=70000", 0}, // out of range
+	} {
+		d, _, err := NewMasque(tc.link)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.link, err)
+		}
+		if got := d.(*Masque).MTU; got != tc.want {
+			t.Errorf("%s: MTU = %d, want %d", tc.link, got, tc.want)
+		}
+	}
+}
