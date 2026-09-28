@@ -32,6 +32,9 @@ import (
 
 	quic "github.com/daeuniverse/quic-go"
 	"github.com/daeuniverse/quic-go/http3"
+
+	"github.com/daeuniverse/outbound/protocol/tuic/common"
+	"github.com/daeuniverse/outbound/protocol/tuic/congestion"
 	"github.com/daeuniverse/quic-go/quicvarint"
 	utls "github.com/refraction-networking/utls"
 )
@@ -88,7 +91,18 @@ func New(conf Config) (*Server, error) {
 	if conf.Logger == nil {
 		conf.Logger = slog.New(slog.DiscardHandler)
 	}
-	quicConf := &quic.Config{Allow0RTT: true}
+	// Mirror the client's transport tuning: the relay carries whatever the
+	// peer sends, and the default cubic controller plus small windows cap a
+	// long-RTT path far below the line rate.
+	quicConf := &quic.Config{
+		Allow0RTT:                      true,
+		InitialCongestionControl:       congestion.NewInitialSender("", nil),
+		InitialStreamReceiveWindow:     common.InitialStreamReceiveWindow,
+		MaxStreamReceiveWindow:         common.MaxStreamReceiveWindow,
+		InitialConnectionReceiveWindow: common.InitialConnectionReceiveWindow,
+		MaxConnectionReceiveWindow:     common.MaxConnectionReceiveWindow,
+		KeepAlivePeriod:                10 * time.Second,
+	}
 	if conf.InitialPacketSize > 0 {
 		quicConf.InitialPacketSize = uint16(conf.InitialPacketSize)
 	}

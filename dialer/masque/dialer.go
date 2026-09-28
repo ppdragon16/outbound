@@ -19,12 +19,13 @@ import (
 // HTTP datagrams (RFC 9297).
 type Dialer struct {
 	protocol.StatelessDialer
-	addr          string
-	sni           string
-	allowInsecure bool
-	preferV2      bool
-	zeroRTT       bool
-	mtu           int
+	addr              string
+	sni               string
+	allowInsecure     bool
+	preferV2          bool
+	zeroRTT           bool
+	mtu               int
+	congestionControl string
 
 	mu  sync.Mutex
 	ins *masque.Client
@@ -35,7 +36,7 @@ type Dialer struct {
 // (RFC 9369) in the first packet; zeroRTT sends the first request as QUIC 0-RTT
 // early data on a resumed session; mtu (0 = safe protocol default) is the QUIC
 // Initial packet size, i.e. the path MTU budget.
-func NewDialer(parent netproxy.Dialer, addr, sni string, allowInsecure, preferV2, zeroRTT bool, mtu int) (*Dialer, error) {
+func NewDialer(parent netproxy.Dialer, addr, sni string, allowInsecure, preferV2, zeroRTT bool, mtu int, congestionControl string) (*Dialer, error) {
 	if addr == "" {
 		return nil, fmt.Errorf("masque: proxy address is required")
 	}
@@ -43,12 +44,13 @@ func NewDialer(parent netproxy.Dialer, addr, sni string, allowInsecure, preferV2
 		StatelessDialer: protocol.StatelessDialer{
 			ParentDialer: parent,
 		},
-		addr:          addr,
-		sni:           sni,
-		allowInsecure: allowInsecure,
-		preferV2:      preferV2,
-		zeroRTT:       zeroRTT,
-		mtu:           mtu,
+		addr:              addr,
+		sni:               sni,
+		allowInsecure:     allowInsecure,
+		preferV2:          preferV2,
+		zeroRTT:           zeroRTT,
+		mtu:               mtu,
+		congestionControl: congestionControl,
 	}, nil
 }
 
@@ -65,6 +67,9 @@ func (d *Dialer) client() (*masque.Client, error) {
 	}
 	if d.mtu > 0 {
 		opts = append(opts, masque.WithMTU(d.mtu))
+	}
+	if d.congestionControl != "" {
+		opts = append(opts, masque.WithCongestionControl(d.congestionControl))
 	}
 	c, err := masque.NewClient(d.addr, d.sni, d.allowInsecure, opts...)
 	if err != nil {

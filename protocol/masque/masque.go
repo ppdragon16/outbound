@@ -24,6 +24,8 @@ import (
 	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/protocol"
+	"github.com/daeuniverse/outbound/protocol/tuic/common"
+	"github.com/daeuniverse/outbound/protocol/tuic/congestion"
 )
 
 const (
@@ -66,6 +68,10 @@ type Client struct {
 	// refuses the early data (see abandonEarlyData).
 	zeroRTT bool
 
+	// congestionControl selects the QUIC congestion controller: "bbrv3"
+	// (default), "bbr" (BBRv1) or "cubic". See WithCongestionControl.
+	congestionControl string
+
 	// initialPacketSize is the QUIC Initial packet size (the path MTU budget
 	// in use before discovery). Zero keeps the safe protocol default (1280),
 	// which fits every path; a larger value (e.g. 1452 on a 1500-MTU path)
@@ -77,6 +83,17 @@ type Client struct {
 	conn   *http3.ClientConn
 	closed bool
 	alive  atomic.Bool
+}
+
+// ccAddr returns the proxy address for the congestion controller's initial
+// packet-size heuristic. It never resolves hostnames itself beyond what the
+// platform resolver does for a literal address lookup failure: an unresolvable
+// host just yields nil, which the controller treats as the minimum size.
+func ccAddr(addr string) net.Addr {
+	if ua, err := net.ResolveUDPAddr("udp", addr); err == nil {
+		return ua
+	}
+	return nil
 }
 
 // Option customizes a Client.
@@ -116,6 +133,13 @@ func WithMTU(mtu int) Option {
 	return func(c *Client) { c.initialPacketSize = mtu }
 }
 
+// WithCongestionControl selects the congestion controller by name: "bbrv3"
+// (the default, as for the other QUIC outbounds), "bbr" (BBRv1) or "cubic".
+// Lossy long-RTT paths sometimes do better on BBRv1.
+func WithCongestionControl(name string) Option {
+	return func(c *Client) { c.congestionControl = name }
+}
+
 // WithPacketConnDialer routes the QUIC layer through the given packet conn
 // factory, allowing MASQUE to be stacked on top of another UDP path.
 func WithPacketConnDialer(fn func(ctx context.Context, addr string) (net.PacketConn, error)) Option {
@@ -142,6 +166,16 @@ func NewClient(addr string, sni string, allowInsecure bool, opts ...Option) (*Cl
 		quicConf: &quic.Config{
 			MaxIdleTimeout:  idleTimeout,
 			EnableDatagrams: true,
+			// Match the other QUIC outbounds (tuic/juicity/hysteria2): BBRv3
+			// from the first packet instead of quic-go's loss-sensitive
+			// default, plus the netem-tuned receive windows and a keepalive.
+			// Without these a long-RTT path with any loss collapses to a few
+			// hundred kbit/s, which is exactly where a tunnel gets used.
+			InitialStreamReceiveWindow:     common.InitialStreamReceiveWindow,
+			MaxStreamReceiveWindow:         common.MaxStreamReceiveWindow,
+			InitialConnectionReceiveWindow: common.InitialConnectionReceiveWindow,
+			MaxConnectionReceiveWindow:     common.MaxConnectionReceiveWindow,
+			KeepAlivePeriod:                10 * time.Second,
 		},
 		alive: atomic.Bool{},
 	}
@@ -149,6 +183,8 @@ func NewClient(addr string, sni string, allowInsecure bool, opts ...Option) (*Cl
 	for _, opt := range opts {
 		opt(c)
 	}
+	// Set after the options so WithCongestionControl is honoured.
+	c.quicConf.InitialCongestionControl = congestion.NewInitialSender(c.congestionControl, ccAddr(addr))
 
 	if c.zeroRTT {
 		// 0-RTT needs a session ticket to resume from; without a cache

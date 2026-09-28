@@ -28,6 +28,8 @@ type Masque struct {
 	// early data on a resumed session (one round trip less on reconnect).
 	// Opt-in because early data is replayable.
 	ZeroRTT bool
+	// CongestionControl is the ?congestion_control= name ("" = BBRv3).
+	CongestionControl string
 	// MTU is the QUIC Initial packet size (path MTU budget) from ?mtu=1452.
 	// Zero keeps the safe default (1280), which fits every path; set it only
 	// when the path is known to carry 1500-byte datagrams.
@@ -68,14 +70,15 @@ func parseMasqueURL(link string) (*Masque, error) {
 		name = "masque"
 	}
 	return &Masque{
-		link:     link,
-		Name:     name,
-		Host:     u.Host,
-		Sni:      sni,
-		Insecure: u.Query().Get("insecure") == "1",
-		QuicV2:   quicV2Requested(u.Query()),
-		ZeroRTT:  protocol.ZeroRTTRequested(u.Query()),
-		MTU:      mtuRequested(u.Query()),
+		link:              link,
+		Name:              name,
+		Host:              u.Host,
+		Sni:               sni,
+		Insecure:          u.Query().Get("insecure") == "1",
+		QuicV2:            quicV2Requested(u.Query()),
+		ZeroRTT:           protocol.ZeroRTTRequested(u.Query()),
+		MTU:               mtuRequested(u.Query()),
+		CongestionControl: strings.ToLower(u.Query().Get("congestion_control")),
 	}, nil
 }
 
@@ -109,5 +112,5 @@ func (s *Masque) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer
 	if option != nil && option.AllowInsecure {
 		insecure = true
 	}
-	return NewDialer(parentDialer, s.Host, s.Sni, insecure, s.QuicV2, s.ZeroRTT, s.MTU)
+	return NewDialer(parentDialer, s.Host, s.Sni, insecure, s.QuicV2, s.ZeroRTT, s.MTU, s.CongestionControl)
 }

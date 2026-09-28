@@ -176,6 +176,7 @@ masque://proxy.example.com:443?sni=proxy.example.com&zero_rtt=1#masque-node
 | `insecure=1` | skip certificate verification (self-signed deployments) |
 | `zero_rtt=1` | send the first CONNECT / CONNECT-UDP as QUIC 0-RTT early data on a resumed session |
 | `mtu` | QUIC Initial packet size, e.g. `mtu=1452` on a path that carries 1500-byte datagrams (see [Path MTU](#path-mtu-and-the-udp-relay-budget)) |
+| `congestion_control` | `bbrv3` (default), `bbr` (BBRv1) or `cubic`; lossy long-RTT paths sometimes do better on BBRv1 |
 
 `zero_rtt` needs the server to accept 0-RTT; this server does by default
 (`http3.Server` sets `Allow0RTT: true` unless a custom `QUICConfig` is given).
