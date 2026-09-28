@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
+	quic "github.com/daeuniverse/quic-go"
 	"github.com/daeuniverse/quic-go/http3"
 	"github.com/daeuniverse/quic-go/quicvarint"
 )
@@ -121,6 +122,15 @@ func (pc *packetConn) WriteTo(p []byte, addr net.Addr) (int, error) {
 	buf = append(buf, p...)
 	if err := flow.str.SendDatagram(buf); err != nil {
 		pc.dropFlow(raddr.String())
+		var tooLarge *quic.DatagramTooLargeError
+		if errors.As(err, &tooLarge) {
+			// The budget is min(peer's max_datagram_frame_size, the current
+			// path MTU estimate); the latter grows as QUIC path MTU discovery
+			// completes. Report it so the operator can see the path's real
+			// capability (and whether the link's mtu= parameter is worth
+			// setting) instead of guessing.
+			return 0, fmt.Errorf("masque: datagram of %d bytes exceeds the tunnel budget of %d bytes (budget grows as QUIC path MTU discovery completes; measure the path before raising the link's mtu=)", len(p), tooLarge.MaxDataLen-2)
+		}
 		return 0, fmt.Errorf("masque: send datagram: %w", err)
 	}
 	return len(p), nil
