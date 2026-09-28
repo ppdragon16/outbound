@@ -13,10 +13,12 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	quic "github.com/daeuniverse/quic-go"
 	"github.com/daeuniverse/quic-go/http3"
 	"github.com/daeuniverse/quic-go/quicvarint"
 	utls "github.com/refraction-networking/utls"
@@ -223,6 +225,122 @@ func TestDatagramSizeLimit(t *testing.T) {
 	if _, err := pc.WriteTo(make([]byte, maxDatagramSize+1), &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 53}); err == nil {
 		t.Fatal("oversized datagram must be rejected")
 	}
+}
+
+// connCapture records the QUIC connections a test proxy accepted.
+type connCapture struct {
+	mu    sync.Mutex
+	conns []quic.Connection
+}
+
+func (c *connCapture) add(q quic.Connection) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.conns = append(c.conns, q)
+}
+
+func (c *connCapture) first(t *testing.T) quic.Connection {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.conns) == 0 {
+		t.Fatal("no connection was accepted")
+	}
+	return c.conns[0]
+}
+
+// startEchoProxyCapturingConns serves a TCP echo CONNECT and records every
+// accepted QUIC connection, so a test can kill the shared one.
+func startEchoProxyCapturingConns(t *testing.T, capture *connCapture) string {
+	t.Helper()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		str := w.(http3.HTTPStreamer).HTTPStream()
+		w.WriteHeader(http.StatusOK)
+		buf := make([]byte, 2048)
+		for {
+			n, err := str.Read(buf)
+			if n > 0 {
+				if _, werr := str.Write(buf[:n]); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	})
+	server := &http3.Server{
+		Handler:   handler,
+		TLSConfig: &utls.Config{Certificates: []utls.Certificate{selfSignedCert(t)}},
+		ConnContext: func(ctx context.Context, q quic.Connection) context.Context {
+			capture.add(q)
+			return ctx
+		},
+	}
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = server.Serve(pc) }()
+	t.Cleanup(func() { _ = server.Close() })
+	return pc.LocalAddr().String()
+}
+
+// TestDialRedialsAfterConnectionDies pins the reuse contract: the shared H3
+// connection is reused across dials, but when it dies the next dial must
+// establish a fresh one instead of failing on the cached dead connection
+// forever.
+func TestDialRedialsAfterConnectionDies(t *testing.T) {
+	capture := &connCapture{}
+	client := newTestClient(t, startEchoProxyCapturingConns(t, capture))
+
+	echo := func(conn net.Conn, payload []byte) {
+		t.Helper()
+		go func() { _, _ = conn.Write(payload) }()
+		got := make([]byte, len(payload))
+		readFull(t, conn, got)
+		if !bytes.Equal(got, payload) {
+			t.Fatalf("echo = %q, want %q", got, payload)
+		}
+	}
+
+	before, err := client.DialContext(context.Background(), "tcp", "target.example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	echo(before, []byte("before"))
+	_ = before.Close()
+
+	// Kill the shared connection from the server side and wait until the
+	// client has observed it.
+	q := capture.first(t)
+	if err := q.CloseWithError(0, "test"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		client.mu.Lock()
+		qconn := client.qconn
+		client.mu.Unlock()
+		if qconn != nil && qconn.Context().Err() != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("client did not observe the closed connection")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	after, err := client.DialContext(context.Background(), "tcp", "target.example.com:443")
+	if err != nil {
+		t.Fatalf("dial after the shared connection died: %v", err)
+	}
+	defer after.Close()
+	echo(after, []byte("after"))
 }
 
 func TestConnectRejected(t *testing.T) {

@@ -83,8 +83,12 @@ type Client struct {
 	// paths whose MTU cannot carry it. See WithMTU.
 	initialPacketSize int
 
-	mu     sync.Mutex
-	conn   *http3.ClientConn
+	mu   sync.Mutex
+	conn *http3.ClientConn
+	// qconn is the QUIC connection behind conn, kept so a connection that
+	// died (idle timeout, server restart, path change) can be detected and
+	// replaced instead of being handed out for every later dial.
+	qconn  quic.Connection
 	closed bool
 	alive  atomic.Bool
 }
@@ -227,7 +231,12 @@ func (c *Client) ensureConn(ctx context.Context) (*http3.ClientConn, error) {
 		return nil, net.ErrClosed
 	}
 	if c.conn != nil {
-		return c.conn, nil
+		if c.qconn == nil || c.qconn.Context().Err() == nil {
+			return c.conn, nil
+		}
+		// The cached connection is gone: drop it and dial a fresh one. Keeping
+		// it would fail every subsequent dial.
+		c.conn, c.qconn = nil, nil
 	}
 	transport := &http3.Transport{
 		TLSClientConfig: c.tlsConf,
@@ -267,7 +276,40 @@ func (c *Client) ensureConn(ctx context.Context) (*http3.ClientConn, error) {
 		}
 	}
 	c.conn = transport.NewClientConn(qconn)
+	c.qconn = qconn
 	return c.conn, nil
+}
+
+// dropDeadConn clears the cached connection when its QUIC connection is gone
+// and reports whether it dropped one. This closes the race where the
+// connection dies between ensureConn's liveness check and a stream open.
+func (c *Client) dropDeadConn() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.qconn == nil || c.qconn.Context().Err() == nil {
+		return false
+	}
+	c.conn, c.qconn = nil, nil
+	return true
+}
+
+// openRequestStream opens a request stream on the shared connection, dialing a
+// fresh connection once when the cached one turns out to be unusable.
+func (c *Client) openRequestStream(ctx context.Context) (http3.RequestStream, error) {
+	for attempt := 0; ; attempt++ {
+		cc, err := c.ensureConn(ctx)
+		if err != nil {
+			return nil, err
+		}
+		str, err := cc.OpenRequestStream(ctx)
+		if err == nil {
+			return str, nil
+		}
+		if attempt == 0 && c.dropDeadConn() {
+			continue
+		}
+		return nil, fmt.Errorf("masque: open stream: %w", err)
+	}
 }
 
 // openConnectStream opens a CONNECT (op "CONNECT") or CONNECT-UDP (op
@@ -293,13 +335,9 @@ func (c *Client) openConnectStream(ctx context.Context, op string, req func() *h
 
 // tryConnectStream performs one request attempt on the current connection.
 func (c *Client) tryConnectStream(ctx context.Context, op string, req func() *http.Request) (http3.RequestStream, *http.Response, error) {
-	cc, err := c.ensureConn(ctx)
+	str, err := c.openRequestStream(ctx)
 	if err != nil {
 		return nil, nil, err
-	}
-	str, err := cc.OpenRequestStream(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("masque: open stream: %w", err)
 	}
 	if err := str.SendRequestHeader(req()); err != nil {
 		str.CancelWrite(0)
@@ -330,7 +368,7 @@ func (c *Client) abandonEarlyData(err error) bool {
 	c.zeroRTT = false
 	if c.conn != nil {
 		_ = c.conn.CloseWithError(0, "0-RTT rejected")
-		c.conn = nil
+		c.conn, c.qconn = nil, nil
 	}
 	return true
 }
@@ -353,13 +391,9 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 	// zero_rtt keeps the synchronous path, whose early-data rejection retry
 	// needs the response inline.
 	if !c.strictConnect && !c.zeroRTT {
-		cc, err := c.ensureConn(ctx)
+		str, err := c.openRequestStream(ctx)
 		if err != nil {
 			return nil, err
-		}
-		str, err := cc.OpenRequestStream(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("masque: open stream: %w", err)
 		}
 		if err := str.SendRequestHeader(req()); err != nil {
 			str.CancelWrite(0)
