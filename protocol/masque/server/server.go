@@ -70,6 +70,10 @@ type Config struct {
 	// datagram budget from the first packet, but breaks the handshake with
 	// clients whose path MTU cannot carry it.
 	InitialPacketSize int
+	// MaxIncomingStreams caps how many concurrent streams (CONNECT and
+	// CONNECT-UDP flows) a client may have open on one connection. Zero
+	// keeps quic-go's default (100).
+	MaxIncomingStreams int64
 	// ConnContext, when set, is called with each accepted QUIC connection,
 	// mirroring http3.Server.ConnContext. Use it to tag request contexts with
 	// connection state (e.g. for metrics).
@@ -106,6 +110,7 @@ func New(conf Config) (*Server, error) {
 		InitialConnectionReceiveWindow: common.InitialConnectionReceiveWindow,
 		MaxConnectionReceiveWindow:     common.MaxConnectionReceiveWindow,
 		KeepAlivePeriod:                10 * time.Second,
+		MaxIncomingStreams:             conf.MaxIncomingStreams,
 	}
 	if conf.InitialPacketSize > 0 {
 		quicConf.InitialPacketSize = uint16(conf.InitialPacketSize)
@@ -239,6 +244,20 @@ func (s *Server) serveUDP(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	// When the relay is done, finish the stream in both directions. Without
+	// this a client that only resets its send side would leave the stream
+	// open here for good, permanently occupying a slot in
+	// MaxIncomingStreams until the whole QUIC connection goes away.
+	defer func() {
+		str.CancelRead(0)
+		_ = str.Close()
+	}()
+	// ReceiveDatagram hands out pooled buffers; return them after copying the
+	// payload to the target, so the datagram path stays allocation-free.
+	release := func([]byte) {}
+	if r, ok := str.(interface{ ReleaseDatagram([]byte) }); ok {
+		release = r.ReleaseDatagram
+	}
 
 	// Client -> target: HTTP datagrams carry a context id (0) prefix.
 	go func() {
@@ -251,9 +270,12 @@ func (s *Server) serveUDP(w http.ResponseWriter, r *http.Request) {
 			contextID, consumed, err := quicvarint.Parse(buf)
 			if err != nil || contextID != 0 {
 				// Unknown context: RFC 9298 says drop, not fail.
+				release(buf)
 				continue
 			}
-			if _, err := up.Write(buf[consumed:]); err != nil {
+			_, werr := up.Write(buf[consumed:])
+			release(buf)
+			if werr != nil {
 				cancel()
 				return
 			}

@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/daeuniverse/outbound/netproxy"
@@ -82,20 +85,43 @@ func (c *tcpConn) CloseWrite() error { return c.RequestStream.Close() }
 var _ net.Conn = (*tcpConn)(nil)
 var _ netproxy.CloseWriter = (*tcpConn)(nil)
 
-// datagram is one received UDP payload and its originating target.
-type datagram struct {
+// datagramMsg is one received UDP datagram on its way from a flow's read pump
+// to ReadFrom. data is the pooled http3 receive buffer (release it after
+// copying the payload out); payload is the tunneled UDP payload view (context
+// id stripped); addr is the flow's target, allocated once per flow.
+type datagramMsg struct {
+	data    []byte
 	payload []byte
-	raddr   net.Addr
+	addr    *net.UDPAddr
+	release func([]byte)
 }
 
 // udpFlow is one CONNECT-UDP stream bound to a fixed UDP target.
 type udpFlow struct {
-	target net.Addr
-	str    http3.RequestStream
+	target netip.AddrPort
+	// udpAddr is the cached net.Addr for ReadFrom, so returning the source
+	// address does not allocate.
+	udpAddr *net.UDPAddr
+	str     http3.RequestStream
+	// release returns the pooled http3 receive buffer; nil when the http3
+	// layer does not expose it.
+	release func([]byte)
+}
+
+// destroy fully closes the flow's stream in both directions. CancelWrite
+// alone (RESET_STREAM on the send side) is not enough: the peer keeps its
+// side open until it tears the flow down itself, so the stream would keep
+// occupying a slot in the peer's incoming-stream limit for the rest of the
+// connection - one leaked DNS query at a time, until every dial blocks on
+// the exhausted limit. CancelRead sends STOP_SENDING, which makes the peer
+// reset its send side too and completes the stream.
+func (f *udpFlow) destroy() {
+	f.str.CancelRead(0)
+	f.str.CancelWrite(0)
 }
 
 // openFlow establishes a CONNECT-UDP tunnel toward raddr.
-func (c *Client) openFlow(ctx context.Context, raddr *net.UDPAddr) (*udpFlow, error) {
+func (c *Client) openFlow(ctx context.Context, raddr netip.AddrPort) (*udpFlow, error) {
 	str, rsp, err := c.openConnectStream(ctx, "CONNECT-UDP", func() *http.Request {
 		return &http.Request{
 			Method: http.MethodConnect,
@@ -103,7 +129,7 @@ func (c *Client) openFlow(ctx context.Context, raddr *net.UDPAddr) (*udpFlow, er
 			URL: &url.URL{
 				Scheme: "https",
 				Host:   c.authority,
-				Path:   udpPath(raddr.IP.String(), raddr.Port),
+				Path:   udpPath(raddr.Addr().String(), int(raddr.Port())),
 			},
 			Host: c.authority,
 			Header: http.Header{
@@ -118,7 +144,13 @@ func (c *Client) openFlow(ctx context.Context, raddr *net.UDPAddr) (*udpFlow, er
 		str.CancelWrite(0)
 		return nil, fmt.Errorf("masque: CONNECT-UDP rejected: %s", rsp.Status)
 	}
-	return &udpFlow{target: raddr, str: str}, nil
+	flow := &udpFlow{target: raddr, udpAddr: net.UDPAddrFromAddrPort(raddr), str: str}
+	// The http3 layer hands out pooled receive buffers without exposing the
+	// release on its interface; use it when the concrete stream has it.
+	if r, ok := str.(interface{ ReleaseDatagram([]byte) }); ok {
+		flow.release = r.ReleaseDatagram
+	}
+	return flow, nil
 }
 
 // packetConn multiplexes UDP targets onto CONNECT-UDP streams of the shared
@@ -127,69 +159,191 @@ type packetConn struct {
 	client *Client
 
 	mu     sync.Mutex
-	flows  map[string]*udpFlow // key: raddr String()
+	flows  map[netip.AddrPort]*udpFlow
 	closed bool
 
-	readCh chan *datagram
+	readCh chan datagramMsg
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	readDeadline  atomic.Int64 // unix nanos; 0 = no deadline
+	writeDeadline atomic.Int64
+
+	// Write path state, guarded by writeMu: the reusable context-id buffer,
+	// one timer and one result channel, so a write carrying a deadline does
+	// not allocate. Only one WriteTo runs at a time (the deadline machinery
+	// assumes it).
+	writeMu sync.Mutex
+	wbuf    []byte
+	wtimer  *time.Timer
+	wres    chan error
+	// rtimer is reused across reads carrying a deadline; a PacketConn is read
+	// by a single consumer at a time.
+	rtimer *time.Timer
 }
 
 var _ net.PacketConn = (*packetConn)(nil)
 
 func (pc *packetConn) ReadFrom(p []byte) (int, net.Addr, error) {
-	d, ok := <-pc.readCh
-	if !ok {
+	n, addr, err := pc.read(p)
+	if err != nil {
+		return 0, nil, err
+	}
+	return n, addr, nil
+}
+
+// ReadFromAddrPort is the allocation-free form of ReadFrom.
+func (pc *packetConn) ReadFromAddrPort(p []byte) (int, netip.AddrPort, error) {
+	n, addr, err := pc.read(p)
+	if err != nil {
+		return 0, netip.AddrPort{}, err
+	}
+	return n, addr.AddrPort(), nil
+}
+
+func (pc *packetConn) read(p []byte) (int, *net.UDPAddr, error) {
+	var timeout <-chan time.Time
+	if d := pc.readDeadline.Load(); d != 0 {
+		deadline := time.Unix(0, d)
+		if pc.rtimer == nil {
+			pc.rtimer = time.NewTimer(time.Until(deadline))
+		} else {
+			stopAndDrain(pc.rtimer)
+			pc.rtimer.Reset(time.Until(deadline))
+		}
+		timeout = pc.rtimer.C
+	}
+	select {
+	case d, ok := <-pc.readCh:
+		if !ok {
+			return 0, nil, errMasqueClosed
+		}
+		if d.release != nil {
+			defer d.release(d.data)
+		}
+		n := copy(p, d.payload)
+		return n, d.addr, nil
+	case <-timeout:
+		return 0, nil, os.ErrDeadlineExceeded
+	case <-pc.ctx.Done():
+		// Cancel does not close readCh, so wake the reader here instead of
+		// leaving it blocked on a dead conn.
 		return 0, nil, errMasqueClosed
 	}
-	n := copy(p, d.payload)
-	return n, d.raddr, nil
+}
+
+// stopAndDrain makes a reused timer safe to Reset: one that already fired
+// must have its value drained first.
+func stopAndDrain(t *time.Timer) {
+	if !t.Stop() {
+		select {
+		case <-t.C:
+		default:
+		}
+	}
 }
 
 func (pc *packetConn) WriteTo(p []byte, addr net.Addr) (int, error) {
-	raddr, ok := addr.(*net.UDPAddr)
-	if !ok {
+	var ap netip.AddrPort
+	switch a := addr.(type) {
+	case *net.UDPAddr:
+		ap = a.AddrPort()
+	case *net.TCPAddr:
+		ap = a.AddrPort()
+	default:
 		udp, err := net.ResolveUDPAddr("udp", addr.String())
 		if err != nil {
 			return 0, fmt.Errorf("masque: target must be a UDP address, got %T", addr)
 		}
-		raddr = udp
+		ap = udp.AddrPort()
 	}
+	return pc.WriteToAddrPort(p, ap)
+}
+
+// WriteToAddrPort is the allocation-free form of WriteTo.
+func (pc *packetConn) WriteToAddrPort(p []byte, addr netip.AddrPort) (int, error) {
 	if len(p) > maxDatagramSize {
 		return 0, fmt.Errorf("masque: datagram exceeds %d bytes", maxDatagramSize)
 	}
-	flow, err := pc.flow(raddr)
+	pc.writeMu.Lock()
+	defer pc.writeMu.Unlock()
+
+	flow, err := pc.flow(addr)
 	if err != nil {
 		return 0, err
 	}
 	// RFC 9298 section 4: HTTP datagram payload = context id + UDP payload.
-	buf := quicvarint.Append(nil, 0)
-	buf = append(buf, p...)
-	if err := flow.str.SendDatagram(buf); err != nil {
-		pc.dropFlow(raddr.String())
-		var tooLarge *quic.DatagramTooLargeError
-		if errors.As(err, &tooLarge) {
-			// The budget is min(peer's max_datagram_frame_size, the current
-			// path MTU estimate); the latter grows as QUIC path MTU discovery
-			// completes. Report it so the operator can see the path's real
-			// capability (and whether the link's mtu= parameter is worth
-			// setting) instead of guessing.
-			return 0, fmt.Errorf("masque: datagram of %d bytes exceeds the tunnel budget of %d bytes (budget grows as QUIC path MTU discovery completes; measure the path before raising the link's mtu=)", len(p), tooLarge.MaxDataLen-2)
+	// Context id 0 is a single zero byte; wbuf is reused across writes.
+	pc.wbuf = append(pc.wbuf[:0], 0)
+	pc.wbuf = append(pc.wbuf, p...)
+
+	var timeout <-chan time.Time
+	if d := pc.writeDeadline.Load(); d != 0 {
+		deadline := time.Unix(0, d)
+		if pc.wtimer == nil {
+			pc.wtimer = time.NewTimer(time.Until(deadline))
+		} else {
+			stopAndDrain(pc.wtimer)
+			pc.wtimer.Reset(time.Until(deadline))
 		}
-		return 0, fmt.Errorf("masque: send datagram: %w", err)
+		timeout = pc.wtimer.C
+		if pc.wres == nil {
+			pc.wres = make(chan error, 1)
+		}
+		// Drop the result of an earlier abandoned write, if any.
+		select {
+		case <-pc.wres:
+		default:
+		}
+		go func() { pc.wres <- flow.str.SendDatagram(pc.wbuf) }()
 	}
-	return len(p), nil
+
+	// Send without a deadline inline; with one, race the send against the
+	// deadline. (A plain select-with-default here would fall through
+	// immediately and silently drop the datagram.)
+	var sendErr error
+	if timeout == nil {
+		sendErr = flow.str.SendDatagram(pc.wbuf)
+	} else {
+		select {
+		case err := <-pc.wres:
+			sendErr = err
+		case <-timeout:
+			sendErr = os.ErrDeadlineExceeded
+			// The abandoned sender still references wbuf; force the next
+			// write onto a fresh buffer instead of racing it.
+			pc.wbuf = nil
+		}
+	}
+	if sendErr == nil {
+		return len(p), nil
+	}
+	pc.dropFlow(addr)
+	var tooLarge *quic.DatagramTooLargeError
+	if errors.As(sendErr, &tooLarge) {
+		// The budget is min(peer's max_datagram_frame_size, the current
+		// path MTU estimate); the latter grows as QUIC path MTU discovery
+		// completes. Report it so the operator can see the path's real
+		// capability (and whether the link's mtu= parameter is worth
+		// setting) instead of guessing.
+		return 0, fmt.Errorf("masque: datagram of %d bytes exceeds the tunnel budget of %d bytes (budget grows as QUIC path MTU discovery completes; measure the path before raising the link's mtu=)", len(p), tooLarge.MaxDataLen-2)
+	}
+	if errors.Is(sendErr, os.ErrDeadlineExceeded) {
+		return 0, sendErr
+	}
+	return 0, fmt.Errorf("masque: send datagram: %w", sendErr)
 }
 
 // flow returns (and lazily establishes) the CONNECT-UDP stream for raddr.
-func (pc *packetConn) flow(raddr *net.UDPAddr) (*udpFlow, error) {
-	key := raddr.String()
+// flow returns (and lazily establishes) the CONNECT-UDP stream for raddr.
+// Called with writeMu held.
+func (pc *packetConn) flow(raddr netip.AddrPort) (*udpFlow, error) {
 	pc.mu.Lock()
 	if pc.closed {
 		pc.mu.Unlock()
 		return nil, errMasqueClosed
 	}
-	if f, ok := pc.flows[key]; ok {
+	if f, ok := pc.flows[raddr]; ok {
 		pc.mu.Unlock()
 		return f, nil
 	}
@@ -207,15 +361,15 @@ func (pc *packetConn) flow(raddr *net.UDPAddr) (*udpFlow, error) {
 	pc.mu.Lock()
 	if pc.closed {
 		pc.mu.Unlock()
-		flow.str.CancelWrite(0)
+		flow.destroy()
 		return nil, errMasqueClosed
 	}
-	if existing, ok := pc.flows[key]; ok { // raced with a concurrent open
+	if existing, ok := pc.flows[raddr]; ok { // raced with a concurrent open
 		pc.mu.Unlock()
-		flow.str.CancelWrite(0)
+		flow.destroy()
 		return existing, nil
 	}
-	pc.flows[key] = flow
+	pc.flows[raddr] = flow
 	pc.mu.Unlock()
 
 	go pc.flowReadLoop(flow)
@@ -227,44 +381,67 @@ func (pc *packetConn) flowReadLoop(flow *udpFlow) {
 	for {
 		buf, err := flow.str.ReceiveDatagram(pc.ctx)
 		if err != nil {
-			pc.dropFlow(flow.target.String())
+			pc.dropFlow(flow.target)
 			return
 		}
 		contextID, consumed, err := quicvarint.Parse(buf)
 		if err != nil {
-			pc.dropFlow(flow.target.String())
+			flow.release(buf)
+			pc.dropFlow(flow.target)
 			return
 		}
-		if contextID != 0 {
+		if contextID != 0 || len(buf) == consumed {
+			// Unknown context (RFC 9298: drop, not fail) or empty payload.
+			flow.release(buf)
 			continue
 		}
-		payload := buf[consumed:]
-		if len(payload) == 0 {
-			continue
-		}
-		d := &datagram{payload: append([]byte(nil), payload...), raddr: flow.target}
+		// Hand the pooled buffer to the reader, who releases it after copying
+		// the payload out; nothing on this path allocates.
+		msg := datagramMsg{data: buf, payload: buf[consumed:], addr: flow.udpAddr, release: flow.release}
 		select {
-		case pc.readCh <- d:
+		case pc.readCh <- msg:
 		case <-pc.ctx.Done():
+			flow.release(buf)
 			return
 		}
 	}
 }
 
-func (pc *packetConn) dropFlow(key string) {
+func (pc *packetConn) dropFlow(key netip.AddrPort) {
 	pc.mu.Lock()
 	flow, ok := pc.flows[key]
 	delete(pc.flows, key)
 	pc.mu.Unlock()
 	if ok {
-		flow.str.CancelWrite(0)
+		flow.destroy()
 	}
 }
 
-func (pc *packetConn) LocalAddr() net.Addr                { return &net.UDPAddr{} }
-func (pc *packetConn) SetDeadline(t time.Time) error      { return nil }
-func (pc *packetConn) SetReadDeadline(t time.Time) error  { return nil }
-func (pc *packetConn) SetWriteDeadline(t time.Time) error { return nil }
+func (pc *packetConn) LocalAddr() net.Addr { return &net.UDPAddr{} }
+
+func (pc *packetConn) SetDeadline(t time.Time) error {
+	pc.SetReadDeadline(t)
+	pc.SetWriteDeadline(t)
+	return nil
+}
+
+func (pc *packetConn) SetReadDeadline(t time.Time) error {
+	if t.IsZero() {
+		pc.readDeadline.Store(0)
+	} else {
+		pc.readDeadline.Store(t.UnixNano())
+	}
+	return nil
+}
+
+func (pc *packetConn) SetWriteDeadline(t time.Time) error {
+	if t.IsZero() {
+		pc.writeDeadline.Store(0)
+	} else {
+		pc.writeDeadline.Store(t.UnixNano())
+	}
+	return nil
+}
 
 func (pc *packetConn) Close() error {
 	pc.mu.Lock()
@@ -277,10 +454,10 @@ func (pc *packetConn) Close() error {
 	for _, f := range pc.flows {
 		flows = append(flows, f)
 	}
-	pc.flows = make(map[string]*udpFlow)
+	pc.flows = make(map[netip.AddrPort]*udpFlow)
 	pc.mu.Unlock()
 	for _, f := range flows {
-		f.str.CancelWrite(0)
+		f.destroy()
 	}
 	pc.cancel()
 	close(pc.readCh)

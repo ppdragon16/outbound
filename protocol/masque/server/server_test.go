@@ -14,6 +14,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -295,6 +296,101 @@ func TestUDPTunnelDatagrams(t *testing.T) {
 	}
 	if raddr.String() != target.String() {
 		t.Fatalf("raddr %v, want %v", raddr, target)
+	}
+}
+
+// TestDNSShapedQueriesWithDeadlines reproduces dae's DNS usage shape: every
+// query dials a fresh packet conn, writes the query under a write deadline and
+// reads the response under a read deadline - several times in a row on the
+// same connection.
+func TestDNSShapedQueriesWithDeadlines(t *testing.T) {
+	proxy := startProxy(t, nil)
+	target := startUDPEcho(t)
+	c := newClient(t, proxy)
+
+	for i := 0; i < 5; i++ {
+		pc, err := c.ListenPacket(context.Background())
+		if err != nil {
+			t.Fatalf("query %d: %v", i, err)
+		}
+		payload := fmt.Sprintf("dns-query-%d", i)
+		if err := pc.SetWriteDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pc.WriteTo([]byte(payload), target); err != nil {
+			t.Fatalf("query %d write: %v", i, err)
+		}
+		if err := pc.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, 128)
+		n, raddr, err := pc.ReadFrom(got)
+		if err != nil {
+			t.Fatalf("query %d read: %v", i, err)
+		}
+		if string(got[:n]) != payload {
+			t.Fatalf("query %d: echoed %q, want %q", i, got[:n], payload)
+		}
+		if raddr.String() != target.String() {
+			t.Fatalf("query %d: raddr %v", i, raddr)
+		}
+		_ = pc.Close()
+	}
+}
+
+// TestIdleUDPRelayReleasesStreamSlots pins the relay teardown contract: when a
+// UDP relay goes idle and is dropped, its stream must be closed so the
+// client's slot in MaxIncomingStreams is returned. A relay that exits without
+// closing the stream holds the slot until the whole QUIC connection dies, so
+// a long-lived client runs out of streams and every later dial times out.
+func TestIdleUDPRelayReleasesStreamSlots(t *testing.T) {
+	srv, err := server.New(server.Config{
+		Certificate:        cert(t),
+		AllowTarget:        func(string, netip.AddrPort) error { return nil },
+		IdleTimeout:        300 * time.Millisecond,
+		MaxIncomingStreams: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(pc) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	target := startUDPEcho(t)
+	c := newClient(t, pc.LocalAddr().String())
+
+	// Hold MaxIncomingStreams flows open without closing them.
+	held := make([]net.PacketConn, 4)
+	for i := range held {
+		p, err := c.ListenPacket(context.Background())
+		if err != nil {
+			t.Fatalf("flow %d: %v", i, err)
+		}
+		if _, err := p.WriteTo([]byte("hold"), target); err != nil {
+			t.Fatalf("flow %d write: %v", i, err)
+		}
+		held[i] = p
+	}
+
+	// Let the relays go idle and get dropped.
+	time.Sleep(time.Second)
+
+	// A new flow must still be possible: the dropped relays returned their
+	// stream slots.
+	p, err := c.ListenPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if err := p.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.WriteTo([]byte("after-idle"), target); err != nil {
+		t.Fatalf("write after the idle relays were dropped: %v", err)
 	}
 }
 

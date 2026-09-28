@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -434,8 +435,8 @@ func (c *Client) ListenPacket(ctx context.Context) (net.PacketConn, error) {
 		client: c,
 		ctx:    pctx,
 		cancel: cancel,
-		flows:  make(map[string]*udpFlow),
-		readCh: make(chan *datagram, maxUDPFlows*4),
+		flows:  make(map[netip.AddrPort]*udpFlow),
+		readCh: make(chan datagramMsg, maxUDPFlows*4),
 	}, nil
 }
 

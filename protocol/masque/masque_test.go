@@ -8,11 +8,13 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,7 +27,7 @@ import (
 )
 
 // selfSignedCert generates an in-memory ECDSA certificate.
-func selfSignedCert(t *testing.T) utls.Certificate {
+func selfSignedCert(t testing.TB) utls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -212,6 +214,169 @@ func TestUDPPacketConn(t *testing.T) {
 	}
 	if _, _, err := pc.ReadFrom(got); err == nil {
 		t.Fatal("ReadFrom after Close must fail")
+	}
+}
+
+// startUDPEchoProxyWithMaxStreams serves a CONNECT-UDP datagram echo with a
+// deliberately tiny incoming-stream limit, so stream leaks exhaust it fast
+// instead of after the default 100 streams.
+func startUDPEchoProxyWithMaxStreams(t testing.TB, maxStreams int64) string {
+	t.Helper()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect || r.Proto == "HTTP/3.0" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		str := w.(http3.HTTPStreamer).HTTPStream()
+		w.WriteHeader(http.StatusOK)
+		defer func() {
+			str.CancelRead(0)
+			_ = str.Close()
+		}()
+		for {
+			buf, err := str.ReceiveDatagram(r.Context())
+			if err != nil {
+				return
+			}
+			contextID, consumed, err := quicvarint.Parse(buf)
+			if err != nil || contextID != 0 {
+				return
+			}
+			out := append(quicvarint.Append(nil, 0), buf[consumed:]...)
+			if err := str.SendDatagram(out); err != nil {
+				return
+			}
+		}
+	})
+	server := &http3.Server{
+		Handler:         handler,
+		TLSConfig:       &utls.Config{Certificates: []utls.Certificate{selfSignedCert(t)}},
+		EnableDatagrams: true,
+		QUICConfig:      &quic.Config{EnableDatagrams: true, MaxIncomingStreams: maxStreams},
+	}
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = server.Serve(pc) }()
+	t.Cleanup(func() { _ = server.Close() })
+	return pc.LocalAddr().String()
+}
+
+// TestUDPFlowStreamsAreReclaimed pins the UDP flow teardown contract: a
+// packetConn's CONNECT-UDP streams must be fully closed when it goes away. A
+// RESET_STREAM on the send side alone leaves the stream open on the relay, so
+// every closed flow kept occupying a slot in the peer's incoming-stream limit -
+// after enough DNS queries through the tunnel, the limit was exhausted and
+// every further dial blocked until its context expired.
+func TestUDPFlowStreamsAreReclaimed(t *testing.T) {
+	client := newTestClient(t, startUDPEchoProxyWithMaxStreams(t, 4))
+	target := &net.UDPAddr{IP: net.ParseIP("8.8.8.8"), Port: 53}
+	// Ten times the stream limit: only possible if closed flows are reclaimed.
+	for i := 0; i < 10; i++ {
+		t.Logf("round %d: listen", i)
+		pc, err := client.ListenPacket(context.Background())
+		if err != nil {
+			t.Fatalf("round %d: %v", i, err)
+		}
+		t.Logf("round %d: write", i)
+		if _, err := pc.WriteTo([]byte(fmt.Sprintf("q%d", i)), target); err != nil {
+			t.Fatalf("round %d write: %v", i, err)
+		}
+		t.Logf("round %d: read", i)
+		pc.SetReadDeadline(time.Now().Add(3 * time.Second))
+		got := make([]byte, 512)
+		if _, _, err := pc.ReadFrom(got); err != nil {
+			t.Fatalf("round %d read: %v", i, err)
+		}
+		t.Logf("round %d: close", i)
+		if err := pc.Close(); err != nil {
+			t.Fatalf("round %d close: %v", i, err)
+		}
+	}
+}
+
+// TestPacketConnReadDeadline pins that datagram deadlines are real. They used
+// to be silent no-ops, so a lost response blocked ReadFrom forever no matter
+// what deadline the caller set.
+func TestPacketConnReadDeadline(t *testing.T) {
+	client := newTestClient(t, startH3Proxy(t))
+	pc, err := client.ListenPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	// No datagram will ever arrive (no flow is opened), so only the deadline
+	// can end the read.
+	pc.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	start := time.Now()
+	_, _, err = pc.ReadFrom(make([]byte, 512))
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("err = %v, want a deadline expiry", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("deadline was ignored: read returned after %v", elapsed)
+	}
+}
+
+func BenchmarkPacketConnRoundTrip(b *testing.B) {
+	client, err := NewClient(startUDPEchoProxyWithMaxStreams(b, 1024), "masque.test", true)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer client.Close()
+	pci, err := client.ListenPacket(context.Background())
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer pci.Close()
+	pc := pci.(*packetConn)
+	target := &net.UDPAddr{IP: net.ParseIP("8.8.8.8"), Port: 53}
+	buf := make([]byte, 512)
+	if err := pc.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := pc.WriteToAddrPort([]byte("benchmark"), target.AddrPort()); err != nil {
+			b.Fatal(err)
+		}
+		if _, _, err := pc.ReadFromAddrPort(buf); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// TestPacketConnWriteDeadlineStillSends pins the timed-write path: dae's DNS
+// upstream sets a deadline on every datagram write, so a write that carries a
+// deadline must still go out (a regression here silently dropped the datagram
+// and every DNS query through the tunnel timed out).
+func TestPacketConnWriteDeadlineStillSends(t *testing.T) {
+	client := newTestClient(t, startH3Proxy(t))
+	pc, err := client.ListenPacket(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	target := &net.UDPAddr{IP: net.ParseIP("8.8.8.8"), Port: 53}
+
+	for i := 0; i < 3; i++ {
+		if err := pc.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pc.WriteTo([]byte(fmt.Sprintf("timed-%d", i)), target); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		pc.SetReadDeadline(time.Now().Add(3 * time.Second))
+		got := make([]byte, 512)
+		n, _, err := pc.ReadFrom(got)
+		if err != nil {
+			t.Fatalf("round %d: the datagram written under a deadline never arrived: %v", i, err)
+		}
+		if string(got[:n]) != fmt.Sprintf("timed-%d", i) {
+			t.Fatalf("round %d echoed %q", i, got[:n])
+		}
 	}
 }
 
