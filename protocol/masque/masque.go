@@ -23,6 +23,7 @@ import (
 	"github.com/daeuniverse/quic-go/http3"
 	utls "github.com/refraction-networking/utls"
 
+
 	"github.com/daeuniverse/outbound/protocol"
 )
 
@@ -30,7 +31,13 @@ const (
 	connectUDPProtocol = "connect-udp"
 	udpPathPrefix      = "/.well-known/masque/udp/"
 
-	maxDatagramSize = 1200
+	// The inner connection's post-handshake datagrams (e.g. browser h3) run up
+	// to ~1400 bytes; the tunnel carries up to ~1424 of them in a 1452-byte
+	// outer packet (1452 minus QUIC, DATAGRAM-frame and datagram-context
+	// headers). Larger datagrams cannot be relayed in one outer datagram; the
+	// inner connection's path MTU discovery converges below this cap after
+	// seeing the loss.
+	maxDatagramSize = 1400
 	maxUDPFlows     = 128
 	idleTimeout     = 5 * time.Minute
 )
@@ -116,6 +123,11 @@ func NewClient(addr string, sni string, allowInsecure bool, opts ...Option) (*Cl
 		quicConf: &quic.Config{
 			MaxIdleTimeout:  idleTimeout,
 			EnableDatagrams: true,
+			// Start with the standard QUIC maximum packet size: the UDP relay
+			// cap (maxDatagramSize) is only deliverable once the path MTU
+			// estimate covers it, and DPLPMTUD would otherwise take a few
+			// seconds after every reconnect to raise it past 1200.
+			InitialPacketSize: 1452,
 		},
 		alive: atomic.Bool{},
 	}
@@ -123,6 +135,8 @@ func NewClient(addr string, sni string, allowInsecure bool, opts ...Option) (*Cl
 	for _, opt := range opts {
 		opt(c)
 	}
+	fmt.Printf("[debug] masque client quicConf.InitialPacketSize = %d\n", c.quicConf.InitialPacketSize)
+
 	if c.zeroRTT {
 		// 0-RTT needs a session ticket to resume from; without a cache
 		// DialEarly never resumes and the request is never sent early.

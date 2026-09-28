@@ -46,6 +46,6 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 )
 
-replace github.com/daeuniverse/quic-go => github.com/ppdragon16/quic-go v0.0.0-next.utls.13
+replace github.com/daeuniverse/quic-go => github.com/ppdragon16/quic-go v0.0.0-next.utls.14
 
 replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled.15

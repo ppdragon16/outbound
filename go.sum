@@ -73,8 +73,8 @@ github.com/onsi/ginkgo/v2 v2.32.1/go.mod h1:+aXOY+vzZ5mu2iI2HpTZUPmM//oQfsNFX6gU
 github.com/onsi/gomega v1.42.1 h1:iN1rCUX+44NZ1Dc97MPoeFYbFR0vh8zxoxMFwKdyZ6I=
 github.com/onsi/gomega v1.42.1/go.mod h1:REff/hsDsodHoKlWsP2mAPhu1+5/6hVYNf9rIEBpeSg=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
-github.com/ppdragon16/quic-go v0.0.0-next.utls.13 h1:l8Fh/Df2v8wC3vlqA9PL1p0pGjssrA1XfXFIVON4iBw=
-github.com/ppdragon16/quic-go v0.0.0-next.utls.13/go.mod h1:qs6AdOGIQVKLInZqqBBnPpEt7mXOVvab/CzXEbpT6xw=
+github.com/ppdragon16/quic-go v0.0.0-next.utls.14 h1:XgO4KLT7rRKWcs1XmrDYWiTjMzzPH7VEEzomNFlqLvI=
+github.com/ppdragon16/quic-go v0.0.0-next.utls.14/go.mod h1:qs6AdOGIQVKLInZqqBBnPpEt7mXOVvab/CzXEbpT6xw=
 github.com/ppdragon16/utls v1.8.2-pooled.15 h1:RaHrAc5cf00tMkNdrnLOGjdJF+fPsKBjhtE6L1sFFys=
 github.com/ppdragon16/utls v1.8.2-pooled.15/go.mod h1:3hDq37/I6Cp43hSxKR0Rk6X0mAaWghGMw7H7pCxlM6U=
 github.com/quic-go/qpack v0.6.0 h1:g7W+BMYynC1LbYLSqRt8PBg5Tgwxn214ZZR34VIOjz8=
