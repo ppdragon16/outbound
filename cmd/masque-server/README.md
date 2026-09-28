@@ -193,6 +193,24 @@ round-trip instead of handshake + target dial).
 (`http3.Server` sets `Allow0RTT: true` unless a custom `QUICConfig` is given).
 Early data is replayable, which is why it stays opt-in per link.
 
+## Measuring a deployment
+
+`cmd/masque-bench` measures a relay directly, without dae in the path, so a slow
+result can be attributed to the relay, the path, or the client:
+
+```sh
+go build -o masque-bench ./cmd/masque-bench
+./masque-bench -proxy '[2001:db8::1]:7443' -sni example.com -mtu 1440   # cold/warm dial + single-stream download
+./masque-bench -proxy 203.0.113.7:7443 -par 8                          # aggregate, browser-like
+./masque-bench -proxy 203.0.113.7:7443 -up -par 4                      # upload
+```
+
+It reports the cold and warm dial latency, then the throughput over `-par`
+parallel streams for `-duration`. `-target`/`-path` choose the origin: the
+default is `speed.cloudflare.com`, which rate-limits repeated runs (an HTTP 429
+is reported as such, not as 0 MB/s). For stable numbers point it at your own
+origin, e.g. `-target speedtest.tele2.net:80 -path /100MB.zip`.
+
 ## Path MTU and the UDP relay budget
 
 UDP datagrams travel one per QUIC datagram, so the tunnel's budget is the outer
