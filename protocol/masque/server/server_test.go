@@ -85,7 +85,12 @@ func TestTCPTargetDeniedIsDelivered(t *testing.T) {
 	proxy := startProxyWithGate(t, func(string, netip.AddrPort) error { return denied })
 	c := newClient(t, proxy)
 
-	_, err := c.DialContext(context.Background(), "tcp", "127.0.0.1:19099")
+	// The client dials optimistically, so the status reaches it on first use.
+	conn, err := c.DialContext(context.Background(), "tcp", "127.0.0.1:19099")
+	if err == nil {
+		_, err = conn.Read(make([]byte, 1))
+		_ = conn.Close()
+	}
 	if err == nil {
 		t.Fatal("dial succeeded against a target the server refuses")
 	}
@@ -107,7 +112,11 @@ func TestTCPUpstreamFailureIsDelivered(t *testing.T) {
 
 	proxy := startProxy(t, nil)
 	c := newClient(t, proxy)
-	_, err = c.DialContext(context.Background(), "tcp", target)
+	conn, err := c.DialContext(context.Background(), "tcp", target)
+	if err == nil {
+		_, err = conn.Read(make([]byte, 1))
+		_ = conn.Close()
+	}
 	if err == nil {
 		t.Fatal("dial succeeded against an unreachable target")
 	}

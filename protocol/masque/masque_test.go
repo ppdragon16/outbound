@@ -226,9 +226,91 @@ func TestDatagramSizeLimit(t *testing.T) {
 }
 
 func TestConnectRejected(t *testing.T) {
+	// The default dial is optimistic, so the proxy's rejection is validated on
+	// the first read rather than at dial time.
 	client := newTestClient(t, startH3ProxyWithStatus(t, http.StatusForbidden))
+	conn, err := client.DialContext(context.Background(), "tcp", "blocked.example.com:443")
+	if err != nil {
+		return // also acceptable: the stream was reset before validation
+	}
+	defer conn.Close()
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("a rejected CONNECT must surface on the first read")
+	}
+}
+
+func TestConnectRejectedStrict(t *testing.T) {
+	client := newTestClient(t, startH3ProxyWithStatus(t, http.StatusForbidden), WithStrictConnect())
 	if _, err := client.DialContext(context.Background(), "tcp", "blocked.example.com:443"); err == nil {
-		t.Fatal("rejected CONNECT must return an error")
+		t.Fatal("rejected CONNECT must return a dial error in strict mode")
+	}
+}
+
+// startDelayedH3Proxy serves a TCP echo CONNECT whose response is only written
+// after delay, mimicking a proxy that dials the target before answering.
+func startDelayedH3Proxy(t *testing.T, delay time.Duration) string {
+	t.Helper()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodConnect {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		time.Sleep(delay)
+		str := w.(http3.HTTPStreamer).HTTPStream()
+		w.WriteHeader(http.StatusOK)
+		buf := make([]byte, 2048)
+		for {
+			n, err := str.Read(buf)
+			if n > 0 {
+				if _, werr := str.Write(buf[:n]); werr != nil {
+					return
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	})
+	server := &http3.Server{
+		Handler:   handler,
+		TLSConfig: &utls.Config{Certificates: []utls.Certificate{selfSignedCert(t)}},
+	}
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = server.Serve(pc) }()
+	t.Cleanup(func() { _ = server.Close() })
+	return pc.LocalAddr().String()
+}
+
+// TestOptimisticDialDoesNotWaitForResponse pins the latency property: the
+// CONNECT response only arrives after the proxy has dialed the target, so
+// waiting for it makes every dial cost two round trips (handshake + CONNECT).
+// The dial must return as soon as the request is sent, with the status
+// validated on first read.
+func TestOptimisticDialDoesNotWaitForResponse(t *testing.T) {
+	const delay = 500 * time.Millisecond
+	client := newTestClient(t, startDelayedH3Proxy(t, delay))
+
+	start := time.Now()
+	conn, err := client.DialContext(context.Background(), "tcp", "target.example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	elapsed := time.Since(start)
+	if elapsed >= delay/2 {
+		t.Fatalf("dial waited for the CONNECT response: took %v while the proxy delays it by %v", elapsed, delay)
+	}
+
+	// The tunnel still works once the response arrives.
+	payload := bytes.Repeat([]byte{'y'}, 4096)
+	go func() { _, _ = conn.Write(payload) }()
+	got := make([]byte, len(payload))
+	readFull(t, conn, got)
+	if !bytes.Equal(got, payload) {
+		t.Fatal("echo mismatch through an optimistic dial")
 	}
 }
 

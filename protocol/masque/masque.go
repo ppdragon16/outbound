@@ -68,6 +68,10 @@ type Client struct {
 	// refuses the early data (see abandonEarlyData).
 	zeroRTT bool
 
+	// strictConnect makes DialContext wait for the CONNECT response, so a
+	// rejected target is reported as a dial error. See WithStrictConnect.
+	strictConnect bool
+
 	// congestionControl selects the QUIC congestion controller: "bbrv3"
 	// (default), "bbr" (BBRv1) or "cubic". See WithCongestionControl.
 	congestionControl string
@@ -131,6 +135,22 @@ func WithZeroRTT() Option {
 // ("timeout: no recent network activity").
 func WithMTU(mtu int) Option {
 	return func(c *Client) { c.initialPacketSize = mtu }
+}
+
+// WithStrictConnect makes DialContext wait for the proxy's CONNECT response
+// before returning, so a rejected target (or an unreachable upstream) is
+// reported as a dial error.
+//
+// The default is an optimistic dial: the CONNECT request is sent and
+// DialContext returns immediately, with the response status validated on the
+// first Read. The response only arrives after the proxy has dialed the target,
+// so waiting for it serializes the QUIC handshake and the proxy's target dial
+// into the dial path - two round trips where the other QUIC outbounds pay one
+// (their connect is fire-and-forget). Optimistic dialing keeps the node latency
+// a client measures comparable across protocols, at the cost of surfacing
+// target rejections on first use instead of at dial time.
+func WithStrictConnect() Option {
+	return func(c *Client) { c.strictConnect = true }
 }
 
 // WithCongestionControl selects the congestion controller by name: "bbrv3"
@@ -321,13 +341,38 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 	if network != "tcp" {
 		return nil, fmt.Errorf("masque: unsupported network %q, only tcp", network)
 	}
-	str, rsp, err := c.openConnectStream(ctx, "CONNECT", func() *http.Request {
+	req := func() *http.Request {
 		return &http.Request{
 			Method: http.MethodConnect,
 			URL:    &url.URL{Host: address},
 			Host:   address,
 		}
-	})
+	}
+	// Optimistic dial: send the CONNECT and return without waiting for the
+	// response, which the proxy only sends after it has dialed the target.
+	// tcpConn.Read validates the status before handing over any data.
+	// zero_rtt keeps the synchronous path, whose early-data rejection retry
+	// needs the response inline.
+	if !c.strictConnect && !c.zeroRTT {
+		cc, err := c.ensureConn(ctx)
+		if err != nil {
+			return nil, err
+		}
+		str, err := cc.OpenRequestStream(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("masque: open stream: %w", err)
+		}
+		if err := str.SendRequestHeader(req()); err != nil {
+			str.CancelWrite(0)
+			return nil, fmt.Errorf("masque: send CONNECT: %w", err)
+		}
+		return &tcpConn{
+			RequestStream: str,
+			localAddr:     &net.TCPAddr{},
+			remoteAddr:    &net.TCPAddr{},
+		}, nil
+	}
+	str, rsp, err := c.openConnectStream(ctx, "CONNECT", req)
 	if err != nil {
 		return nil, err
 	}
@@ -336,9 +381,10 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 		return nil, fmt.Errorf("masque: CONNECT rejected: %s", rsp.Status)
 	}
 	return &tcpConn{
-		Stream:     str,
-		localAddr:  &net.TCPAddr{},
-		remoteAddr: &net.TCPAddr{},
+		RequestStream:     str,
+		localAddr:         &net.TCPAddr{},
+		remoteAddr:        &net.TCPAddr{},
+		responseValidated: true,
 	}, nil
 }
 

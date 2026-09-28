@@ -30,6 +30,9 @@ type Masque struct {
 	ZeroRTT bool
 	// CongestionControl is the ?congestion_control= name ("" = BBRv3).
 	CongestionControl string
+	// Strict makes DialContext wait for the CONNECT response (from ?strict=1),
+	// reporting a rejected target as a dial error.
+	Strict bool
 	// MTU is the QUIC Initial packet size (path MTU budget) from ?mtu=1452.
 	// Zero keeps the safe default (1280), which fits every path; set it only
 	// when the path is known to carry 1500-byte datagrams.
@@ -79,7 +82,14 @@ func parseMasqueURL(link string) (*Masque, error) {
 		ZeroRTT:           protocol.ZeroRTTRequested(u.Query()),
 		MTU:               mtuRequested(u.Query()),
 		CongestionControl: strings.ToLower(u.Query().Get("congestion_control")),
+		Strict:            strictRequested(u.Query()),
 	}, nil
+}
+
+// strictRequested parses the ?strict=1 flag.
+func strictRequested(q url.Values) bool {
+	v := strings.ToLower(q.Get("strict"))
+	return v == "1" || v == "true" || v == "yes"
 }
 
 // mtuRequested parses ?mtu=1452 into an Initial packet size, ignoring values
@@ -112,5 +122,5 @@ func (s *Masque) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer
 	if option != nil && option.AllowInsecure {
 		insecure = true
 	}
-	return NewDialer(parentDialer, s.Host, s.Sni, insecure, s.QuicV2, s.ZeroRTT, s.MTU, s.CongestionControl)
+	return NewDialer(parentDialer, s.Host, s.Sni, insecure, s.QuicV2, s.ZeroRTT, s.MTU, s.CongestionControl, s.Strict)
 }

@@ -18,9 +18,46 @@ import (
 
 // tcpConn adapts an established HTTP/3 CONNECT stream to net.Conn.
 type tcpConn struct {
-	http3.Stream
+	http3.RequestStream
 	localAddr  net.Addr
 	remoteAddr net.Addr
+
+	// respOnce guards the lazy CONNECT-response validation performed by an
+	// optimistic dial (see Client.DialContext). responseValidated is set when
+	// the dial already read (and checked) the response, as the strict dial and
+	// the 0-RTT path do.
+	respOnce          sync.Once
+	respErr           error
+	responseValidated bool
+}
+
+// awaitConnectResponse validates the proxy's CONNECT response before any
+// tunneled data is returned. A dial may be optimistic, in which case the
+// response is still in flight when DialContext returns and the status is only
+// known here: a rejected target surfaces as a read error rather than a dial
+// error.
+func (c *tcpConn) awaitConnectResponse() error {
+	if c.responseValidated {
+		return nil
+	}
+	c.respOnce.Do(func() {
+		rsp, err := c.RequestStream.ReadResponse()
+		if err != nil {
+			c.respErr = fmt.Errorf("masque: read CONNECT response: %w", err)
+			return
+		}
+		if rsp.StatusCode < 200 || rsp.StatusCode > 299 {
+			c.respErr = fmt.Errorf("masque: CONNECT rejected: %s", rsp.Status)
+		}
+	})
+	return c.respErr
+}
+
+func (c *tcpConn) Read(p []byte) (int, error) {
+	if err := c.awaitConnectResponse(); err != nil {
+		return 0, err
+	}
+	return c.RequestStream.Read(p)
 }
 
 func (c *tcpConn) LocalAddr() net.Addr  { return c.localAddr }
@@ -32,7 +69,7 @@ func (c *tcpConn) RemoteAddr() net.Addr { return c.remoteAddr }
 // instead of a hard stream cancel, and response data still flows back.
 // Without it the relay falls back to a read deadline and the server-side
 // stream hangs until its own idle timeout.
-func (c *tcpConn) CloseWrite() error { return c.Stream.Close() }
+func (c *tcpConn) CloseWrite() error { return c.RequestStream.Close() }
 
 var _ net.Conn = (*tcpConn)(nil)
 var _ netproxy.CloseWriter = (*tcpConn)(nil)

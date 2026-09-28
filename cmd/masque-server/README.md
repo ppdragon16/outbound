@@ -177,6 +177,16 @@ masque://proxy.example.com:443?sni=proxy.example.com&zero_rtt=1#masque-node
 | `zero_rtt=1` | send the first CONNECT / CONNECT-UDP as QUIC 0-RTT early data on a resumed session |
 | `mtu` | QUIC Initial packet size, e.g. `mtu=1452` on a path that carries 1500-byte datagrams (see [Path MTU](#path-mtu-and-the-udp-relay-budget)) |
 | `congestion_control` | `bbrv3` (default), `bbr` (BBRv1) or `cubic`; lossy long-RTT paths sometimes do better on BBRv1 |
+| `strict=1` | make dialing wait for the proxy's CONNECT response, so a refused target fails at dial time |
+
+Dials are optimistic by default: the CONNECT request is sent and the dial
+returns immediately, with the response status validated on the first read. The
+response is only written after the proxy has dialed the target, so waiting for
+it serializes the QUIC handshake and the target dial into the dial path — two
+round trips where protocols with a fire-and-forget connect pay one. Add
+`strict=1` when a refused target must fail the dial itself (a client that
+measures node latency, such as dae, otherwise reports the tunnel's real
+round-trip instead of handshake + target dial).
 
 `zero_rtt` needs the server to accept 0-RTT; this server does by default
 (`http3.Server` sets `Allow0RTT: true` unless a custom `QUICConfig` is given).
