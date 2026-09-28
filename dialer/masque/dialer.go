@@ -68,15 +68,26 @@ func (d *Dialer) client() (*masque.Client, error) {
 	return c, nil
 }
 
+// DialContext supports both "tcp" (CONNECT tunnel) and "udp" (bound
+// CONNECT-UDP packet conn), so connectivity checks and UDP relaying work the
+// same way they do for the other QUIC outbounds.
 func (d *Dialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	if network != "tcp" {
-		return nil, fmt.Errorf("%w: masque+%v", netproxy.UnsupportedTunnelTypeError, network)
-	}
 	client, err := d.client()
 	if err != nil {
 		return nil, err
 	}
-	return client.DialContext(ctx, "tcp", address)
+	switch network {
+	case "tcp":
+		return client.DialContext(ctx, "tcp", address)
+	case "udp":
+		pc, err := client.ListenPacket(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &netproxy.BindPacketConn{PacketConn: pc, Address: netproxy.NewAddr("udp", address)}, nil
+	default:
+		return nil, fmt.Errorf("%w: masque+%v", netproxy.UnsupportedTunnelTypeError, network)
+	}
 }
 
 func (d *Dialer) ListenPacket(ctx context.Context, address string) (net.PacketConn, error) {

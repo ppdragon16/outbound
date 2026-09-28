@@ -178,9 +178,13 @@ func TestDialerEndToEnd(t *testing.T) {
 	}
 	conn2.Close()
 
-	if _, err := d.DialContext(context.Background(), "udp", "x:1"); err == nil {
-		t.Fatal("non-tcp network must be rejected")
+	// "udp" returns a bound CONNECT-UDP packet conn (lazy: no datagrams flow
+	// until the first WriteTo).
+	pcConn, err := d.DialContext(context.Background(), "udp", "x:1")
+	if err != nil {
+		t.Fatalf("udp DialContext: %v", err)
 	}
+	pcConn.Close()
 
 	pc, err := d.ListenPacket(context.Background(), "")
 	if err != nil {
