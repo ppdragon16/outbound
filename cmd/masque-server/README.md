@@ -91,6 +91,7 @@ masque-server -listen :443 -cert /etc/masque/fullchain.pem -key /etc/masque/priv
 | `-key` | — | TLS private key (PEM), required |
 | `-idle-timeout` | `5m` | how long a UDP flow may stay silent before its relay is dropped |
 | `-mtu` | `0` | QUIC Initial packet size (path MTU budget); `0` keeps the safe default 1280. Set only after measuring the path (see [Path MTU](#path-mtu-and-the-udp-relay-budget)) |
+| `-congestion-control` | `bbrv3` | relay send-direction controller (what the client downloads through); `bbr` selects BBRv1 |
 | `-allow-targets` | empty | comma-separated CIDRs of allowed relay targets; empty allows all (**open relay**) |
 | `-v` | off | log every relayed target and rejection |
 
@@ -176,7 +177,7 @@ masque://proxy.example.com:443?sni=proxy.example.com&zero_rtt=1#masque-node
 | `insecure=1` | skip certificate verification (self-signed deployments) |
 | `zero_rtt=1` | send the first CONNECT / CONNECT-UDP as QUIC 0-RTT early data on a resumed session |
 | `mtu` | QUIC Initial packet size, e.g. `mtu=1452` on a path that carries 1500-byte datagrams (see [Path MTU](#path-mtu-and-the-udp-relay-budget)) |
-| `congestion_control` | `bbrv3` (default), `bbr` (BBRv1) or `cubic`; lossy long-RTT paths sometimes do better on BBRv1 |
+| `congestion_control` | `bbrv3` (default) or `bbr` (BBRv1); lossy long-RTT paths sometimes do better on BBRv1 |
 | `strict=1` | make dialing wait for the proxy's CONNECT response, so a refused target fails at dial time |
 
 Dials are optimistic by default: the CONNECT request is sent and the dial

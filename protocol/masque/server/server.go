@@ -60,6 +60,10 @@ type Config struct {
 	AllowTarget func(network string, addr netip.AddrPort) error
 	// Logger receives per-connection warnings; nil logging is fine.
 	Logger *slog.Logger
+	// CongestionControl selects the relay's congestion controller for the
+	// send direction (the client's download): "bbrv3" (default) or "bbr"
+	// (BBRv1). Long-RTT or lossy paths sometimes do better on BBRv1.
+	CongestionControl string
 	// InitialPacketSize sets the QUIC Initial packet size (path MTU budget) of
 	// the server's connections. Zero keeps the safe protocol default (1280); a
 	// larger value (e.g. 1452 on a 1500-MTU path) lets the relay carry the full
@@ -96,7 +100,7 @@ func New(conf Config) (*Server, error) {
 	// long-RTT path far below the line rate.
 	quicConf := &quic.Config{
 		Allow0RTT:                      true,
-		InitialCongestionControl:       congestion.NewInitialSender("", nil),
+		InitialCongestionControl:       congestion.NewInitialSender(conf.CongestionControl, nil),
 		InitialStreamReceiveWindow:     common.InitialStreamReceiveWindow,
 		MaxStreamReceiveWindow:         common.MaxStreamReceiveWindow,
 		InitialConnectionReceiveWindow: common.InitialConnectionReceiveWindow,

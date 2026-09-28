@@ -73,7 +73,7 @@ type Client struct {
 	strictConnect bool
 
 	// congestionControl selects the QUIC congestion controller: "bbrv3"
-	// (default), "bbr" (BBRv1) or "cubic". See WithCongestionControl.
+	// (default) or "bbr" (BBRv1). See WithCongestionControl.
 	congestionControl string
 
 	// initialPacketSize is the QUIC Initial packet size (the path MTU budget
@@ -90,9 +90,8 @@ type Client struct {
 }
 
 // ccAddr returns the proxy address for the congestion controller's initial
-// packet-size heuristic. It never resolves hostnames itself beyond what the
-// platform resolver does for a literal address lookup failure: an unresolvable
-// host just yields nil, which the controller treats as the minimum size.
+// packet-size heuristic. An unresolvable host yields nil, which the controller
+// treats as the minimum size.
 func ccAddr(addr string) net.Addr {
 	if ua, err := net.ResolveUDPAddr("udp", addr); err == nil {
 		return ua
@@ -154,8 +153,8 @@ func WithStrictConnect() Option {
 }
 
 // WithCongestionControl selects the congestion controller by name: "bbrv3"
-// (the default, as for the other QUIC outbounds), "bbr" (BBRv1) or "cubic".
-// Lossy long-RTT paths sometimes do better on BBRv1.
+// (the default, as for the other QUIC outbounds) or "bbr" (BBRv1); any other
+// name falls back to BBRv3. Lossy long-RTT paths sometimes do better on BBRv1.
 func WithCongestionControl(name string) Option {
 	return func(c *Client) { c.congestionControl = name }
 }
