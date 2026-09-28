@@ -24,11 +24,13 @@ type tcpConn struct {
 
 	// respOnce guards the lazy CONNECT-response validation performed by an
 	// optimistic dial (see Client.DialContext). responseValidated is set when
-	// the dial already read (and checked) the response, as the strict dial and
-	// the 0-RTT path do.
+	// the dial already read (and checked) the response, as the strict dial
+	// does. cli is set for optimistic dials, so a proxy that rejected the
+	// 0-RTT early data can be reacted to here.
 	respOnce          sync.Once
 	respErr           error
 	responseValidated bool
+	cli               *Client
 }
 
 // awaitConnectResponse validates the proxy's CONNECT response before any
@@ -43,6 +45,12 @@ func (c *tcpConn) awaitConnectResponse() error {
 	c.respOnce.Do(func() {
 		rsp, err := c.RequestStream.ReadResponse()
 		if err != nil {
+			// A proxy that refuses the early data kills the connection; turn
+			// 0-RTT off so the caller's next dial is a plain one instead of
+			// hitting the same rejection again.
+			if c.cli != nil {
+				c.cli.abandonEarlyData(err)
+			}
 			c.respErr = fmt.Errorf("masque: read CONNECT response: %w", err)
 			return
 		}

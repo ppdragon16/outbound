@@ -164,8 +164,10 @@ func TestZeroRTTConnectRidesEarlyData(t *testing.T) {
 }
 
 // TestZeroRTTRejectedRetriesWithoutEarlyData covers a proxy that takes the
-// ticket but refuses the early data: the request must still succeed, on a fresh
-// connection without early data, and 0-RTT must not be attempted again.
+// ticket but refuses the early data. The dial in progress fails on its first
+// read (the rejection is only known once the response would have arrived), but
+// the client must turn 0-RTT off so the next dial is a plain one and succeeds
+// without early data.
 func TestZeroRTTRejectedRetriesWithoutEarlyData(t *testing.T) {
 	permissive := startZRTProxy(t, nil)
 	rejecting := startZRTProxy(t, boolPtr(false))
@@ -184,7 +186,23 @@ func TestZeroRTTRejectedRetriesWithoutEarlyData(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	dialEcho(t, c)
+
+	// The in-progress dial cannot recover: the early data it already sent is
+	// lost with the rejected connection, so the first read reports it.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := c.DialContext(ctx, "tcp", "echo.example.com:7")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	if _, err := conn.Write([]byte("zerortt-roundtrip")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	buf := make([]byte, 32)
+	if _, err := conn.Read(buf); err == nil {
+		t.Fatal("a rejected 0-RTT dial must fail on the first read")
+	}
+	_ = conn.Close()
 
 	c.mu.Lock()
 	zeroRTT := c.zeroRTT
@@ -192,6 +210,9 @@ func TestZeroRTTRejectedRetriesWithoutEarlyData(t *testing.T) {
 	if zeroRTT {
 		t.Error("client must stop attempting 0-RTT after the proxy rejected it")
 	}
+
+	// The next dial is a plain one and must work.
+	dialEcho(t, c)
 	for i, used := range rejecting.observed() {
 		if used {
 			t.Errorf("request %d on the rejecting proxy used 0-RTT", i)

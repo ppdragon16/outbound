@@ -191,7 +191,12 @@ round-trip instead of handshake + target dial).
 
 `zero_rtt` needs the server to accept 0-RTT; this server does by default
 (`http3.Server` sets `Allow0RTT: true` unless a custom `QUICConfig` is given).
-Early data is replayable, which is why it stays opt-in per link.
+Early data is replayable, which is why it stays opt-in per link. It does not
+change the dial semantics: dials stay optimistic, and a proxy that refuses the
+early data fails the dial in progress on its first read (0-RTT is then turned
+off for good). The option only matters when the shared connection has to be
+rebuilt - a live connection never re-handshakes, so on a healthy link it saves
+nothing.
 
 ## Measuring a deployment
 

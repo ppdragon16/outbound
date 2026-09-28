@@ -387,10 +387,9 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 	}
 	// Optimistic dial: send the CONNECT and return without waiting for the
 	// response, which the proxy only sends after it has dialed the target.
-	// tcpConn.Read validates the status before handing over any data.
-	// zero_rtt keeps the synchronous path, whose early-data rejection retry
-	// needs the response inline.
-	if !c.strictConnect && !c.zeroRTT {
+	// tcpConn.Read validates the status before handing over any data, and
+	// turns 0-RTT off if the proxy rejected the early data.
+	if !c.strictConnect {
 		str, err := c.openRequestStream(ctx)
 		if err != nil {
 			return nil, err
@@ -403,6 +402,7 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 			RequestStream: str,
 			localAddr:     &net.TCPAddr{},
 			remoteAddr:    &net.TCPAddr{},
+			cli:           c,
 		}, nil
 	}
 	str, rsp, err := c.openConnectStream(ctx, "CONNECT", req)

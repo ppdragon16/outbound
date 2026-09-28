@@ -357,6 +357,25 @@ func TestConnectRejected(t *testing.T) {
 	}
 }
 
+// TestZeroRTTDialIsStillOptimistic pins that the 0-RTT option must not cost
+// the optimistic dial: a link with zero_rtt=1 used to fall back to the strict
+// dial (waiting for the proxy's CONNECT response, which only arrives after the
+// target dial), adding a full round trip to every measured latency.
+func TestZeroRTTDialIsStillOptimistic(t *testing.T) {
+	const delay = 500 * time.Millisecond
+	client := newTestClient(t, startDelayedH3Proxy(t, delay), WithZeroRTT())
+
+	start := time.Now()
+	conn, err := client.DialContext(context.Background(), "tcp", "target.example.com:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if elapsed := time.Since(start); elapsed >= delay/2 {
+		t.Fatalf("dial with zero_rtt waited for the CONNECT response: took %v while the proxy delays it by %v", elapsed, delay)
+	}
+}
+
 func TestConnectRejectedStrict(t *testing.T) {
 	client := newTestClient(t, startH3ProxyWithStatus(t, http.StatusForbidden), WithStrictConnect())
 	if _, err := client.DialContext(context.Background(), "tcp", "blocked.example.com:443"); err == nil {
