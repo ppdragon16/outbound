@@ -338,6 +338,76 @@ func TestDNSShapedQueriesWithDeadlines(t *testing.T) {
 	}
 }
 
+// startHoldingTCPTarget serves TCP connections that read and never close,
+// mimicking long-lived targets: a tunnel to it only ends when the relay is
+// torn down, not when the client goes away.
+func startHoldingTCPTarget(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				buf := make([]byte, 512)
+				for {
+					if _, err := c.Read(buf); err != nil {
+						return
+					}
+				}
+			}(conn)
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// TestClosedTunnelsReleaseStreamSlots pins the stream-reclamation contract for
+// TCP tunnels: a client that closes a tunnel must free its stream slot
+// immediately, even when the target keeps its side open. Without this,
+// abruptly closed LAN connections leave zombie streams behind and the client
+// runs out of MaxIncomingStreams after a few minutes of traffic.
+func TestClosedTunnelsReleaseStreamSlots(t *testing.T) {
+	srv, err := server.New(server.Config{
+		Certificate:        cert(t),
+		AllowTarget:        func(string, netip.AddrPort) error { return nil },
+		MaxIncomingStreams: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(pc) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	target := startHoldingTCPTarget(t)
+	c := newClient(t, pc.LocalAddr().String())
+
+	// Ten times the stream limit, each tunnel closed by the client.
+	for i := 0; i < 10; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conn, err := c.DialContext(ctx, "tcp", target)
+		if err != nil {
+			t.Fatalf("tunnel %d: %v", i, err)
+		}
+		if _, err := conn.Write([]byte("x")); err != nil {
+			t.Fatalf("tunnel %d write: %v", i, err)
+		}
+		if err := conn.Close(); err != nil {
+			t.Fatalf("tunnel %d close: %v", i, err)
+		}
+		cancel()
+	}
+}
+
 // TestIdleUDPRelayReleasesStreamSlots pins the relay teardown contract: when a
 // UDP relay goes idle and is dropped, its stream must be closed so the
 // client's slot in MaxIncomingStreams is returned. A relay that exits without

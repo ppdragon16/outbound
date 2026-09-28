@@ -82,6 +82,19 @@ func (c *tcpConn) RemoteAddr() net.Addr { return c.remoteAddr }
 // stream hangs until its own idle timeout.
 func (c *tcpConn) CloseWrite() error { return c.RequestStream.Close() }
 
+// Close ends the tunnel for good. It aborts the stream (RESET_STREAM +
+// STOP_SENDING) rather than half-closing it: a FIN would leave the relay on
+// the proxy waiting for the *target* to close its side — many long-lived
+// targets never do — so every LAN connection closed this way leaves a zombie
+// stream holding a slot in the peer's incoming-stream limit until the whole
+// QUIC connection dies. A caller that wants the half-close semantics (FIN,
+// keep reading) has CloseWrite.
+func (c *tcpConn) Close() error {
+	c.CancelRead(0)
+	c.CancelWrite(0)
+	return nil
+}
+
 var _ net.Conn = (*tcpConn)(nil)
 var _ netproxy.CloseWriter = (*tcpConn)(nil)
 

@@ -201,11 +201,21 @@ func (s *Server) serveTCP(w http.ResponseWriter, r *http.Request) {
 
 	// Client half-close (a FIN on the stream) must become a TCP FIN, and a
 	// TCP FIN must finish the stream - otherwise either side lingers until
-	// the idle timeout.
+	// the idle timeout. A client *reset* (a full close, not a half-close)
+	// must tear the relay down at once: the target may never close its side,
+	// and a relay that lingers keeps the stream's slot in
+	// MaxIncomingStreams occupied until the QUIC connection dies.
 	go func() {
-		_, _ = io.Copy(up, str)
+		_, cerr := io.Copy(up, str)
 		if tc, isTCP := up.(*net.TCPConn); isTCP {
 			_ = tc.CloseWrite()
+		}
+		if cerr != nil && !errors.Is(cerr, io.EOF) {
+			// The client aborted the stream (RESET_STREAM) rather than
+			// half-closing it: tear the relay down at once. Waiting for the
+			// target would keep the stream — and its slot in
+			// MaxIncomingStreams — alive for as long as the target likes.
+			_ = up.Close()
 		}
 	}()
 	_, _ = io.Copy(str, up)
