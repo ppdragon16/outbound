@@ -26,6 +26,7 @@ func main() {
 	idle := flag.Duration("idle-timeout", 5*time.Minute, "UDP flow idle timeout")
 	mtu := flag.Int("mtu", 0, "QUIC Initial packet size (path MTU budget); 0 = safe default 1280, 1452 for 1500-MTU paths")
 	cc := flag.String("congestion-control", "", `relay send-direction congestion control: "bbrv3" (default) or "bbr" (BBRv1)`)
+	maxStreams := flag.Int64("max-incoming-streams", 1000, `concurrent streams (LAN connections) a client may have open on one QUIC connection; quic-go's default of 100 is easily exhausted by a household's worth of concurrent connections, which stalls the client's dials`)
 	allowTargets := flag.String("allow-targets", "", "comma-separated CIDRs of relayable targets; empty allows all (open relay!)")
 	verbose := flag.Bool("v", false, "log every relayed target")
 	flag.Parse()
@@ -72,12 +73,13 @@ func main() {
 	}
 
 	srv, err := server.New(server.Config{
-		Certificate:       utls.Certificate{Certificate: cert.Certificate, PrivateKey: cert.PrivateKey},
-		IdleTimeout:       *idle,
-		InitialPacketSize: *mtu,
-		CongestionControl: *cc,
-		AllowTarget:       allow,
-		Logger:            logger,
+		Certificate:        utls.Certificate{Certificate: cert.Certificate, PrivateKey: cert.PrivateKey},
+		IdleTimeout:        *idle,
+		InitialPacketSize:  *mtu,
+		CongestionControl:  *cc,
+		MaxIncomingStreams: *maxStreams,
+		AllowTarget:        allow,
+		Logger:             logger,
 	})
 	if err != nil {
 		log.Fatalf("build server: %v", err)

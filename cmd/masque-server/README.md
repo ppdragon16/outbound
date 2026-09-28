@@ -92,6 +92,7 @@ masque-server -listen :443 -cert /etc/masque/fullchain.pem -key /etc/masque/priv
 | `-idle-timeout` | `5m` | how long a UDP flow may stay silent before its relay is dropped |
 | `-mtu` | `0` | QUIC Initial packet size (path MTU budget); `0` keeps the safe default 1280. Set only after measuring the path (see [Path MTU](#path-mtu-and-the-udp-relay-budget)) |
 | `-congestion-control` | `bbrv3` | relay send-direction controller (what the client downloads through); `bbr` selects BBRv1 |
+| `-max-incoming-streams` | `1000` | concurrent streams (i.e. concurrent LAN connections) a client may have open on one QUIC connection. quic-go's default of 100 exhausts quickly on a busy network: once hit, the client's dials block until a slot frees and its connectivity checks time out |
 | `-allow-targets` | empty | comma-separated CIDRs of allowed relay targets; empty allows all (**open relay**) |
 | `-v` | off | log every relayed target and rejection |
 
