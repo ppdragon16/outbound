@@ -46,39 +46,51 @@ func transfer(d *clientDialer, target, path string, up bool, deadline time.Time,
 		return fmt.Errorf("write header: %w", err)
 	}
 
-	// Validate the response instead of silently reporting a rate of zero when
-	// the target answers with an error (rate limits look exactly like a dead
-	// relay otherwise).
+	// For a download, validate the response before reading the body: rate
+	// limits and errors would otherwise look exactly like a dead relay. For
+	// an upload the response only arrives after the body, so it is checked
+	// after the send loop instead.
 	br := bufio.NewReaderSize(conn, 64<<10)
-	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	status, err := br.ReadString('\n')
-	if err != nil {
-		return fmt.Errorf("read status: %w", err)
-	}
-	if !strings.Contains(status, " 2") {
-		return fmt.Errorf("target returned %q", strings.TrimSpace(status))
-	}
-	for {
-		line, err := br.ReadString('\n')
+	if !up {
+		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		status, err := br.ReadString('\n')
 		if err != nil {
-			return fmt.Errorf("read headers: %w", err)
+			return fmt.Errorf("read status: %w", err)
 		}
-		if line == "\r\n" || line == "\n" {
-			break
+		if !strings.Contains(status, " 2") {
+			return fmt.Errorf("target returned %q", strings.TrimSpace(status))
+		}
+		for {
+			line, err := br.ReadString('\n')
+			if err != nil {
+				return fmt.Errorf("read headers: %w", err)
+			}
+			if line == "\r\n" || line == "\n" {
+				break
+			}
 		}
 	}
 
 	buf := make([]byte, 64<<10)
-	for time.Now().Before(deadline) {
-		_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-		if up {
+	if up {
+		for time.Now().Before(deadline) {
+			_ = conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
 			n, err := conn.Write(buf)
 			counter.Add(n)
 			if err != nil {
 				return nil
 			}
-			continue
 		}
+		// The target answers after the body; report a non-2xx as an error.
+		_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+		status, err := br.ReadString('\n')
+		if err == nil && !strings.Contains(status, " 2") {
+			return fmt.Errorf("target returned %q", strings.TrimSpace(status))
+		}
+		return nil
+	}
+	for time.Now().Before(deadline) {
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		n, err := br.Read(buf)
 		counter.Add(n)
 		if err != nil {
