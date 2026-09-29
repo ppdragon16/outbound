@@ -35,6 +35,7 @@ import (
 
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
 	"github.com/daeuniverse/outbound/protocol/tuic/congestion"
+	quiccongestion "github.com/daeuniverse/quic-go/congestion"
 	"github.com/daeuniverse/quic-go/quicvarint"
 	utls "github.com/refraction-networking/utls"
 )
@@ -63,7 +64,11 @@ type Config struct {
 	// CongestionControl selects the relay's congestion controller for the
 	// send direction (the client's download): "bbrv3" (default) or "bbr"
 	// (BBRv1). Long-RTT or lossy paths sometimes do better on BBRv1.
+	// "brutal" selects the fixed-rate Brutal sender and requires Bandwidth.
 	CongestionControl string
+	// Bandwidth is the Brutal target rate in Mbps (CongestionControl
+	// "brutal" only). Zero falls back to the fair-share controller.
+	Bandwidth uint64
 	// InitialPacketSize sets the QUIC Initial packet size (path MTU budget) of
 	// the server's connections. Zero keeps the safe protocol default (1280); a
 	// larger value (e.g. 1452 on a 1500-MTU path) lets the relay carry the full
@@ -104,7 +109,7 @@ func New(conf Config) (*Server, error) {
 	// long-RTT path far below the line rate.
 	quicConf := &quic.Config{
 		Allow0RTT:                      true,
-		InitialCongestionControl:       congestion.NewInitialSender(conf.CongestionControl, nil),
+		InitialCongestionControl:       initialCC(conf.CongestionControl, conf.Bandwidth),
 		InitialStreamReceiveWindow:     common.InitialStreamReceiveWindow,
 		MaxStreamReceiveWindow:         common.MaxStreamReceiveWindow,
 		InitialConnectionReceiveWindow: common.InitialConnectionReceiveWindow,
@@ -323,6 +328,15 @@ func (s *Server) serveUDP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// initialCC builds the send-direction congestion controller: Brutal with an
+// explicit rate, or the named fair-share controller ("bbrv3"/"bbr").
+func initialCC(name string, bandwidth uint64) quiccongestion.CongestionControl {
+	if name == "brutal" && bandwidth > 0 {
+		return congestion.NewBrutalSenderWithBandwidth(bandwidth)
+	}
+	return congestion.NewInitialSender(name, nil)
 }
 
 // udpPollInterval bounds how long a relay's socket read can delay shutdown.

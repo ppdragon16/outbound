@@ -93,6 +93,7 @@ masque-server -listen :443 -cert /etc/masque/fullchain.pem -key /etc/masque/priv
 | `-mtu` | `0` | QUIC Initial packet size (path MTU budget); `0` keeps the safe default 1280. Set only after measuring the path (see [Path MTU](#path-mtu-and-the-udp-relay-budget)) |
 | `-congestion-control` | `bbrv3` | relay send-direction controller (what the client downloads through); `bbr` selects BBRv1 |
 | `-max-incoming-streams` | `1000` | concurrent streams (i.e. concurrent LAN connections) a client may have open on one QUIC connection. quic-go's default of 100 exhausts quickly on a busy network: once hit, the client's dials block until a slot frees and its connectivity checks time out |
+| `-bandwidth` | `100` | Brutal target rate in Mbps; only used with `-congestion-control brutal`. Brutal sends at a fixed rate and is unfair to every other flow on the path — set it at or slightly below the path's real capacity |
 | `-allow-targets` | empty | comma-separated CIDRs of allowed relay targets; empty allows all (**open relay**) |
 | `-v` | off | log every relayed target and rejection |
 
@@ -178,7 +179,8 @@ masque://proxy.example.com:443?sni=proxy.example.com&zero_rtt=1#masque-node
 | `insecure=1` | skip certificate verification (self-signed deployments) |
 | `zero_rtt=1` | send the first CONNECT / CONNECT-UDP as QUIC 0-RTT early data on a resumed session |
 | `mtu` | QUIC Initial packet size, e.g. `mtu=1452` on a path that carries 1500-byte datagrams (see [Path MTU](#path-mtu-and-the-udp-relay-budget)) |
-| `congestion_control` | `bbrv3` (default) or `bbr` (BBRv1); lossy long-RTT paths sometimes do better on BBRv1 |
+| `congestion_control` | `bbrv3` (default) or `bbr` (BBRv1); lossy long-RTT paths sometimes do better on BBRv1. `brutal` selects the fixed-rate sender and requires `bandwidth` |
+| `bandwidth` | Brutal target rate in Mbps (`congestion_control=brutal` only) |
 | `strict=1` | make dialing wait for the proxy's CONNECT response, so a refused target fails at dial time |
 
 Dials are optimistic by default: the CONNECT request is sent and the dial

@@ -33,6 +33,9 @@ type Masque struct {
 	// Strict makes DialContext wait for the CONNECT response (from ?strict=1),
 	// reporting a rejected target as a dial error.
 	Strict bool
+	// Bandwidth is the Brutal target rate in Mbps (from ?bandwidth=100); it
+	// only has an effect with congestion_control=brutal.
+	Bandwidth uint64
 	// MTU is the QUIC Initial packet size (path MTU budget) from ?mtu=1452.
 	// Zero keeps the safe default (1280), which fits every path; set it only
 	// when the path is known to carry 1500-byte datagrams.
@@ -83,7 +86,14 @@ func parseMasqueURL(link string) (*Masque, error) {
 		MTU:               mtuRequested(u.Query()),
 		CongestionControl: strings.ToLower(u.Query().Get("congestion_control")),
 		Strict:            strictRequested(u.Query()),
+		Bandwidth:         bandwidthRequested(u.Query()),
 	}, nil
+}
+
+// bandwidthRequested parses the ?bandwidth= (Mbps) parameter for Brutal.
+func bandwidthRequested(q url.Values) uint64 {
+	v, _ := strconv.ParseUint(q.Get("bandwidth"), 10, 64)
+	return v
 }
 
 // strictRequested parses the ?strict=1 flag.
@@ -122,5 +132,5 @@ func (s *Masque) Dialer(option *dialer.ExtraOption, parentDialer netproxy.Dialer
 	if option != nil && option.AllowInsecure {
 		insecure = true
 	}
-	return NewDialer(parentDialer, s.Host, s.Sni, insecure, s.QuicV2, s.ZeroRTT, s.MTU, s.CongestionControl, s.Strict)
+	return NewDialer(parentDialer, s.Host, s.Sni, insecure, s.QuicV2, s.ZeroRTT, s.MTU, s.CongestionControl, s.Strict, s.Bandwidth)
 }

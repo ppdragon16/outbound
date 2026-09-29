@@ -31,6 +31,14 @@ func UseBrutal(conn quic.Connection, tx uint64) {
 	conn.SetCongestionControl(brutal.NewBrutalSender(tx))
 }
 
+// NewBrutalSenderWithBandwidth returns a Brutal sender pushing at the given
+// rate (Mbps). Brutal ignores congestion signals entirely and sends at a fixed
+// rate: a blunt instrument for paths where a fair-share controller cannot fill
+// the pipe. It is unfair to every other flow on the path by design.
+func NewBrutalSenderWithBandwidth(mbps uint64) quiccongestion.CongestionControl {
+	return brutal.NewBrutalSender(mbps * 1000 * 1000 / 8)
+}
+
 // NewInitialSender returns the initial congestion-control sender for the
 // named controller, so connections that would immediately swap CC don't pay
 // for a throwaway CUBIC sender. Mirrors the names accepted by

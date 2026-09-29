@@ -74,8 +74,15 @@ type Client struct {
 	strictConnect bool
 
 	// congestionControl selects the QUIC congestion controller: "bbrv3"
-	// (default) or "bbr" (BBRv1). See WithCongestionControl.
+	// (default) or "bbr" (BBRv1). "brutal" combined with a non-zero
+	// bandwidth selects the fixed-rate Brutal sender. See
+	// WithCongestionControl and WithBandwidth.
 	congestionControl string
+
+	// bandwidth is the Brutal target rate in Mbps; it only has an effect
+	// when congestionControl is "brutal". Zero falls back to the fair-share
+	// controller.
+	bandwidth uint64
 
 	// initialPacketSize is the QUIC Initial packet size (the path MTU budget
 	// in use before discovery). Zero keeps the safe protocol default (1280),
@@ -160,8 +167,15 @@ func WithStrictConnect() Option {
 // WithCongestionControl selects the congestion controller by name: "bbrv3"
 // (the default, as for the other QUIC outbounds) or "bbr" (BBRv1); any other
 // name falls back to BBRv3. Lossy long-RTT paths sometimes do better on BBRv1.
+// "brutal" selects the fixed-rate Brutal sender, which requires WithBandwidth.
 func WithCongestionControl(name string) Option {
 	return func(c *Client) { c.congestionControl = name }
+}
+
+// WithBandwidth sets the Brutal target rate in Mbps (used only when the
+// congestion controller is "brutal"). Zero keeps the fair-share controller.
+func WithBandwidth(mbps uint64) Option {
+	return func(c *Client) { c.bandwidth = mbps }
 }
 
 // WithPacketConnDialer routes the QUIC layer through the given packet conn
@@ -207,8 +221,14 @@ func NewClient(addr string, sni string, allowInsecure bool, opts ...Option) (*Cl
 	for _, opt := range opts {
 		opt(c)
 	}
-	// Set after the options so WithCongestionControl is honoured.
-	c.quicConf.InitialCongestionControl = congestion.NewInitialSender(c.congestionControl, ccAddr(addr))
+	// Set after the options so WithCongestionControl/WithBandwidth are
+	// honoured.
+	switch {
+	case c.congestionControl == "brutal" && c.bandwidth > 0:
+		c.quicConf.InitialCongestionControl = congestion.NewBrutalSenderWithBandwidth(c.bandwidth)
+	default:
+		c.quicConf.InitialCongestionControl = congestion.NewInitialSender(c.congestionControl, ccAddr(addr))
+	}
 
 	if c.zeroRTT {
 		// 0-RTT needs a session ticket to resume from; without a cache
