@@ -72,6 +72,9 @@ func main() {
 		logger = slog.New(slog.DiscardHandler)
 	}
 
+	log.Printf("masque-server: listen=%s mtu=%d congestion-control=%q max-incoming-streams=%d allow-targets=%v",
+		*listen, *mtu, *cc, *maxStreams, *allowTargets != "")
+
 	srv, err := server.New(server.Config{
 		Certificate:        utls.Certificate{Certificate: cert.Certificate, PrivateKey: cert.PrivateKey},
 		IdleTimeout:        *idle,
