@@ -228,12 +228,7 @@ func teardownDialOutcome(r dialOutcome) {
 	if r.resp != nil {
 		r.resp.Body.Close()
 	}
-	if r.conn != nil {
-		r.conn.CloseWithError(closeErrCodeProtocolError, "")
-	}
-	if r.pktConn != nil {
-		r.pktConn.Close()
-	}
+	closeState(r.pktConn, r.conn, nil)
 }
 
 func (c *Client) Connect() (err error) {
@@ -309,8 +304,7 @@ func (c *Client) Connect() (err error) {
 	// race so it's only ever applied to the winner, never by concurrent losers.
 	udpSM, aerr := c.applyPostHandshake(outcome.resp, outcome.conn)
 	if aerr != nil {
-		outcome.pktConn.Close()
-		outcome.conn.CloseWithError(closeErrCodeProtocolError, "")
+		closeState(outcome.pktConn, outcome.conn, nil)
 		err = aerr
 		return err
 	}
@@ -569,16 +563,32 @@ func (c *Client) Disconnect() error {
 }
 
 func (c *Client) close() {
-	if c.pktConn != nil {
-		c.pktConn.Close()
-		c.pktConn = nil
+	pktConn, conn, udpSM := c.pktConn, c.conn, c.udpSM
+	c.pktConn, c.conn, c.udpSM = nil, nil, nil
+	closeState(pktConn, conn, udpSM)
+}
+
+// closeState releases one generation of tunnel resources in dependency order:
+// the QUIC connection first, then its UDP session manager, the packet conn
+// last.
+//
+// The order matters. quic-go writes to the packet conn from its own send loop
+// and turns a write error into the connection's close error (sendQueue.Run ->
+// destroyImpl), which every later SendDatagram/OpenStream then returns
+// verbatim. A hop conn answers net.ErrClosed once its ctx is cancelled, so
+// taking the packet conn away while the connection is still live poisons it
+// with "use of closed network connection" — and every datagram packed but not
+// yet sent fails with it. CloseWithError returns only after the send loop has
+// stopped (sendQueue.Close waits for it), so nothing above can write once it
+// does.
+func closeState(pktConn net.PacketConn, conn quic.Connection, udpSM *udpSessionManager) {
+	if conn != nil {
+		conn.CloseWithError(closeErrCodeProtocolError, "")
 	}
-	if c.conn != nil {
-		c.conn.CloseWithError(closeErrCodeProtocolError, "")
-		c.conn = nil
+	if udpSM != nil {
+		udpSM.Close()
 	}
-	if c.udpSM != nil {
-		c.udpSM.Close()
-		c.udpSM = nil
+	if pktConn != nil {
+		pktConn.Close()
 	}
 }
