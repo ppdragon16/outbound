@@ -117,3 +117,58 @@ func TestReadFromAddrPort(t *testing.T) {
 		t.Fatalf("payload = %q, want %q", rbuf[:rn], "ping")
 	}
 }
+
+// TestHopNowRerollsPort pins the on-demand hop: a caller that just saw a
+// failure can move the connection to another port of the range immediately,
+// without waiting for the periodic hop interval. The QUIC connection above the
+// packet conn is untouched, so no handshake is lost.
+func TestHopNowRerollsPort(t *testing.T) {
+	hopAddr, err := ResolveUDPHopAddr("127.0.0.1:10000-10007")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dialed []string
+	dialFunc := func(addr net.Addr) (net.Conn, error) {
+		u := addr.(*net.UDPAddr)
+		dialed = append(dialed, addr.String())
+		// A real socket per hop: the hop keeps the previous conn open to
+		// receive stragglers, so the old one must not be the same object.
+		c, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: u.Port})
+		if err != nil {
+			return nil, err
+		}
+		return c, nil
+	}
+	// A long interval: the only hop that may happen is the on-demand one.
+	hConn, err := NewUDPHopPacketConn(hopAddr, time.Hour, dialFunc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hConn.Close()
+	if len(dialed) != 1 {
+		t.Fatalf("initial dials = %d, want 1 (%v)", len(dialed), dialed)
+	}
+
+	hopper, ok := hConn.(interface{ HopNow() bool })
+	if !ok {
+		t.Fatal("udpHopPacketConn must expose HopNow")
+	}
+	if !hopper.HopNow() {
+		t.Fatal("a port-hopping conn must report that it hopped")
+	}
+	if len(dialed) != 2 {
+		t.Fatalf("dials after HopNow = %d, want 2 (%v)", len(dialed), dialed)
+	}
+	for _, d := range dialed {
+		ap, err := netip.ParseAddrPort(d)
+		if err != nil {
+			t.Fatalf("dialed %q: %v", d, err)
+		}
+		if ap.Port() < 10000 || ap.Port() > 10007 {
+			t.Fatalf("dialed %q outside the hop range", d)
+		}
+	}
+}
+
+// The hop trigger is reached through the net.PacketConn the client holds.
+var _ interface{ HopNow() bool } = (*udpHopPacketConn)(nil)

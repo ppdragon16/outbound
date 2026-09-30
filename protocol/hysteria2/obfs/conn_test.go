@@ -93,3 +93,58 @@ func TestObfsReadFromAddrPort(t *testing.T) {
 		t.Fatalf("peer payload = %q, want %q", out[:n], payload)
 	}
 }
+
+// hopOnlyPacketConn is a net.PacketConn that can hop ports, so the wrapper's
+// forwarding can be observed through the interface the client holds. Only
+// HopNow is exercised; the embedded (nil) PacketConn supplies the rest of the
+// shape.
+type hopOnlyPacketConn struct {
+	net.PacketConn
+	hops int
+}
+
+func (h *hopOnlyPacketConn) HopNow() bool {
+	h.hops++
+	return true
+}
+
+// TestWrapPacketConnForwardsHop pins the obfs passthrough: the hysteria2 client
+// only keeps the obfuscated packet conn, so a wrapper that swallowed HopNow
+// would silently disable the on-demand port hop for every obfuscated link.
+// Obfuscation is also used for single-port addresses, whose conn has no hop
+// capability at all - the wrapper must report that honestly instead of
+// claiming a hop happened.
+func TestWrapPacketConnForwardsHop(t *testing.T) {
+	base := &hopOnlyPacketConn{}
+	wrapped, err := WrapPacketConnSalamander(base, []byte("test-psk"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hopper, ok := wrapped.(interface{ HopNow() bool })
+	if !ok {
+		t.Fatal("the obfuscated conn must expose HopNow")
+	}
+	if !hopper.HopNow() {
+		t.Fatal("HopNow must report the wrapped conn can hop")
+	}
+	if base.hops != 1 {
+		t.Fatalf("wrapped conn saw %d hops, want 1", base.hops)
+	}
+
+	// A plain conn (single-port address) has nothing to hop: report false
+	// rather than pretending the port changed.
+	wrappedPlain, err := WrapPacketConnSalamander(&noHopPacketConn{}, []byte("test-psk"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hopper, ok := wrappedPlain.(interface{ HopNow() bool }); !ok {
+		t.Fatal("the obfuscated conn must expose HopNow")
+	} else if hopper.HopNow() {
+		t.Fatal("a single-port conn must not report a hop")
+	}
+}
+
+// noHopPacketConn has no HopNow method at all.
+type noHopPacketConn struct {
+	net.PacketConn
+}

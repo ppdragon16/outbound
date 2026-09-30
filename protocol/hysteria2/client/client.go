@@ -158,6 +158,31 @@ func (c *Client) DialContext(ctx context.Context, network, address string) (net.
 	}
 }
 
+// HopPort migrates the live connection to a new random endpoint port right
+// away (hysteria2 port hopping) without rebuilding the QUIC connection, so a
+// caller can retry a request that just failed on a different port. It reports
+// whether a hop was possible: false when port hopping is disabled or the
+// client is not connected.
+//
+// This is called from the dae side: its connectivity check re-rolls the port
+// after a failed probe, through the netproxy.Dialer it holds (PortHopper),
+// so a retry does not land on the same blocked or lossy port.
+func (c *Client) HopPort() bool {
+	c.mu.Lock()
+	pktConn := c.pktConn
+	c.mu.Unlock()
+	if pktConn == nil {
+		return false
+	}
+	// The trigger is derived on demand from the live packet conn: an
+	// untagged conn answers directly, an obfuscated one forwards the call to
+	// the hop conn it wraps.
+	if hopper, ok := pktConn.(interface{ HopNow() bool }); ok {
+		return hopper.HopNow()
+	}
+	return false
+}
+
 func (c *Client) Alive() bool {
 	if !c.config.NextDialer.Alive() {
 		return false

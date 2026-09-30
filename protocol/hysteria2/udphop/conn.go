@@ -145,6 +145,20 @@ func (u *udpHopPacketConn) recvLoop(conn net.Conn) {
 	}
 }
 
+// HopNow migrates the packet conn to a new random destination port right now,
+// keeping the previous socket open to receive stragglers. It is the on-demand
+// form of the periodic hop: the hysteria2 client calls it when the dae side
+// retries a probe whose port just failed, so that retry does not land on the
+// same port. The QUIC connection above is untouched, so no handshake is lost.
+//
+// The bool reports whether the conn can hop at all, which is always true here;
+// it exists so wrappers that may hide a non-hopping conn underneath (obfs) can
+// answer the same question honestly.
+func (u *udpHopPacketConn) HopNow() bool {
+	u.hop()
+	return true
+}
+
 func (u *udpHopPacketConn) hopLoop() {
 	ticker := time.NewTicker(u.HopInterval)
 	defer ticker.Stop()

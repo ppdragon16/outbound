@@ -24,6 +24,9 @@ type Dialer struct {
 	*client.Client
 }
 
+// Port hopping callers reach this through the netproxy.Dialer they hold.
+var _ interface{ HopPort() bool } = (*Dialer)(nil)
+
 type Feature1 struct {
 	BandwidthConfig client.BandwidthConfig
 	UDPHopInterval  time.Duration

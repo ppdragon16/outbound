@@ -166,6 +166,18 @@ func (c *obfsPacketConnUDP) WriteToAddrPort(p []byte, addr netip.AddrPort) (n in
 	return c.WriteTo(p, net.UDPAddrFromAddrPort(addr))
 }
 
+// HopNow forwards the on-demand port hop to the wrapped conn, so a caller that
+// only holds the obfuscated packet conn (the hysteria2 client keeps this one)
+// can still re-roll the endpoint port. It reports whether the wrapped conn can
+// hop at all: obfuscation is also used for single-port addresses, where there
+// is nothing to hop.
+func (c *obfsPacketConn) HopNow() bool {
+	if hopper, ok := c.Conn.(interface{ HopNow() bool }); ok {
+		return hopper.HopNow()
+	}
+	return false
+}
+
 func (c *obfsPacketConn) Close() error {
 	return c.Conn.Close()
 }
