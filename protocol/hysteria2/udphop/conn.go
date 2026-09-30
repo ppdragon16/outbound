@@ -173,6 +173,13 @@ func (u *udpHopPacketConn) hopLoop() {
 func (u *udpHopPacketConn) hop() {
 	u.connMutex.Lock()
 	defer u.connMutex.Unlock()
+	// Close may have won the lock while this hop was waiting for it. A socket
+	// installed after Close would never be released: Close has already closed
+	// the current and previous ones, and the hop loop is gone. Bail out before
+	// dialing so a closing conn cannot leak an fd and a recvLoop goroutine.
+	if u.ctx.Err() != nil {
+		return
+	}
 	newConn, err := u.dialFunc(u.addr.PickRandomAddr())
 	if err != nil {
 		// Could be temporary, just skip this hop
@@ -248,11 +255,16 @@ func (u *udpHopPacketConn) ReadFromAddrPort(b []byte) (n int, addr netip.AddrPor
 }
 
 func (u *udpHopPacketConn) WriteTo(b []byte, _ net.Addr) (n int, err error) {
+	u.connMutex.RLock()
+	defer u.connMutex.RUnlock()
+	// The ctx check belongs inside the read lock. Close cancels ctx and then
+	// closes both sockets under the write lock, so a check made before taking
+	// the lock leaves a window where Close completes in between and this write
+	// lands on a closed socket — returning "use of closed network connection"
+	// from the socket itself instead of the conn's own net.ErrClosed.
 	if u.ctx.Err() != nil {
 		return 0, net.ErrClosed
 	}
-	u.connMutex.RLock()
-	defer u.connMutex.RUnlock()
 	// Skip the remote check for now, always write to the connected server,
 	// for the same reason as in ReadFrom.
 	return u.currentConn.Write(b)

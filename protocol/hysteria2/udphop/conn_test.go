@@ -1,8 +1,11 @@
 package udphop
 
 import (
+	"errors"
 	"net"
 	"net/netip"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -167,6 +170,172 @@ func TestHopNowRerollsPort(t *testing.T) {
 		if ap.Port() < 10000 || ap.Port() > 10007 {
 			t.Fatalf("dialed %q outside the hop range", d)
 		}
+	}
+}
+
+// trackedPacketConn marks Close and counts Write, so a test can tell whether a
+// socket a hop installed was ever released and whether a write reached it.
+type trackedPacketConn struct {
+	net.Conn
+	closed atomic.Bool
+	writes atomic.Int64
+}
+
+func (c *trackedPacketConn) Close() error {
+	c.closed.Store(true)
+	return c.Conn.Close()
+}
+
+func (c *trackedPacketConn) Write(b []byte) (int, error) {
+	c.writes.Add(1)
+	return c.Conn.Write(b)
+}
+
+// trackedHopDialer dials a real connected UDP socket per hop and remembers
+// every one of them.
+type trackedHopDialer struct {
+	mu    sync.Mutex
+	conns []*trackedPacketConn
+	dials atomic.Int64
+}
+
+func (d *trackedHopDialer) dial(addr net.Addr) (net.Conn, error) {
+	c, err := net.DialUDP("udp", nil, addr.(*net.UDPAddr))
+	if err != nil {
+		return nil, err
+	}
+	tc := &trackedPacketConn{Conn: c}
+	d.dials.Add(1)
+	d.mu.Lock()
+	d.conns = append(d.conns, tc)
+	d.mu.Unlock()
+	return tc, nil
+}
+
+func (d *trackedHopDialer) openConns() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	open := 0
+	for _, c := range d.conns {
+		if !c.closed.Load() {
+			open++
+		}
+	}
+	return open
+}
+
+func newTrackedHopConn(t *testing.T, ports string) (*udpHopPacketConn, *trackedHopDialer) {
+	t.Helper()
+	hopAddr, err := ResolveUDPHopAddr(ports)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &trackedHopDialer{}
+	pc, err := NewUDPHopPacketConn(hopAddr, time.Hour, d.dial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pc.(*udpHopPacketConn), d
+}
+
+// TestHopAfterCloseDoesNotDial pins that a hop racing Close cannot install a
+// socket nobody will ever release. hop() takes the write lock, and Close
+// cancels the ctx before taking it: a hop that was waiting for the lock used
+// to dial and publish its socket after Close had already closed the current
+// and previous ones, leaking an fd and a recvLoop goroutine for the lifetime
+// of the process.
+func TestHopAfterCloseDoesNotDial(t *testing.T) {
+	hConn, dialer := newTrackedHopConn(t, "127.0.0.1:14000-14007")
+	hopper := interface{ HopNow() bool }(hConn)
+
+	if err := hConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := dialer.dials.Load()
+	hopper.HopNow()
+	if got := dialer.dials.Load(); got != before {
+		t.Fatalf("a hop after Close dialed %d socket(s) that nothing would ever close", got-before)
+	}
+	if open := dialer.openConns(); open != 0 {
+		t.Fatalf("%d socket(s) still open after Close", open)
+	}
+}
+
+// TestHopRacingCloseLeavesNoSocketOpen hammers the hop/Close interleaving: a
+// hop that loses the race must not leave a live socket behind.
+func TestHopRacingCloseLeavesNoSocketOpen(t *testing.T) {
+	for i := range 50 {
+		hConn, dialer := newTrackedHopConn(t, "127.0.0.1:14000-14007")
+		hopper := interface{ HopNow() bool }(hConn)
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			<-start
+			_ = hConn.Close()
+		})
+		wg.Go(func() {
+			<-start
+			for range 200 {
+				hopper.HopNow()
+			}
+		})
+		close(start)
+		wg.Wait()
+
+		if open := dialer.openConns(); open != 0 {
+			t.Fatalf("iteration %d: Close raced a hop and left %d socket(s) open", i, open)
+		}
+	}
+}
+
+// TestWriteParkedOnTheLockDoesNotWriteAfterClose pins the ctx check inside
+// WriteTo's read lock. WriteTo used to test the ctx before taking the lock, so
+// a write that passed the check while Close ran in between landed on the
+// just-closed socket and returned the socket's "use of closed network
+// connection" instead of the conn's own net.ErrClosed.
+func TestWriteParkedOnTheLockDoesNotWriteAfterClose(t *testing.T) {
+	sink, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+	sinkConn, err := net.DialUDP("udp", nil, sink.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	socket := &trackedPacketConn{Conn: sinkConn}
+	hopAddr, err := ResolveUDPHopAddr(sink.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := NewUDPHopPacketConn(hopAddr, time.Hour, func(net.Addr) (net.Conn, error) {
+		return socket, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hConn := raw.(*udpHopPacketConn)
+	defer hConn.Close()
+
+	// Hold the write lock so the writer parks on the read lock, then cancel the
+	// ctx the way Close does and let it through.
+	hConn.connMutex.Lock()
+	done := make(chan error, 1)
+	go func() {
+		_, werr := hConn.WriteTo([]byte("parked"), nil)
+		done <- werr
+	}()
+	time.Sleep(100 * time.Millisecond)
+	hConn.cancel()
+	hConn.connMutex.Unlock()
+
+	werr := <-done
+	if !errors.Is(werr, net.ErrClosed) {
+		t.Fatalf("write parked across Close = %v, want net.ErrClosed", werr)
+	}
+	if writes := socket.writes.Load(); writes != 0 {
+		t.Fatalf("write parked across Close reached the socket %d time(s)", writes)
 	}
 }
 
