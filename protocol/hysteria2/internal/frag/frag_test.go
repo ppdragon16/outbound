@@ -401,3 +401,32 @@ func TestDefraggerCloseTerminal(t *testing.T) {
 		t.Fatalf("after Close Feed released %v, want [buf-0 buf-1]", released)
 	}
 }
+
+// TestFragmentsSerializeWithinTheLimit pins the invariant the send path relies
+// on: a message cut to maxSize must produce fragments whose serialized form is
+// at most maxSize. quic-go reports maxSize as the largest datagram it will
+// accept, and rejects anything larger with "DATAGRAM frame too large".
+func TestFragmentsSerializeWithinTheLimit(t *testing.T) {
+	// The IPv6 address that used to make Size() one byte short of Serialize().
+	ap := netip.MustParseAddrPort("[2a03:2880:f350:80:face:b00c:0:3]:443")
+	const limit = 1243
+	msg := protocol.UDPMessage{SessionID: 1, PacketID: 7, FragID: 0, FragCount: 1, AddrPort: ap, Data: make([]byte, 1350)}
+
+	frags, err := FragUDPMessage(msg, limit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frags) < 2 {
+		t.Fatalf("expected the message to be fragmented, got %d piece(s)", len(frags))
+	}
+	for i, f := range frags {
+		buf := make([]byte, protocol.MaxUDPSize)
+		n := f.Serialize(buf)
+		if n != f.Size() {
+			t.Fatalf("fragment %d: Serialize()=%d, Size()=%d", i, n, f.Size())
+		}
+		if n > limit {
+			t.Fatalf("fragment %d serializes to %d bytes, over the %d-byte datagram limit", i, n, limit)
+		}
+	}
+}
