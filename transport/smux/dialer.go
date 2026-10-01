@@ -139,6 +139,13 @@ func (s *Smux) maxDialing() int {
 // behind a single slow handshake.
 func (s *Smux) getSession(ctx context.Context) (*pooledSession, error) {
 	for {
+		// netproxy.Dialer's contract: "Must return while the context is
+		// cancelled. Otherwise, everything will be blocked." An unreachable
+		// node makes every dialSession fail, so the retry below must observe
+		// the context instead of looping forever.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		s.mu.Lock()
 		if s.closed.Load() {
 			s.mu.Unlock()
@@ -195,7 +202,9 @@ func (s *Smux) getSession(ctx context.Context) (*pooledSession, error) {
 			s.dialCond.Broadcast()
 			s.mu.Unlock()
 			if err != nil {
-				// Another goroutine may have dialed one in the meantime.
+				// Another goroutine may have dialed one in the meantime. The
+				// loop head re-checks ctx, so an unreachable node now returns
+				// its deadline instead of retrying forever.
 				continue
 			}
 			s.maybeReplenish()
@@ -209,8 +218,27 @@ func (s *Smux) getSession(ctx context.Context) (*pooledSession, error) {
 			s.mu.Unlock()
 			return nil, ctx.Err()
 		}
+		// Cond.Wait only wakes on Broadcast, so a cancelled context must
+		// broadcast for us: without this a waiter parked behind a hung
+		// handshake could never be released. The callback cannot run while we
+		// hold s.mu, which is why re-checking ctx.Err() before Wait() closes
+		// the "already cancelled" race without a missed wakeup.
+		stopWake := context.AfterFunc(ctx, func() {
+			s.mu.Lock()
+			s.dialCond.Broadcast()
+			s.mu.Unlock()
+		})
+		if ctx.Err() != nil {
+			stopWake()
+			s.mu.Unlock()
+			return nil, ctx.Err()
+		}
 		s.dialCond.Wait()
 		s.mu.Unlock()
+		stopWake()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
 }
 
