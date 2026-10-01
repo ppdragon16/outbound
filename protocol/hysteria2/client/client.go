@@ -472,14 +472,29 @@ func (c *Client) dialPortHoppingAddr(ctx context.Context, udpHopAddr *udphop.UDP
 
 // tryHandshake performs one QUIC dial + auth HTTP roundtrip on the given
 // pktConn (with the given remote address). On success it returns the live
-// quic connection and the auth response. On failure the caller is
-// expected to close pktConn, which terminates the QUIC connection.
+// quic connection and the auth response. On failure it releases the QUIC
+// connection it may have established, so the caller only has to close pktConn.
 //
 // pktConn and remoteAddr are passed explicitly (rather than read from
 // c.pktConn / c.config.Addr) so multiple attempts can run in parallel
 // without trampling each other's state.
-func (c *Client) tryHandshake(ctx context.Context, pktConn net.PacketConn, remoteAddr net.Addr) (quic.EarlyConnection, *http.Response, error) {
-	var conn quic.EarlyConnection
+// The first result is deliberately unnamed: the connection is carried in
+// `established` instead, because a return statement assigns the named results
+// (nil on every failure path) *before* the deferred cleanup runs, which would
+// hide the handle exactly when it is needed.
+func (c *Client) tryHandshake(ctx context.Context, pktConn net.PacketConn, remoteAddr net.Addr) (_ quic.EarlyConnection, resp *http.Response, err error) {
+	var established quic.EarlyConnection
+	// A connection established by a failed attempt must not outlive it: the
+	// caller owns only pktConn, so an orphan would keep its run loop writing to
+	// a socket that is about to be closed (destroyed with a raw "use of closed
+	// network connection", holding its fd and goroutines until the idle
+	// timeout). This happens on every happy-eyeballs race, where the losing
+	// attempt is torn down as soon as the winner returns.
+	defer func() {
+		if err != nil && established != nil {
+			established.CloseWithError(closeErrCodeProtocolError, "")
+		}
+	}()
 	rt := &http3.Transport{
 		TLSClientConfig: &c.config.TLSConfig,
 		QUICConfig:      &c.config.QUICConfig,
@@ -488,7 +503,7 @@ func (c *Client) tryHandshake(ctx context.Context, pktConn net.PacketConn, remot
 			if err != nil {
 				return nil, err
 			}
-			conn = qc
+			established = qc
 			return qc, nil
 		},
 	}
@@ -504,7 +519,7 @@ func (c *Client) tryHandshake(ctx context.Context, pktConn net.PacketConn, remot
 		Auth: c.config.Auth,
 		Rx:   c.config.BandwidthConfig.MaxRx,
 	})
-	resp, err := rt.RoundTrip(req)
+	resp, err = rt.RoundTrip(req)
 	if err != nil {
 		return nil, nil, oops.In("HTTP3 Handshake").Wrap(err)
 	}
@@ -512,7 +527,7 @@ func (c *Client) tryHandshake(ctx context.Context, pktConn net.PacketConn, remot
 		resp.Body.Close()
 		return nil, nil, oops.Errorf("authentication error, HTTP status code: %v", resp.StatusCode)
 	}
-	return conn, resp, nil
+	return established, resp, nil
 }
 
 // applyPostHandshake configures congestion control and the optional UDP
