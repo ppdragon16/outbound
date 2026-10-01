@@ -20,7 +20,10 @@ type httpTripperClient struct {
 func (c *httpTripperClient) RoundTrip(ctx context.Context, req Request) (resp Response, err error) {
 	connectionTagStr := base64.RawURLEncoding.EncodeToString(req.ConnectionTag)
 
-	httpRequest, err := http.NewRequest("POST", c.url, bytes.NewReader(req.Data))
+	// Bind the request to the caller's context: without it neither the round
+	// trip nor the body read can be cancelled, so a silent meek relay wedges
+	// the caller (and the connectivity check that issued it) forever.
+	httpRequest, err := http.NewRequestWithContext(ctx, "POST", c.url, bytes.NewReader(req.Data))
 	if err != nil {
 		return
 	}

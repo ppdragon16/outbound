@@ -141,7 +141,7 @@ func (d *Dialer) DialContext(ctx context.Context, network string, addr string) (
 				if err != nil {
 					return nil, err
 				}
-				transport, addrs, err := d.dialFn(context.TODO(), d.nextDialer)
+				transport, addrs, err := d.dialFn(ctx, d.nextDialer)
 				if err != nil {
 					return nil, err
 				}

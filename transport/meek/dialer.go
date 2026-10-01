@@ -113,7 +113,9 @@ func (m *Dialer) DialContext(ctx context.Context, network, addr string) (c net.C
 		}
 
 		assembler := newAssemblerClient(m.tripper, clientConfig)
-		session, err := assembler.NewSession(context.Background())
+		// NewSession polls the relay; honour the caller's deadline instead of
+		// pinning it to Background, which no timeout could interrupt.
+		session, err := assembler.NewSession(ctx)
 		if err != nil {
 			return nil, err
 		}
