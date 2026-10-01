@@ -5,8 +5,10 @@ import (
 	"crypto/cipher"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/netip"
 	"strconv"
@@ -17,6 +19,12 @@ import (
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 )
+
+// ErrDatagramTooLarge reports a UDP datagram whose sealed frame would not fit
+// the 16-bit chunk length field. A datagram is sealed as ONE chunk, so a larger
+// one would wrap the field: the peer decodes a bogus length and the stream
+// desynchronizes. Rejecting it keeps the failure at the write that caused it.
+var ErrDatagramTooLarge = errors.New("vmess: datagram exceeds the 16-bit chunk length field")
 
 const (
 	MaxChunkSize = 1 << 14
@@ -159,6 +167,15 @@ func (c *Conn) writeStream(b []byte, preWrite []byte) (n int, err error) {
 
 // writePacket simply seal every buffer of mb and write.
 func (c *Conn) writePacket(b []byte, preWrite []byte) (n int, err error) {
+	// A UDP datagram rides in a single chunk whose length field is 16 bits
+	// (plus the cipher overhead and padding). Sealing an oversized datagram
+	// would wrap that field silently — the peer decodes a bogus length and the
+	// stream desynchronizes — so reject it with a typed error. MaxPaddingLen is
+	// the conservative bound because the generator's actual padding is consumed
+	// by the seal itself.
+	if len(b)+int(c.writeBodyCipher.Overhead())+int(c.writePaddingGenerator.MaxPaddingLen()) > math.MaxUint16 {
+		return 0, ErrDatagramTooLarge
+	}
 	data := c.sealFromPool(b)
 	defer pool.PutBuffer(data)
 	if preWrite != nil {

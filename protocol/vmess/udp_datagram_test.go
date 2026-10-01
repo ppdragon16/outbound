@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/netip"
 	"testing"
@@ -127,3 +128,48 @@ func (identityAEAD) Open(dst, nonce, ciphertext, additionalData []byte) ([]byte,
 }
 
 var _ cipher.AEAD = identityAEAD{}
+
+// newWriteOnlyPacketAddrConn wires a Conn that can write UDP datagrams: the
+// write side is pre-initialized with the identity cipher and plain padding, so
+// the frame size equals the payload size and the guard can be exercised without
+// a peer.
+func newWriteOnlyPacketAddrConn() *Conn {
+	c := &Conn{
+		Conn: &bufferConn{Buffer: bytes.NewBuffer(nil)},
+		metadata: Metadata{
+			Metadata: protocol.Metadata{Type: protocol.MetadataTypeDomain, Hostname: SeqPacketMagicAddress},
+			Network:  "udp",
+		},
+	}
+	c.initWrite.Do(func() {})
+	c.writeBodyCipher = identityAEAD{}
+	c.writeChunkSizeParser = PlainChunkSizeParser{}
+	c.writePaddingGenerator = PlainPaddingGenerator{}
+	c.writeNonceGenerator = func() []byte { return make([]byte, 12) }
+	return c
+}
+
+// TestWriteToAddrPortRejectsOversizedDatagram pins the write-side guard. A UDP
+// datagram is sealed as one chunk whose length field is 16 bits, so an
+// oversized datagram used to wrap the field and desynchronize the peer; it must
+// be rejected at the write instead.
+func TestWriteToAddrPortRejectsOversizedDatagram(t *testing.T) {
+	addr := netip.MustParseAddrPort("203.0.113.10:53")
+	c := newWriteOnlyPacketAddrConn()
+
+	// Fits: a normal datagram still goes through.
+	if _, err := c.WriteToAddrPort(make([]byte, 1400), addr); err != nil {
+		t.Fatalf("normal datagram rejected: %v", err)
+	}
+
+	// Does not fit once the packet-address prefix is added.
+	addrLen := AddrPortToPacketAddrLength(addr)
+	tooBig := make([]byte, math.MaxUint16-addrLen+1)
+	n, err := c.WriteToAddrPort(tooBig, addr)
+	if !errors.Is(err, ErrDatagramTooLarge) {
+		t.Fatalf("WriteToAddrPort err = %v, want ErrDatagramTooLarge", err)
+	}
+	if n != 0 {
+		t.Fatalf("n = %d, want 0 for a rejected datagram", n)
+	}
+}
