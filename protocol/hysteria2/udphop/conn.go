@@ -24,7 +24,10 @@ const (
 	packetQueueSize = 256
 	udpBufferSize   = 2048 // QUIC packets are at most 1500 bytes long, so 2k should be more than enough
 
-	defaultHopInterval = 30 * time.Second
+	// minHopInterval is the shortest periodic hop interval accepted. A zero
+	// interval is not clamped to a default: it disables the periodic hop
+	// entirely, leaving the on-demand HopNow as the only way to move ports.
+	minHopInterval = 5 * time.Second
 )
 
 type udpHopPacketConn struct {
@@ -64,10 +67,11 @@ type udpPacket struct {
 
 type dialFunc = func(addr net.Addr) (net.Conn, error)
 
+// NewUDPHopPacketConn wraps a port range in a net.PacketConn. hopInterval is
+// the periodic hop period; 0 disables the periodic hop (an explicit HopNow
+// still moves the port), any other value must be at least minHopInterval.
 func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc dialFunc) (net.PacketConn, error) {
-	if hopInterval == 0 {
-		hopInterval = defaultHopInterval
-	} else if hopInterval < 5*time.Second {
+	if hopInterval != 0 && hopInterval < minHopInterval {
 		return nil, errors.New("hop interval must be at least 5 seconds")
 	}
 	if addr.TotalPorts() == 0 {
@@ -89,7 +93,9 @@ func NewUDPHopPacketConn(addr *UDPHopAddr, hopInterval time.Duration, dialFunc d
 		cancel:      cancel,
 	}
 	go hConn.recvLoop(curConn)
-	go hConn.hopLoop()
+	if hopInterval > 0 {
+		go hConn.hopLoop()
+	}
 	return hConn, nil
 }
 

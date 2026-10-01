@@ -339,5 +339,64 @@ func TestWriteParkedOnTheLockDoesNotWriteAfterClose(t *testing.T) {
 	}
 }
 
+// TestZeroHopIntervalDisablesThePeriodicHop pins that an explicit 0 interval
+// means "no periodic hop" instead of being clamped to a default, while the
+// on-demand HopNow still moves the port. A caller that re-rolls the port from
+// its own health checks (the hysteria2 client does, through dae's connectivity
+// check) does not have to keep paying for blind periodic hops as well.
+func TestZeroHopIntervalDisablesThePeriodicHop(t *testing.T) {
+	hopAddr, err := ResolveUDPHopAddr("127.0.0.1:10000-10007")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dials atomic.Int64
+	dialFunc := func(addr net.Addr) (net.Conn, error) {
+		dials.Add(1)
+		u, ok := addr.(*net.UDPAddr)
+		if !ok {
+			return nil, errors.New("unexpected hop address type")
+		}
+		return net.DialUDP("udp", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: u.Port})
+	}
+
+	hConn, err := NewUDPHopPacketConn(hopAddr, 0, dialFunc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hConn.Close()
+	hop, ok := hConn.(*udpHopPacketConn)
+	if !ok {
+		t.Fatalf("packet conn type = %T", hConn)
+	}
+	if hop.HopInterval != 0 {
+		t.Fatalf("HopInterval = %v, want 0 (periodic hop disabled)", hop.HopInterval)
+	}
+	// No periodic hop may run: only the initial dial happened.
+	time.Sleep(100 * time.Millisecond)
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("dials = %d, want 1: a periodic hop ran with interval 0", got)
+	}
+	hopper, ok := hConn.(interface{ HopNow() bool })
+	if !ok {
+		t.Fatal("udpHopPacketConn must expose HopNow")
+	}
+	if !hopper.HopNow() {
+		t.Fatal("a port-hopping conn must report that it hopped")
+	}
+	if got := dials.Load(); got != 2 {
+		t.Fatalf("dials = %d, want 2 after an on-demand hop", got)
+	}
+
+	// A periodic interval still has to clear the minimum.
+	if _, err := NewUDPHopPacketConn(hopAddr, 4*time.Second, dialFunc); err == nil {
+		t.Fatal("a 4s periodic hop interval must be rejected")
+	}
+	pc5, err := NewUDPHopPacketConn(hopAddr, 5*time.Second, dialFunc)
+	if err != nil {
+		t.Fatalf("a 5s periodic hop interval: %v", err)
+	}
+	defer pc5.Close()
+}
+
 // The hop trigger is reached through the net.PacketConn the client holds.
 var _ interface{ HopNow() bool } = (*udpHopPacketConn)(nil)
