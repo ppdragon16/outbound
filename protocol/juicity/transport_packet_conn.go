@@ -31,6 +31,15 @@ type TransportPacketConn struct {
 	masterKey []byte
 	firstIv   []byte
 	mu        sync.Mutex
+
+	// readDeadline is the deadline installed by SetDeadline/SetReadDeadline.
+	// It is deliberately NOT armed on the shared UDP socket: that socket is
+	// read by the QUIC transport's demultiplexer, where an expired deadline is
+	// a "temporary" error the reader retries, i.e. a spin. ReadNonQUICPacket
+	// only returns on its context, a queued packet, or transport close, so the
+	// deadline is carried by a context instead.
+	readDeadlineMu sync.Mutex
+	readDeadline   time.Time
 }
 
 // LocalAddr implements net.PacketConn.
@@ -38,14 +47,33 @@ func (c *TransportPacketConn) LocalAddr() net.Addr {
 	return c.Conn.LocalAddr()
 }
 
-// SetDeadline implements net.PacketConn.
+// SetDeadline implements net.PacketConn. Reads are bounded by the context built
+// from the stored deadline; only the write deadline is forwarded to the socket.
 func (c *TransportPacketConn) SetDeadline(t time.Time) error {
-	return c.Conn.SetDeadline(t)
+	c.readDeadlineMu.Lock()
+	c.readDeadline = t
+	c.readDeadlineMu.Unlock()
+	return c.Conn.SetWriteDeadline(t)
 }
 
 // SetReadDeadline implements net.PacketConn.
 func (c *TransportPacketConn) SetReadDeadline(t time.Time) error {
-	return c.Conn.SetReadDeadline(t)
+	c.readDeadlineMu.Lock()
+	c.readDeadline = t
+	c.readDeadlineMu.Unlock()
+	return nil
+}
+
+// readContext returns a context that expires with the stored read deadline, so
+// ReadNonQUICPacket can be released by it. Zero means no deadline.
+func (c *TransportPacketConn) readContext() (context.Context, context.CancelFunc) {
+	c.readDeadlineMu.Lock()
+	deadline := c.readDeadline
+	c.readDeadlineMu.Unlock()
+	if deadline.IsZero() {
+		return context.Background(), func() {}
+	}
+	return context.WithDeadline(context.Background(), deadline)
 }
 
 // SetWriteDeadline implements net.PacketConn.
@@ -84,7 +112,9 @@ func (c *TransportPacketConn) WriteTo(p []byte, addr net.Addr) (n int, err error
 func (c *TransportPacketConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err error) {
 	buf := pool.GetBuffer(len(p) + CipherConf.SaltLen + CipherConf.TagLen)
 	defer pool.PutBuffer(buf)
-	n, _, err = c.Transport.ReadNonQUICPacket(context.TODO(), buf)
+	ctx, cancel := c.readContext()
+	defer cancel()
+	n, _, err = c.Transport.ReadNonQUICPacket(ctx, buf)
 	if err != nil {
 		return 0, netip.AddrPort{}, err
 	}
