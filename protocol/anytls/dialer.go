@@ -244,8 +244,14 @@ func (d *Dialer) pickIdleSession() *session {
 }
 
 func (d *Dialer) getSession(ctx context.Context) (*session, error) {
-	// Try idle sessions first; probe each one for liveness before reusing.
+	// Try idle sessions first; probe each one for liveness before reusing. The
+	// scan is bounded (every candidate leaves the pool) and each probe carries
+	// its own deadline, but the caller's context is still checked per iteration
+	// so a cancelled dial returns promptly instead of probing a stale pool.
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		s := d.pickIdleSession()
 		if s == nil {
 			break
