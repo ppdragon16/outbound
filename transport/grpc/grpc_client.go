@@ -267,6 +267,46 @@ type Dialer struct {
 	UserAgent string
 }
 
+// grpcStreamSetupTimeout bounds how long DialContext waits for the tun stream to
+// be established. A variable so tests can shrink it.
+var grpcStreamSetupTimeout = netproxy.DialTimeout
+
+// tunWithinSetupBudget establishes the tun stream within grpcStreamSetupTimeout.
+//
+// The stream *is* the tunnel, so it must outlive the dial: its context cannot
+// carry the dial budget (cancelling it when the dial finishes would kill the
+// tunnel), and a server that accepts the transport but never answers the stream
+// setup would otherwise hang the dial forever. Race the creation against the
+// budget instead and cancel the stream context on expiry, which aborts the RPC.
+func tunWithinSetupBudget(streamCtx context.Context, streamCloser context.CancelFunc, newStream func(context.Context) (proto.GunService_TunClient, error)) (proto.GunService_TunClient, error) {
+	type result struct {
+		tun proto.GunService_TunClient
+		err error
+	}
+	// Buffered: the goroutine always finishes, even when the timer wins.
+	ch := make(chan result, 1)
+	go func() {
+		tun, err := newStream(streamCtx)
+		ch <- result{tun, err}
+	}()
+
+	timer := time.NewTimer(grpcStreamSetupTimeout)
+	defer timer.Stop()
+	select {
+	case r := <-ch:
+		if r.err != nil {
+			streamCloser()
+			return nil, r.err
+		}
+		return r.tun, nil
+	case <-timer.C:
+		// Aborts the in-flight setup; the goroutine reports into the buffered
+		// channel and exits.
+		streamCloser()
+		return nil, fmt.Errorf("grpc tun stream setup timed out after %v", grpcStreamSetupTimeout)
+	}
+}
+
 func (d *Dialer) DialContext(ctx context.Context, network string, address string) (net.Conn, error) {
 	switch network {
 	case "tcp":
@@ -282,11 +322,12 @@ func (d *Dialer) DialContext(ctx context.Context, network string, address string
 		if serviceName == "" {
 			serviceName = "GunService"
 		}
-		// ctx is the lifetime of the tun
+		// ctx is the lifetime of the tun; the setup wait is bounded separately.
 		ctxStream, streamCloser := context.WithCancel(context.Background())
-		tun, err := clientX.TunCustomName(ctxStream, serviceName)
+		tun, err := tunWithinSetupBudget(ctxStream, streamCloser, func(streamCtx context.Context) (proto.GunService_TunClient, error) {
+			return clientX.TunCustomName(streamCtx, serviceName)
+		})
 		if err != nil {
-			streamCloser()
 			return nil, err
 		}
 		return NewClientConn(tun, streamCloser), nil
