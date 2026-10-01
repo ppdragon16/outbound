@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	rand "github.com/daeuniverse/outbound/pkg/fastrand"
@@ -247,14 +248,30 @@ func (u *udpConn) WritePacket(buf []byte, msg protocol.UDPMessage) error {
 	}
 	err := u.conn.SendDatagram(buf[:msgN])
 	if errors.Is(err, quic.ErrDatagramQueueFullTimeout) {
-		// The datagram send queue stayed full with nothing dequeued for the
-		// timeout: the transport is stalled, not merely backpressured. Retire
-		// the whole connection so this and every other in-flight write fails
-		// fast (closeErr) instead of blocking another timeout each, and so
-		// Client.Alive() turns false and dae re-dials promptly.
-		_ = u.conn.CloseWithError(closeErrCodeProtocolError, "datagram send queue full: timed out")
+		u.retireStalledConnection()
 	}
 	return err
+}
+
+// retireStalledConnection closes the connection after its datagram send queue
+// stayed full with nothing dequeued for the whole queue timeout: the transport
+// is stalled, not merely backpressured. Retiring it makes this and every other
+// in-flight write fail fast (with the connection's close error) instead of
+// blocking another timeout each, and turns Client.Alive() false so dae re-dials
+// promptly.
+//
+// The close runs on its own goroutine, and only once per connection: the caller
+// has just waited out the queue timeout and must not be parked again, and
+// CloseWithError waits for the connection's run loop — which itself waits for a
+// socket write that may be stuck when this fires. Closing once also keeps a
+// burst of timed-out writes from leaving a goroutine each behind.
+func (u *udpConn) retireStalledConnection() {
+	if u.sm != nil && !u.sm.retiring.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		_ = u.conn.CloseWithError(closeErrCodeProtocolError, "datagram send queue full: timed out")
+	}()
 }
 
 func (u *udpConn) Close() error {
@@ -309,6 +326,11 @@ type udpSessionManager struct {
 
 	connMap sync.Map // map[uint32]*udpConn
 	nextID  uint32
+
+	// retiring makes the stalled-connection retire fire once per connection:
+	// the first write that hits the datagram queue timeout closes it, and the
+	// concurrent ones return their error without piling on close attempts.
+	retiring atomic.Bool
 
 	ctx    context.Context
 	cancel context.CancelFunc
