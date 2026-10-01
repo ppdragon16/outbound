@@ -24,6 +24,10 @@ import (
 	"golang.org/x/net/http2"
 )
 
+// httpConnectHandshakeTimeout bounds the CONNECT exchange performed on this
+// conn's first write. A variable so tests can shrink it.
+var httpConnectHandshakeTimeout = netproxy.DialTimeout
+
 type Conn struct {
 	nextDialer netproxy.Dialer
 	conn       net.Conn
@@ -202,6 +206,19 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 		}
 
 		connectHttp1 := func(rawConn net.Conn) (n int, err error) {
+			// The CONNECT exchange has no caller context (this dial is lazy, so
+			// DialContext never sees the write), and a proxy that accepts TCP
+			// and then stays silent would wedge this first write forever — and
+			// with it the connectivity check that issued it. Bound the exchange
+			// with the dial budget and clear the deadline afterwards; deadlines
+			// the caller set before the handshake are re-applied by
+			// finishShakeFuncs once the conn is published.
+			if err := rawConn.SetDeadline(time.Now().Add(httpConnectHandshakeTimeout)); err != nil {
+				return 0, err
+			}
+			defer func() {
+				_ = rawConn.SetDeadline(time.Time{})
+			}()
 			err = req.WriteProxy(rawConn)
 			if err != nil {
 				return 0, err
@@ -234,7 +251,9 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			req.Body = pr
 
 			var pErr error
-			var done = make(chan struct{})
+			// Buffered so the writer goroutine can always finish, even when an
+			// error path returns first (an unbuffered send would leak it).
+			done := make(chan struct{}, 1)
 
 			go func() {
 				_, pErr = pw.Write(b)
@@ -243,6 +262,8 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 
 			resp, err := h2clientConn.RoundTrip(req) // nolint: bodyclose
 			if err != nil {
+				// Release the body writer so the goroutine above unblocks.
+				_ = pw.CloseWithError(err)
 				return nil, 0, err
 			}
 
@@ -255,6 +276,35 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 				return nil, 0, fmt.Errorf("proxy responded with non 200 code: %v", resp.Status)
 			}
 			return newHTTP2Conn(rawConn, pw, resp.Body), len(b), nil
+		}
+
+		// connectHttp2Bounded bounds the h2 CONNECT setup. The request context
+		// cannot carry a deadline here: the CONNECT stream must outlive the
+		// dial (it is the tunnel), so cancelling it would kill every h2 tunnel
+		// after the dial budget. Race the setup against the same budget and
+		// close the underlay on expiry instead.
+		connectHttp2Bounded := func(rawConn net.Conn, h2clientConn *http2.ClientConn, req *http.Request) (conn *http2Conn, n int, err error) {
+			type result struct {
+				conn *http2Conn
+				n    int
+				err  error
+			}
+			ch := make(chan result, 1)
+			go func() {
+				conn, n, err := connectHttp2(rawConn, h2clientConn, req)
+				ch <- result{conn, n, err}
+			}()
+			timer := time.NewTimer(httpConnectHandshakeTimeout)
+			defer timer.Stop()
+			select {
+			case r := <-ch:
+				return r.conn, r.n, r.err
+			case <-timer.C:
+				// Unblocks the round trip; its goroutine reports into the
+				// buffered channel and exits.
+				_ = rawConn.Close()
+				return nil, 0, errors.New("http proxy CONNECT over h2 timed out")
+			}
 		}
 
 		if !c.proxy.https {
@@ -273,7 +323,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 			return 0, err
 		}
 		if h2Conn != nil {
-			proxyConn, n, err := connectHttp2(rawConn, h2Conn, req)
+			proxyConn, n, err := connectHttp2Bounded(rawConn, h2Conn, req)
 			if err != nil {
 				return 0, err
 			}
