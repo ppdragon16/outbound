@@ -20,7 +20,11 @@ import (
 
 const (
 	MaxChunkSize = 1 << 14
-	MaxUDPSize   = 1 << 11
+	// MaxUDPSize is kept for API compatibility only. It is deliberately NOT
+	// the UDP read-path cap anymore: staging datagrams through a buffer of
+	// this size silently truncated every larger datagram (see
+	// Conn.ReadFromAddrPort).
+	MaxUDPSize = 1 << 11
 )
 
 type Conn struct {
