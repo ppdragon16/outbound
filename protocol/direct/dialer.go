@@ -235,6 +235,21 @@ func lookupIP(ctx context.Context, resolver *net.Resolver, host string) ([]net.I
 	return addrs, nil
 }
 
+// resolveLegTimeout bounds each leg of the resolution race on its own, so a
+// caller without a deadline and a silently dropping resolver (whose lookups
+// retry internally) still gets an answer or a failure instead of hanging; a
+// shorter parent deadline wins. It stays above the adapter-level cap in
+// resolve.go so the cap, not the leg bound, governs there. (Port of kdae
+// 007cdbd8.)
+var resolveLegTimeout = 10 * time.Second
+
+// lookupIPBounded is lookupIP with that per-leg bound.
+func lookupIPBounded(ctx context.Context, resolver *net.Resolver, host string) ([]net.IP, error) {
+	legCtx, cancel := context.WithTimeout(ctx, resolveLegTimeout)
+	defer cancel()
+	return lookupIP(legCtx, resolver, host)
+}
+
 // raceIPLookups resolves host through every resolver concurrently and returns
 // the first usable answer. The resolvers are raced instead of tried in order
 // because either leg can be blackholed: a sequential preference spends the
@@ -248,7 +263,7 @@ func lookupIP(ctx context.Context, resolver *net.Resolver, host string) ([]net.I
 // the system view's diagnosis keeps its position when both legs fail.
 func raceIPLookups(ctx context.Context, host string, resolvers []*net.Resolver) ([]net.IP, error) {
 	if len(resolvers) == 1 {
-		return lookupIP(ctx, resolvers[0], host)
+		return lookupIPBounded(ctx, resolvers[0], host)
 	}
 
 	raceCtx, raceCancel := context.WithCancel(ctx)
@@ -263,7 +278,7 @@ func raceIPLookups(ctx context.Context, host string, resolvers []*net.Resolver) 
 	results := make(chan result, len(resolvers))
 	for i, resolver := range resolvers {
 		go func(i int, resolver *net.Resolver) {
-			addrs, err := lookupIP(raceCtx, resolver, host)
+			addrs, err := lookupIPBounded(raceCtx, resolver, host)
 			results <- result{leg: i, addrs: addrs, err: err}
 		}(i, resolver)
 	}

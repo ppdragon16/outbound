@@ -183,3 +183,33 @@ func TestResolveUDPAddrsRejectsBadPort(t *testing.T) {
 		t.Fatal("expected an error for a missing port")
 	}
 }
+
+// TestResolveLegBoundCoversDeadlineLessCallers pins the per-leg bound: a caller
+// with no deadline and two blackholed legs must get a failure at the leg budget
+// instead of hanging on the resolvers' internal retry loops. The joined error
+// keeps leg order. (Port of kdae 007cdbd8.)
+func TestResolveLegBoundCoversDeadlineLessCallers(t *testing.T) {
+	oldLeg := resolveLegTimeout
+	resolveLegTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { resolveLegTimeout = oldLeg })
+
+	withDirect(t, &directDialer{
+		resolver:         resolverTo(newFakeDNS(t, fakeDNSBlackhole)),
+		fallbackResolver: resolverTo(newFakeDNS(t, fakeDNSBlackhole)),
+		option:           Option{CacheTTL: time.Minute},
+		dnsCache:         map[string]*dnsCacheEntry{},
+	})
+
+	start := time.Now()
+	_, err := ResolveHost(context.Background(), "node.example.com")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected an error from two blackholed legs")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded from the leg bounds, got %v", err)
+	}
+	if elapsed > 3*time.Second {
+		t.Fatalf("expected the legs to stop at their own budget, took %v", elapsed)
+	}
+}
