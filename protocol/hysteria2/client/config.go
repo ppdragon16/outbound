@@ -7,9 +7,9 @@ import (
 
 	utls "github.com/refraction-networking/utls"
 
-	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/oops"
+	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/internal/pmtud"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/udphop"
 	"github.com/daeuniverse/quic-go"
@@ -116,7 +116,7 @@ func (c *Config) addrResolver() func() ([]net.Addr, error) {
 	if c.PortHopping {
 		return func() ([]net.Addr, error) { return udphop.ResolveUDPHopAddrs(c.ServerAddr) }
 	}
-	return func() ([]net.Addr, error) { return common.ResolveUDPAddrs(c.ServerAddr) }
+	return func() ([]net.Addr, error) { return direct.ResolveUDPAddrs(c.ServerAddr) }
 }
 
 type ConnFactory interface {

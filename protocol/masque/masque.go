@@ -25,6 +25,7 @@ import (
 	utls "github.com/refraction-networking/utls"
 
 	"github.com/daeuniverse/outbound/protocol"
+	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
 	"github.com/daeuniverse/outbound/protocol/tuic/congestion"
 )
@@ -105,7 +106,7 @@ type Client struct {
 // packet-size heuristic. An unresolvable host yields nil, which the controller
 // treats as the minimum size.
 func ccAddr(addr string) net.Addr {
-	if ua, err := net.ResolveUDPAddr("udp", addr); err == nil {
+	if ua, err := direct.ResolveUDPAddr(addr); err == nil {
 		return ua
 	}
 	return nil
@@ -270,7 +271,7 @@ func (c *Client) ensureConn(ctx context.Context) (*http3.ClientConn, error) {
 		if err != nil {
 			return nil, fmt.Errorf("masque: dial udp: %w", err)
 		}
-		udpAddr, err := net.ResolveUDPAddr("udp", c.addr)
+		udpAddr, err := direct.ResolveUDPAddr(c.addr)
 		if err != nil {
 			pconn.Close()
 			return nil, fmt.Errorf("masque: resolve proxy: %w", err)
@@ -286,14 +287,21 @@ func (c *Client) ensureConn(ctx context.Context) (*http3.ClientConn, error) {
 			return nil, fmt.Errorf("masque: dial quic: %w", err)
 		}
 	} else {
-		var err error
-		if c.zeroRTT {
-			qconn, err = quic.DialAddrEarly(ctx, c.addr, c.tlsConf, c.quicConf)
-		} else {
-			qconn, err = quic.DialAddr(ctx, c.addr, c.tlsConf, c.quicConf)
-		}
+		// Resolve the proxy ourselves instead of leaving it to quic.DialAddr,
+		// so the lookup uses the dae mark and the configured fallback resolver
+		// (and the QUIC dial gets an IPv4-first address, as before).
+		udpAddr, err := direct.ResolveUDPAddr(c.addr)
 		if err != nil {
-			return nil, fmt.Errorf("masque: dial quic: %w", err)
+			return nil, fmt.Errorf("masque: resolve proxy: %w", err)
+		}
+		var qerr error
+		if c.zeroRTT {
+			qconn, qerr = quic.DialAddrEarly(ctx, udpAddr.String(), c.tlsConf, c.quicConf)
+		} else {
+			qconn, qerr = quic.DialAddr(ctx, udpAddr.String(), c.tlsConf, c.quicConf)
+		}
+		if qerr != nil {
+			return nil, fmt.Errorf("masque: dial quic: %w", qerr)
 		}
 	}
 	c.conn = transport.NewClientConn(qconn)

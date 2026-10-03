@@ -12,6 +12,7 @@ import (
 	C "github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
+	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/daeuniverse/outbound/protocol/tuic/common"
 	"github.com/daeuniverse/outbound/protocol/tuic/congestion"
 	"github.com/daeuniverse/quic-go"
@@ -52,13 +53,13 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	// Pre-resolve proxy addresses (IPv4-first) to seed the candidate cache;
 	// the cache re-resolves when stale or after a failed connect and races
 	// the QUIC handshake across the candidates.
-	proxyAddrs, err := C.ResolveUDPAddrs(header.ProxyAddress)
+	proxyAddrs, err := direct.ResolveUDPAddrs(header.ProxyAddress)
 	if err != nil {
 		return nil, fmt.Errorf("resolve proxy address: %w", err)
 	}
 	d := &Dialer{
 		proxyAddress: header.ProxyAddress,
-		addrs:        C.NewAddrCache(proxyAddrs, func() ([]net.Addr, error) { return C.ResolveUDPAddrs(header.ProxyAddress) }),
+		addrs:        C.NewAddrCache(proxyAddrs, func() ([]net.Addr, error) { return direct.ResolveUDPAddrs(header.ProxyAddress) }),
 		nextDialer:   nextDialer,
 	}
 	// Pre-create the dial function to avoid per-call closure allocation.

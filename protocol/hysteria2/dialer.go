@@ -7,9 +7,9 @@ import (
 
 	utls "github.com/refraction-networking/utls"
 
-	"github.com/daeuniverse/outbound/common"
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
+	"github.com/daeuniverse/outbound/protocol/direct"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/client"
 	"github.com/daeuniverse/outbound/protocol/hysteria2/udphop"
 	"github.com/daeuniverse/outbound/protocol/tuic/congestion"
@@ -68,7 +68,7 @@ func NewDialer(nextDialer netproxy.Dialer, header protocol.Header) (netproxy.Dia
 	if portHopping {
 		config.Addrs, err = udphop.ResolveUDPHopAddrs(serverAddr)
 	} else {
-		config.Addrs, err = common.ResolveUDPAddrs(serverAddr)
+		config.Addrs, err = direct.ResolveUDPAddrs(serverAddr)
 	}
 	if err != nil {
 		return nil, err

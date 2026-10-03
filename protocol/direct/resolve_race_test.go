@@ -19,6 +19,8 @@ const (
 	fakeDNSAnswer fakeDNSMode = iota
 	// fakeDNSBlackhole reads queries and never answers, like a dropped route.
 	fakeDNSBlackhole
+	// fakeDNSEmpty answers successfully without any record.
+	fakeDNSEmpty
 )
 
 // fakeDNS is a stub DNS server on a loopback UDP socket.
@@ -69,17 +71,19 @@ func (s *fakeDNS) serve() {
 			},
 			Questions: []dnsmessage.Question{q},
 		}
-		switch q.Type {
-		case dnsmessage.TypeA:
-			reply.Answers = []dnsmessage.Resource{{
-				Header: dnsmessage.ResourceHeader{Name: q.Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 60},
-				Body:   &dnsmessage.AResource{A: [4]byte{4, 4, 4, 4}},
-			}}
-		case dnsmessage.TypeAAAA:
-			reply.Answers = []dnsmessage.Resource{{
-				Header: dnsmessage.ResourceHeader{Name: q.Name, Type: dnsmessage.TypeAAAA, Class: dnsmessage.ClassINET, TTL: 60},
-				Body:   &dnsmessage.AAAAResource{AAAA: [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4}},
-			}}
+		if s.mode != fakeDNSEmpty {
+			switch q.Type {
+			case dnsmessage.TypeA:
+				reply.Answers = []dnsmessage.Resource{{
+					Header: dnsmessage.ResourceHeader{Name: q.Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 60},
+					Body:   &dnsmessage.AResource{A: [4]byte{4, 4, 4, 4}},
+				}}
+			case dnsmessage.TypeAAAA:
+				reply.Answers = []dnsmessage.Resource{{
+					Header: dnsmessage.ResourceHeader{Name: q.Name, Type: dnsmessage.TypeAAAA, Class: dnsmessage.ClassINET, TTL: 60},
+					Body:   &dnsmessage.AAAAResource{AAAA: [16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4}},
+				}}
+			}
 		}
 		packed, err := reply.Pack()
 		if err != nil {
