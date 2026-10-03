@@ -2,6 +2,7 @@ package direct
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -50,7 +51,14 @@ func NewDirectDialer(option Option) netproxy.Dialer {
 		option.CacheTTL = 30 * time.Minute
 	}
 	resolver := createResolver(option.Mark, "")
-	fallbackResolver := createResolver(option.Mark, option.FallbackDNS)
+	// createResolver(mark, "") is the system DNS view, so an unset
+	// fallback_resolver must not become a second, identical resolution leg:
+	// the field means "the configured fallback resolver" and stays nil without
+	// one, whatever the mark is.
+	var fallbackResolver *net.Resolver
+	if option.FallbackDNS != "" {
+		fallbackResolver = createResolver(option.Mark, option.FallbackDNS)
+	}
 	dialer := &net.Dialer{Resolver: resolver}
 	if option.Mptcp {
 		dialer.SetMultipathTCP(true)
@@ -214,21 +222,69 @@ func (d *directDialer) raceIPs(ctx context.Context, network, addr string, ips []
 	return outcome.conn, nil
 }
 
-// resolveAllIPs resolves host to all IP addresses, preferring IPv4 first.
-func (d *directDialer) resolveAllIPs(ctx context.Context, host string) ([]string, error) {
-	resolver := d.resolver
-	if resolver == nil {
-		resolver = net.DefaultResolver
-	}
+// lookupIP resolves host through one resolver. An empty answer is reported as
+// an error so a caller racing several resolvers never picks it as the winner.
+func lookupIP(ctx context.Context, resolver *net.Resolver, host string) ([]net.IP, error) {
 	addrs, err := resolver.LookupIP(ctx, "ip", host)
-	if err != nil {
-		if d.fallbackResolver != nil {
-			addrs, err = d.fallbackResolver.LookupIP(ctx, "ip", host)
-		}
-	}
 	if err != nil {
 		return nil, err
 	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("no IP found for domain: %s", host)
+	}
+	return addrs, nil
+}
+
+// raceIPLookups resolves host through every resolver concurrently and returns
+// the first usable answer. The resolvers are raced instead of tried in order
+// because either leg can be blackholed: a sequential preference spends the
+// caller's whole resolution budget on the dead leg before the healthy one gets
+// a chance, while a race lets whichever leg answers first win.
+//
+// A losing leg is not awaited, so it cannot delay an answer that is already
+// known; it stops on its own because raceCtx is canceled (bounded by the
+// resolver's per-attempt deadline) and the buffered channel lets it publish its
+// result and exit without a receiver. Failures are joined in resolver order, so
+// the system view's diagnosis keeps its position when both legs fail.
+func raceIPLookups(ctx context.Context, host string, resolvers []*net.Resolver) ([]net.IP, error) {
+	if len(resolvers) == 1 {
+		return lookupIP(ctx, resolvers[0], host)
+	}
+
+	raceCtx, raceCancel := context.WithCancel(ctx)
+	defer raceCancel()
+
+	type result struct {
+		leg   int
+		addrs []net.IP
+		err   error
+	}
+	// Buffered: a loser must be able to publish after the winner returned.
+	results := make(chan result, len(resolvers))
+	for i, resolver := range resolvers {
+		go func(i int, resolver *net.Resolver) {
+			addrs, err := lookupIP(raceCtx, resolver, host)
+			results <- result{leg: i, addrs: addrs, err: err}
+		}(i, resolver)
+	}
+
+	errs := make([]error, len(resolvers))
+	for range resolvers {
+		select {
+		case res := <-results:
+			if res.err == nil {
+				return res.addrs, nil
+			}
+			errs[res.leg] = res.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return nil, errors.Join(errs...)
+}
+
+// splitIPs orders a resolution answer IPv4 first.
+func splitIPs(host string, addrs []net.IP) ([]string, error) {
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("no IP found for domain: %s", host)
 	}
@@ -245,6 +301,40 @@ func (d *directDialer) resolveAllIPs(ctx context.Context, host string) ([]string
 		}
 	}
 	return ips, nil
+}
+
+// resolveAllIPs resolves host to all IP addresses, preferring IPv4 first. The
+// system DNS view and the configured fallback resolver are raced, so a
+// blackholed system resolver does not hide a healthy fallback resolver.
+func (d *directDialer) resolveAllIPs(ctx context.Context, host string) ([]string, error) {
+	systemResolver := d.resolver
+	if systemResolver == nil {
+		systemResolver = net.DefaultResolver
+	}
+	resolvers := []*net.Resolver{systemResolver}
+	if d.fallbackResolver != nil {
+		resolvers = append(resolvers, d.fallbackResolver)
+	}
+
+	addrs, err := raceIPLookups(ctx, host, resolvers)
+	if err != nil {
+		return nil, err
+	}
+	return splitIPs(host, addrs)
+}
+
+// ResolveHost resolves host with the package-level Direct dialer's policy: the
+// system DNS view raced with the configured fallback resolver, both carrying
+// the dae mark when one is configured. Setup-time code that has to resolve a
+// hostname rather than dial it (connectivity-check and DNS-upstream addresses)
+// gets the same view of DNS as a dial, instead of an unmarked, system-only
+// lookup that dae's own ingress may intercept.
+func ResolveHost(ctx context.Context, host string) ([]string, error) {
+	d, ok := Direct.(*directDialer)
+	if !ok {
+		return nil, fmt.Errorf("direct: package-level dialer is %T, not a direct dialer", Direct)
+	}
+	return d.resolveAllIPs(ctx, host)
 }
 
 // invalidateCache removes the cached entry for addr.
