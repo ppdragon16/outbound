@@ -24,6 +24,12 @@ import (
 // the 16-bit chunk length field. A datagram is sealed as ONE chunk, so a larger
 // one would wrap the field: the peer decodes a bogus length and the stream
 // desynchronizes. Rejecting it keeps the failure at the write that caused it.
+//
+// The rejection carries the datagram-dropped contract
+// (netproxy.DatagramDropped, io.ErrShortBuffer as the legacy cause): one
+// unserializable datagram must drop alone, and consumers must keep the session
+// -- an untyped error reads as a session failure and retires the endpoint.
+// (Contract ported from olicesx/outbound 7f939b6.)
 var ErrDatagramTooLarge = errors.New("vmess: datagram exceeds the 16-bit chunk length field")
 
 const (
@@ -174,7 +180,8 @@ func (c *Conn) writePacket(b []byte, preWrite []byte) (n int, err error) {
 	// the conservative bound because the generator's actual padding is consumed
 	// by the seal itself.
 	if len(b)+int(c.writeBodyCipher.Overhead())+int(c.writePaddingGenerator.MaxPaddingLen()) > math.MaxUint16 {
-		return 0, ErrDatagramTooLarge
+		return 0, fmt.Errorf("%w (%d bytes sealed): %w",
+			ErrDatagramTooLarge, len(b), netproxy.DatagramDropped(io.ErrShortBuffer))
 	}
 	data := c.sealFromPool(b)
 	defer pool.PutBuffer(data)

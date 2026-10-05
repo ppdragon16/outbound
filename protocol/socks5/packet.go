@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/netip"
 
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 )
 
@@ -76,9 +77,21 @@ func (pc *PktConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 		return 0, netip.AddrPort{}, err
 	}
 
+	// Every failure below consumed the datagram from the socket and leaves the
+	// session usable, so each one carries the datagram-dropped contract: the
+	// consumer drops this one datagram instead of retiring the endpoint an
+	// untyped error would imply. (Port of olicesx/outbound 7f939b6.)
+	//
 	// RSV 2 + FRAG 1 + ATYP 1 + MIN_ADDR 4 + PORT 2
 	if n < 10 {
-		return 0, netip.AddrPort{}, errors.New("packet too short")
+		return 0, netip.AddrPort{}, netproxy.DatagramDropped(errors.New("packet too short"))
+	}
+
+	// FRAG != 0 marks one fragment of a datagram we never reassembled: its
+	// payload is not self-contained, so drop it instead of delivering a
+	// partial datagram as if it were whole.
+	if b[2] != 0 {
+		return 0, netip.AddrPort{}, netproxy.DatagramDropped(errors.New("fragmented SOCKS UDP datagrams are not supported"))
 	}
 
 	atyp := b[3]
@@ -97,9 +110,9 @@ func (pc *PktConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 		addr = netip.AddrFrom16(ip)
 		portOffset = 20
 	case 0x03: // Domain
-		return 0, netip.AddrPort{}, errors.New("domain address not supported in fast path")
+		return 0, netip.AddrPort{}, netproxy.DatagramDropped(errors.New("domain address not supported in fast path"))
 	default:
-		return 0, netip.AddrPort{}, errors.New("unknown address type")
+		return 0, netip.AddrPort{}, netproxy.DatagramDropped(errors.New("unknown address type"))
 	}
 
 	port := binary.BigEndian.Uint16(b[portOffset : portOffset+2])
@@ -107,7 +120,7 @@ func (pc *PktConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 
 	dataOffset := portOffset + 2
 	if n < dataOffset {
-		return 0, netip.AddrPort{}, errors.New("invalid packet structure")
+		return 0, netip.AddrPort{}, netproxy.DatagramDropped(errors.New("invalid packet structure"))
 	}
 	return copy(b, b[dataOffset:n]), ap, nil
 }

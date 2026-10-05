@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/protocol"
 )
 
@@ -168,6 +169,17 @@ func TestWriteToAddrPortRejectsOversizedDatagram(t *testing.T) {
 	n, err := c.WriteToAddrPort(tooBig, addr)
 	if !errors.Is(err, ErrDatagramTooLarge) {
 		t.Fatalf("WriteToAddrPort err = %v, want ErrDatagramTooLarge", err)
+	}
+	// The rejection carries the datagram-dropped contract so a consumer drops
+	// this one datagram instead of retiring the endpoint, and the legacy
+	// io.ErrShortBuffer match keeps working through the Cause chain.
+	// (Contract ported from olicesx/outbound 7f939b6.)
+	var dropped *netproxy.ErrDatagramDropped
+	if !errors.As(err, &dropped) {
+		t.Fatalf("WriteToAddrPort err = %v, want the datagram-dropped contract", err)
+	}
+	if !errors.Is(err, io.ErrShortBuffer) {
+		t.Fatalf("WriteToAddrPort err = %v, want io.ErrShortBuffer as the cause", err)
 	}
 	if n != 0 {
 		t.Fatalf("n = %d, want 0 for a rejected datagram", n)
