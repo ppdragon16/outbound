@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/socks5"
 )
@@ -93,7 +94,13 @@ func (c *PacketConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 
 	// 5. Read Payload directly into user buffer
 	if len(b) < payloadLen {
-		return 0, ap, io.ErrShortBuffer
+		// Drain the payload so the stream stays aligned for the next
+		// datagram, then report the drop through the datagram-dropped
+		// contract instead of leaving the connection unreadable.
+		if _, discardErr := io.CopyN(io.Discard, c.Conn, int64(payloadLen)); discardErr != nil {
+			return 0, ap, discardErr
+		}
+		return 0, ap, netproxy.DatagramDropped(io.ErrShortBuffer)
 	}
 	n, err := io.ReadFull(c.Conn, b[:payloadLen])
 	return n, ap, err

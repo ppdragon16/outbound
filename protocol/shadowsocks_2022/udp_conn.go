@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/daeuniverse/outbound/ciphers"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol"
@@ -252,7 +253,7 @@ func (c *UdpConn) ReadFromAddrPort(b []byte) (int, netip.AddrPort, error) {
 	dataOffset := offset + addrFieldLen
 	payload := decrypted[dataOffset:]
 	if len(b) < len(payload) {
-		return 0, ap, io.ErrShortBuffer
+		return 0, ap, netproxy.DatagramDropped(io.ErrShortBuffer)
 	}
 
 	return copy(b, payload), ap, nil

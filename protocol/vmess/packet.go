@@ -7,6 +7,7 @@ import (
 	"net/netip"
 
 	"github.com/daeuniverse/outbound/common"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 )
 
@@ -48,7 +49,7 @@ func (c *Conn) ReadFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error
 			// truncated payload as a complete datagram, and keep the stream
 			// aligned for the next one.
 			c.discardReadRemainder()
-			return 0, netip.AddrPort{}, io.ErrShortBuffer
+			return 0, netip.AddrPort{}, netproxy.DatagramDropped(io.ErrShortBuffer)
 		}
 		addrTyp, address, err := ExtractPacketAddr(p[:n])
 		if err != nil {
@@ -69,7 +70,7 @@ func (c *Conn) ReadFromAddrPort(p []byte) (n int, addr netip.AddrPort, err error
 		}
 		if c.pendingReadRemainder() {
 			c.discardReadRemainder()
-			return 0, netip.AddrPort{}, io.ErrShortBuffer
+			return 0, netip.AddrPort{}, netproxy.DatagramDropped(io.ErrShortBuffer)
 		}
 		if !c.dialTgtAddrPort.IsValid() {
 			tgt, err := common.ResolveUDPAddr(c.dialTgt)

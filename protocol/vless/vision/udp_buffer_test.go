@@ -9,6 +9,8 @@ import (
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/daeuniverse/outbound/netproxy"
 )
 
 type bufferConn struct {
@@ -95,6 +97,12 @@ func TestReadFromDrainsOversizedPayload(t *testing.T) {
 	n, _, err := pc.ReadFrom(make([]byte, 4))
 	if !errors.Is(err, io.ErrShortBuffer) {
 		t.Fatalf("ReadFrom err = %v, want io.ErrShortBuffer", err)
+	}
+	// The drop is a per-datagram event, not a session error: it must carry the
+	// datagram-dropped contract so the consumer keeps the endpoint.
+	var dropped *netproxy.ErrDatagramDropped
+	if !errors.As(err, &dropped) {
+		t.Fatalf("ReadFrom err = %v, want the datagram-dropped contract", err)
 	}
 	if n != 0 {
 		t.Fatalf("n = %d, want 0", n)

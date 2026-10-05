@@ -9,6 +9,7 @@ import (
 	"net/netip"
 
 	"github.com/daeuniverse/outbound/common/iout"
+	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pool"
 )
 
@@ -133,7 +134,7 @@ func (c *PacketConn) ReadFromAddrPort(p []byte) (n int, addr netip.AddrPort, err
 		if _, discardErr := io.CopyN(io.Discard, c.Conn, int64(length)); discardErr != nil {
 			return 0, netip.AddrPort{}, discardErr
 		}
-		return 0, netip.AddrPort{}, io.ErrShortBuffer
+		return 0, netip.AddrPort{}, netproxy.DatagramDropped(io.ErrShortBuffer)
 	}
 
 	n, err = io.ReadFull(c.Conn, p[:length])

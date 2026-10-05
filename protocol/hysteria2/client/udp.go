@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/daeuniverse/outbound/netproxy"
 	rand "github.com/daeuniverse/outbound/pkg/fastrand"
 	"github.com/daeuniverse/outbound/pkg/oops"
 	"github.com/daeuniverse/outbound/pool"
@@ -116,10 +117,11 @@ func (u *udpConn) ReadFromAddrPort(p []byte) (n int, ap netip.AddrPort, err erro
 			if msg.FragCount <= 1 {
 				if len(p) < len(msg.Data) {
 					// The datagram is consumed either way; a short caller
-					// buffer must surface as ErrShortBuffer, not as a
-					// silently truncated packet.
+					// buffer must surface as the datagram-dropped contract
+					// (io.ErrShortBuffer as its cause), not as a silently
+					// truncated packet or a session error.
 					u.sm.conn.ReleaseDatagram(datagram)
-					return 0, msg.AddrPort, io.ErrShortBuffer
+					return 0, msg.AddrPort, netproxy.DatagramDropped(io.ErrShortBuffer)
 				}
 				// Single fragment: copy and release immediately.
 				n = copy(p, msg.Data)
