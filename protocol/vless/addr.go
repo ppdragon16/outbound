@@ -40,6 +40,11 @@ func CompleteMetadataFromReader(m *Metadata, first4 []byte, r io.Reader) (err er
 		if _, err = io.ReadFull(r, buf[:1]); err != nil {
 			return err
 		}
+		if buf[0] == 0 {
+			// A zero-length domain would otherwise leave an empty hostname
+			// behind and route on it. (Port of olicesx/outbound e79c02d.)
+			return fmt.Errorf("CompleteMetadataFromReader: %w: zero domain length", vmess.ErrInvalidMetadata)
+		}
 		if _, err = io.ReadFull(r, buf[1:1+int(buf[0])]); err != nil {
 			return err
 		}
