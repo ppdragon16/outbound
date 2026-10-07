@@ -126,8 +126,14 @@ func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c net.C
 			return nil, fmt.Errorf("httpupgrade: %w", err)
 		}
 
-		// TODO The bufio usage here is unreliable
-		resp, err := http.ReadResponse(bufio.NewReaderSize(conn, 32<<10), req)
+		// http.ReadResponse reads through this reader, and the reader fills its
+		// whole 32 KiB window per read: a server that speaks first, or plain
+		// TCP coalescing, leaves payload buffered here while the raw conn is
+		// already drained. Returning the raw conn would drop those bytes and
+		// desynchronize the upgraded session, so the reader stays in the read
+		// path. (This is what the removed TODO called unreliable.)
+		br := bufio.NewReaderSize(conn, 32<<10)
+		resp, err := http.ReadResponse(br, req)
 		if err != nil {
 			return nil, fmt.Errorf("httpupgrade: %w", err)
 		}
@@ -135,7 +141,7 @@ func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c net.C
 		if resp.Status == "101 Switching Protocols" &&
 			strings.ToLower(resp.Header.Get("Upgrade")) == "websocket" &&
 			strings.ToLower(resp.Header.Get("Connection")) == "upgrade" {
-			return conn, nil
+			return netproxy.NewBufferedConn(conn, br), nil
 		}
 		return nil, errors.New("httpupgrade: unrecognized reply")
 

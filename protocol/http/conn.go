@@ -229,7 +229,16 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 				return len(b), nil
 			} else {
 				// We should read tcp connection here, and we will be guaranteed higher priority by chShakeFinished.
-				resp, err := http.ReadResponse(bufio.NewReader(rawConn), req)
+				//
+				// The reader stays in the read path: http.ReadResponse fills
+				// its whole window per read, so a proxy that pre-fetched the
+				// target's banner (or a remote-first target whose bytes are
+				// coalesced with the 200 response) leaves payload buffered here
+				// while rawConn is already drained. Reading the raw conn later
+				// would drop it and wedge the tunnel. Only this branch wraps:
+				// the isHttpReq path above never allocates a reader.
+				br := bufio.NewReader(rawConn)
+				resp, err := http.ReadResponse(br, req)
 				if err != nil {
 					if resp != nil {
 						resp.Body.Close()
@@ -241,6 +250,7 @@ func (c *Conn) Write(b []byte) (n int, err error) {
 					err = fmt.Errorf("connect server using proxy error, StatusCode [%d]", resp.StatusCode)
 					return 0, err
 				}
+				c.conn = netproxy.NewBufferedConn(rawConn, br)
 				return rawConn.Write(b)
 			}
 		}
