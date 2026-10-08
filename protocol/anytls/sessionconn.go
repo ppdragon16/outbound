@@ -11,8 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/daeuniverse/outbound/pkg/logger"
 	"github.com/daeuniverse/outbound/pool"
 	"github.com/daeuniverse/outbound/protocol/infra/socks"
+	"github.com/sirupsen/logrus"
 )
 
 // sessionConn is the session-as-conn fast path. Instead of the run() dispatch
@@ -47,6 +49,10 @@ var halfCloseGrace = 10 * time.Second
 // dial the upstream target). The frame stream stays aligned — the session
 // itself remains healthy and pool-worthy — so it is exempt from the
 // readHadError sentinel.
+//
+// Kept for callers that still test for it: the refusal path itself now reports
+// io.EOF (see the cmdSYNACK case in Read), so that the relay treats a refusal
+// like any other end of stream instead of logging the exit's dial failure.
 var ErrStreamRefused = errors.New("anytls: server refused stream")
 
 // Heartbeat note: startHeartbeat() stays active (write-only, unaffected by the
@@ -263,12 +269,23 @@ func (c *sessionConn) Read(b []byte) (n int, err error) {
 				if sid == c.id {
 					msg := string(buf)
 					pool.PutBuffer(buf)
-					// Application-level refusal: the frame was consumed in
-					// full, the stream stays aligned, and the server closes
-					// only this stream — the session remains reusable. The
-					// (now stale) FIN for sid is skipped by the sid filter
-					// on the next checkout.
-					return 0, fmt.Errorf("%w: %s", ErrStreamRefused, msg)
+					// Application-level refusal: the server could not dial
+					// the target. The frame was consumed in full, so the
+					// stream stays aligned and the session remains reusable
+					// (the now stale FIN for sid is skipped by the sid filter
+					// on the next checkout).
+					//
+					// Report it as a normal end of stream, exactly like the
+					// cmdFIN case below: the failure is the exit's, not the
+					// tunnel's, and surfacing it as a relay error buries the
+					// log in one line per failed connection (the other
+					// protocols close the stream silently, which is the
+					// behaviour this matches). The server's message is kept at
+					// debug level so the detail is still reachable.
+					if logger.Logger.IsLevelEnabled(logrus.DebugLevel) {
+						logger.Logger.Debugf("anytls: server refused stream: %s", msg)
+					}
+					return 0, io.EOF
 				}
 				pool.PutBuffer(buf)
 			}

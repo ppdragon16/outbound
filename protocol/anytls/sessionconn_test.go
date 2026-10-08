@@ -627,12 +627,11 @@ func TestSessionAsConnStreamRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	buf := make([]byte, 16)
-	if _, err := conn.Read(buf); err == nil {
-		t.Fatal("expected stream-refused error")
-	} else if !bytes.Contains([]byte(err.Error()), []byte("target unreachable")) {
-		t.Fatalf("error should carry server message, got %v", err)
-	} else if !errors.Is(err, ErrStreamRefused) {
-		t.Fatalf("expected ErrStreamRefused sentinel, got %v", err)
+	// A refusal reads as a normal end of stream: the relay then treats it like
+	// any other close instead of logging the exit's dial failure as its own
+	// error (the server's message stays at debug level).
+	if n, err := conn.Read(buf); err != io.EOF || n != 0 {
+		t.Fatalf("a refused stream must read as io.EOF, got n=%d err=%v", n, err)
 	}
 
 	// The refusal is application-level: the frame stream stays aligned, so
