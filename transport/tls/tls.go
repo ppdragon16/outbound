@@ -10,7 +10,6 @@ import (
 
 	"github.com/daeuniverse/outbound/dialer"
 	"github.com/daeuniverse/outbound/netproxy"
-	"github.com/daeuniverse/outbound/pkg/coalesce"
 	"github.com/daeuniverse/outbound/protocol"
 )
 
@@ -113,14 +112,13 @@ func (s *Tls) DialContext(ctx context.Context, network, addr string) (c net.Conn
 			rc = NewFragmentConn(rc, s.fragmentMinLength, s.fragmentMaxLength, s.fragmentMinInterval, s.fragmentMaxInterval)
 		}
 
-		// Coalesce the TLS records of one write burst into one socket
-		// write. Both crypto/tls and utls issue one underlying Write per
-		// record; on bulk relay paths that is ~3 write syscalls per 32KB
-		// frame. The coalescer sits above the fragment conn, so a flushed
-		// burst is still split into timed fragments by NewFragmentConn.
-		// (Port of koutbound e3596a5.)
-		co := coalesce.New(rc)
-
+		// The TLS conn wraps the underlay directly, so each record leaves as
+		// its own underlying write: that pacing is the camouflage contract of
+		// every TLS-emitting transport. A record coalescer folds a write burst
+		// into one giant socket write, a pattern no browser produces, and
+		// production filters were observed (2026-10) blackholing exactly those
+		// large-response flows while small ones passed.
+		// (Revert of koutbound e3596a5, matching koutbound 131419a.)
 		var tlsConn interface {
 			net.Conn
 			Handshake() error
@@ -128,10 +126,10 @@ func (s *Tls) DialContext(ctx context.Context, network, addr string) (c net.Conn
 
 		switch s.tlsImplentation {
 		case "tls":
-			tlsConn = utls.Client(co, s.tlsConfig)
+			tlsConn = utls.Client(rc, s.tlsConfig)
 
 		case "utls":
-			tlsConn = utls.UClient(co, s.utlsConfig, *s.utlsID)
+			tlsConn = utls.UClient(rc, s.utlsConfig, *s.utlsID)
 
 		default:
 			rc.Close()
@@ -143,14 +141,7 @@ func (s *Tls) DialContext(ctx context.Context, network, addr string) (c net.Conn
 			rc.Close()
 			return nil, err
 		}
-		// The handshake writes through the coalescer; a read that blocks on
-		// the peer flushes it, but push it out now so the first application
-		// write ordering is deterministic.
-		if err := co.Flush(); err != nil {
-			tlsConn.Close()
-			return nil, err
-		}
-		return coalesce.NewFlushConn(tlsConn, co), nil
+		return tlsConn, nil
 	case "udp":
 		if s.passthroughUdp {
 			return s.ParentDialer.DialContext(ctx, network, addr)

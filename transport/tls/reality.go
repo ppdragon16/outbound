@@ -35,7 +35,6 @@ import (
 	"unsafe"
 
 	"github.com/daeuniverse/outbound/netproxy"
-	"github.com/daeuniverse/outbound/pkg/coalesce"
 	"github.com/daeuniverse/outbound/pkg/logger"
 	"github.com/daeuniverse/outbound/protocol"
 	utls "github.com/refraction-networking/utls"
@@ -326,13 +325,12 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c net.
 			KeyLogWriter:           x.infoWriter,
 		}
 		uConn.ServerName = utlsConfig.ServerName
-		// Coalesce the TLS records of one write burst into one socket
-		// write; the verified tunnel relays through this same conn.
-		// BuildHandshakeState and the hello mutations below all happen in
-		// memory before any write, so the coalescer never sees a partial
-		// ClientHello. (Port of koutbound e3596a5.)
-		co := coalesce.New(c)
-		uConn.UConn = utls.UClient(co, utlsConfig, *x.fingerprint)
+		// The uTLS conn wraps the underlay directly, so each record leaves as
+		// its own underlying write: that pacing is the camouflage contract of
+		// this transport (a coalescer produced giant writes no browser emits,
+		// and production filters blackholed exactly those flows).
+		// (Revert of koutbound e3596a5, matching koutbound 131419a.)
+		uConn.UConn = utls.UClient(c, utlsConfig, *x.fingerprint)
 		{
 			err = uConn.BuildHandshakeState()
 			if err != nil {
@@ -483,7 +481,7 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c net.
 		}
 		x.pqHybrid.Store(hybridHello)
 		x.pqRetryAfter.Store(0)
-		return coalesce.NewFlushConn(uConn, co), nil
+		return uConn, nil
 
 	case "udp":
 		return nil, fmt.Errorf("%w: Reality+udp", netproxy.UnsupportedTunnelTypeError)

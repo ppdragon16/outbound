@@ -14,7 +14,6 @@ import (
 
 	"github.com/daeuniverse/outbound/common/ua"
 	"github.com/daeuniverse/outbound/netproxy"
-	"github.com/daeuniverse/outbound/pkg/coalesce"
 	"github.com/daeuniverse/outbound/protocol"
 	transportTls "github.com/daeuniverse/outbound/transport/tls"
 )
@@ -95,12 +94,13 @@ func (t *Dialer) DialContext(ctx context.Context, network, addr string) (c net.C
 		}
 
 		if t.tlsConfig != nil {
-			// Coalesce the TLS records of one write burst into one socket
-			// write; the upgraded relay runs through this same TLS conn,
-			// so bulk-path writes cost one syscall per burst instead of
-			// one per 16KB record. (Port of koutbound e3596a5.)
-			co := coalesce.New(conn)
-			conn = coalesce.NewFlushConn(utls.Client(co, t.tlsConfig), co)
+			// The uTLS conn wraps the underlay directly: one underlying write
+			// per TLS record is the browser-shaped pacing this transport's
+			// camouflage depends on. A record coalescer folded bursts into
+			// giant writes no browser produces, and production filters
+			// blackholed exactly those large-response flows.
+			// (Revert of koutbound e3596a5, matching koutbound 131419a.)
+			conn = utls.Client(conn, t.tlsConfig)
 		}
 
 		req, err := http.NewRequest("GET", t.path, nil)

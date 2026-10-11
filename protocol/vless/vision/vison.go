@@ -40,9 +40,8 @@ func NewConn(conn net.Conn, userUUID []byte) (*Conn, error) {
 	c.reader = &readWrapper{
 		vision: c,
 	}
-	// Unwrap intermediate wrappers (vless.Conn, the TLS read coalescer's
-	// FlushConn, fragment conns, ...) until we reach the actual TLS/REALITY
-	// connection. Each wrapper exposes IntrinsicConn() returning its child;
+	// Unwrap intermediate wrappers (vless.Conn, fragment conns, ...) until we
+	// reach the actual TLS/REALITY connection. Each wrapper exposes IntrinsicConn() returning its child;
 	// the TLS types are terminal leaves and do not implement it. The walk is
 	// bounded so a misbehaving wrapper cannot hang the dial path.
 	ic := conn

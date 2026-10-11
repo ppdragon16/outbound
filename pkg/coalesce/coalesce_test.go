@@ -236,3 +236,25 @@ func TestCoalescePooledBufferRecycled(t *testing.T) {
 		t.Fatalf("dropped bytes leaked into a later flush: %d -> %d", got, after)
 	}
 }
+
+// halfCloseConn records writes and a CloseWrite call, and never blocks writes;
+// the coalescer's CloseWrite flush path (and its pooled-buffer tests) drive it.
+type halfCloseConn struct {
+	net.Conn
+	halfClosed bool
+	writes     [][]byte
+}
+
+func (c *halfCloseConn) Write(p []byte) (int, error) {
+	b := make([]byte, len(p))
+	copy(b, p)
+	c.writes = append(c.writes, b)
+	return len(p), nil
+}
+
+func (c *halfCloseConn) SetWriteDeadline(time.Time) error { return nil }
+
+func (c *halfCloseConn) CloseWrite() error {
+	c.halfClosed = true
+	return nil
+}

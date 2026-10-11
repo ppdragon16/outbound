@@ -8,6 +8,8 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
+// Two wrapper levels are the point: the peel must walk all of them.
+
 // wrappingConn mimics protocol/vless.Conn: a wrapper that peels to its child.
 type wrappingConn struct {
 	net.Conn
@@ -15,17 +17,17 @@ type wrappingConn struct {
 
 func (w *wrappingConn) IntrinsicConn() net.Conn { return w.Conn }
 
-// Regression: the peel used to stop after ONE level, so
-// vless.Conn -> *coalesce.FlushConn -> *utls.Conn failed with
-// "XTLS only supports TLS and REALITY directly for now: *coalesce.FlushConn".
-// The peel must walk wrappers down to the terminal TLS conn.
+// Regression: the peel used to stop after ONE level, so a chain like
+// vless.Conn -> wrapper -> wrapper -> *utls.Conn failed with
+// "XTLS only supports TLS and REALITY directly for now: <wrapper>".
+// The peel must walk every wrapper down to the terminal TLS conn.
 func TestNewConnUnwrapsNestedWrappers(t *testing.T) {
 	c1, c2 := net.Pipe()
 	defer c2.Close()
 	co := coalesce.New(c1)
 	utlsConn := utls.Client(co, &utls.Config{ServerName: "example.com"})
 
-	var conn net.Conn = &wrappingConn{Conn: coalesce.NewFlushConn(utlsConn, co)}
+	var conn net.Conn = &wrappingConn{Conn: &wrappingConn{Conn: utlsConn}}
 
 	c, err := NewConn(conn, []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})
 	if err != nil {
