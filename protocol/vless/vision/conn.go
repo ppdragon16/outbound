@@ -332,19 +332,13 @@ func (vc *Conn) Write(p []byte) (int, error) {
 
 func (vc *Conn) write(p []byte) (err error) {
 	if vc.needHandshake {
-		var prefix, suffix []byte
 		vc.needHandshake = false
-		if len(p) == 0 {
-			prefix, suffix = ApplyPaddingFromPool(p, commandPaddingContinue, vc.userUUID, false)
-		} else {
+		longPadding := len(p) == 0
+		if len(p) != 0 {
 			vc.FilterTLS(p)
-			// logrus.Println("isTLS", vc.isTLS)
-			prefix, suffix = ApplyPaddingFromPool(p, commandPaddingContinue, vc.userUUID, vc.isTLS)
+			longPadding = vc.isTLS
 		}
-		defer pool.PutBuffer(prefix)
-		defer pool.PutBuffer(suffix)
-		_, err = iout.MultiWrite(vc.writer, prefix, p, suffix)
-		if err != nil {
+		if err = writePadding(vc.writer, p, commandPaddingContinue, vc.userUUID, longPadding); err != nil {
 			return err
 		}
 		if tlsConn, ok := vc.tlsConn.(*utls.Conn); ok {
@@ -367,72 +361,133 @@ func (vc *Conn) write(p []byte) (err error) {
 	}
 
 	if vc.writeFilterApplicationData {
+		isCompleteAppData := isCompleteAppDataRecords(p)
 		p, p2 := ReshapeBytes(p)
 		vc.FilterTLS(p)
-		// logrus.Println("isTLS2:", vc.isTLS, len(p), len(p2))
-		command := commandPaddingContinue
+		if p2 != nil {
+			vc.FilterTLS(p2)
+		}
 		if !vc.isTLS {
-			command = commandPaddingEnd
-
 			// disable XTLS
-			//vc.readProcess = false
 			vc.writeFilterApplicationData = false
 			vc.packetsToFilter = 0
-		} else if len(p) > 6 && bytes.Equal(p[:3], tlsApplicationDataStart) || vc.packetsToFilter <= 0 {
-			command = commandPaddingEnd
-			if vc.enableXTLS {
-				command = commandPaddingDirect
-				vc.toWriteDirect = true
-			}
-			vc.writeFilterApplicationData = false
-		}
-		// logrus.Println("command", commandPaddingDirect, "vc.writer.toWriteDirect", vc.writer.toWriteDirect)
-		prefix, suffix := ApplyPaddingFromPool(p, command, nil, vc.isTLS)
-		defer pool.PutBuffer(prefix)
-		defer pool.PutBuffer(suffix)
-		_, err = iout.MultiWrite(vc.writer, prefix, p, suffix)
-		if err != nil {
-			return err
-		}
-		// logrus.Println("command 2", commandPaddingDirect, "vc.writer.toWriteDirect", vc.writer.toWriteDirect)
-
-		if vc.toWriteDirect {
-			vc.writer.writeDirect = true
-			// logrus.Infoln("XTLS Vision direct write start")
-			// 	//time.Sleep(5 * time.Millisecond)
-		}
-		if p2 != nil {
-			if vc.toWriteDirect || !vc.isTLS {
-				_, err = vc.writer.Write(p2)
+			if err = writePadding(vc.writer, p, commandPaddingEnd, nil, false); err != nil {
 				return err
 			}
-			vc.FilterTLS(p)
-			// logrus.Println("isTLS3", vc.isTLS)
-			command = commandPaddingContinue
-			if len(p) > 6 && bytes.Equal(p[:3], tlsApplicationDataStart) || vc.packetsToFilter <= 0 {
-				command = commandPaddingEnd
-				if vc.enableXTLS {
-					command = commandPaddingDirect
-					vc.toWriteDirect = true
-				}
-				vc.writeFilterApplicationData = false
+			if p2 != nil {
+				_, err = iout.WriteFull(vc.writer, p2)
 			}
-			// logrus.Println("command", commandPaddingDirect)
-			prefix2, suffix2 := ApplyPaddingFromPool(p2, command, nil, vc.isTLS)
-			defer pool.PutBuffer(prefix2)
-			defer pool.PutBuffer(suffix2)
-			_, err = iout.MultiWrite(vc.writer, prefix2, p2, suffix2)
+			return err
+		}
+
+		endCommand := commandPaddingEnd
+		if vc.enableXTLS {
+			endCommand = commandPaddingDirect
+		}
+		startsWithAppData := func(b []byte) bool {
+			return len(b) >= 6 && bytes.Equal(b[:3], tlsApplicationDataStart)
+		}
+		finishEarlyForLegacyTLS := !vc.isTLS12orAbove && vc.packetsToFilter <= 1
+
+		if p2 == nil {
+			switch {
+			case isCompleteAppData && startsWithAppData(p):
+				vc.toWriteDirect = vc.enableXTLS
+				vc.writeFilterApplicationData = false
+				err = writePadding(vc.writer, p, endCommand, nil, true)
+			case finishEarlyForLegacyTLS:
+				vc.writeFilterApplicationData = false
+				err = writePadding(vc.writer, p, commandPaddingEnd, nil, vc.isTLS)
+			default:
+				err = writePadding(vc.writer, p, commandPaddingContinue, nil, vc.isTLS)
+			}
 			if vc.toWriteDirect {
 				vc.writer.writeDirect = true
-				// logrus.Debugln("XTLS Vision direct write start")
-				// 	//time.Sleep(10 * time.Millisecond)
+			}
+		} else {
+			switch {
+			case isCompleteAppData && startsWithAppData(p):
+				vc.toWriteDirect = vc.enableXTLS
+				vc.writeFilterApplicationData = false
+				if err = writePadding(vc.writer, p, commandPaddingContinue, nil, true); err != nil {
+					return err
+				}
+				err = writePadding(vc.writer, p2, endCommand, nil, startsWithAppData(p2))
+			case finishEarlyForLegacyTLS:
+				vc.writeFilterApplicationData = false
+				if err = writePadding(vc.writer, p, commandPaddingEnd, nil, vc.isTLS); err != nil {
+					return err
+				}
+				_, err = iout.WriteFull(vc.writer, p2)
+			default:
+				if err = writePadding(vc.writer, p, commandPaddingContinue, nil, vc.isTLS); err != nil {
+					return err
+				}
+				err = writePadding(vc.writer, p2, commandPaddingContinue, nil, vc.isTLS)
+			}
+			if vc.toWriteDirect {
+				vc.writer.writeDirect = true
 			}
 		}
 		return err
 	}
-	// if vc.toWriteDirect {
-	// 	// logrus.Infof("XTLS Vision Direct write, payloadLen=%d", len(p))
-	// }
 	_, err = vc.writer.Write(p)
 	return err
+}
+
+// writePadding encodes one Vision frame ([UUID][command][contentLen][paddingLen][p][padding])
+// and writes it to w in a single Write call. Invariant: one Vision frame must
+// be emitted with one Write so the TLS transports below emit one TLS record per
+// frame instead of iout.MultiWrite splitting frames <= 4096 bytes into three
+// records. (Port of kdae 0fb28f7.)
+func writePadding(w io.Writer, p []byte, command byte, userUUID []byte, longPadding bool) error {
+	prefix, suffix := ApplyPaddingFromPool(p, command, userUUID, longPadding)
+	defer pool.PutBuffer(prefix)
+	defer pool.PutBuffer(suffix)
+	frame := pool.GetBuffer(len(prefix) + len(p) + len(suffix))[:0]
+	defer pool.PutBuffer(frame)
+	frame = append(frame, prefix...)
+	frame = append(frame, p...)
+	frame = append(frame, suffix...)
+	_, err := w.Write(frame)
+	return err
+}
+
+// isCompleteAppDataRecords reports whether b consists solely of one or more
+// complete TLS ApplicationData (0x17 0x03 0x03) records. Invariant: Vision must
+// never switch to Direct mode in the middle of a record.
+// (Port of kdae 0fb28f7.)
+func isCompleteAppDataRecords(b []byte) bool {
+	if len(b) < 6 {
+		return false
+	}
+	for len(b) > 0 {
+		if len(b) < 5 || !bytes.Equal(b[:3], tlsApplicationDataStart) {
+			return false
+		}
+		recordLen := int(binary.BigEndian.Uint16(b[3:5]))
+		if recordLen == 0 || len(b)-5 < recordLen {
+			return false
+		}
+		b = b[5+recordLen:]
+	}
+	return true
+}
+
+// filterSnapshot is a consistent view of the filter state for reporting.
+type filterSnapshot struct {
+	packetsToFilter int
+	isTLS           bool
+	isTLS12orAbove  bool
+	enableXTLS      bool
+}
+
+// filterSnapshot returns a consistent view of the filter state for reporting.
+func (vc *Conn) filterSnapshot() filterSnapshot {
+	return filterSnapshot{
+		packetsToFilter: vc.packetsToFilter,
+		isTLS:           vc.isTLS,
+		isTLS12orAbove:  vc.isTLS12orAbove,
+		enableXTLS:      vc.enableXTLS,
+	}
 }
