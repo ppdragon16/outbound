@@ -65,8 +65,6 @@ func (s *Socks5) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 	if err != nil {
 		return nil, fmt.Errorf("[socks5]: dial to %s error: %w", s.addr, err)
 	}
-	// Get the proxy addr we should dial.
-	// TODO: target should be laddr of udp conn
 	if deadline, ok := ctx.Deadline(); ok {
 		ctrlConn.SetReadDeadline(deadline)
 		ctrlConn.SetWriteDeadline(deadline)
@@ -74,7 +72,15 @@ func (s *Socks5) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 	// the size here is just an estimate
 	buf := pool.GetBuffer(socks.MaxAddrLen)
 	defer pool.PutBuffer(buf)
-	uAddr, err := s.connect(ctrlConn, addr, socks.CmdUDPAssociate, buf)
+	// RFC 1928 section 7: the DST.ADDR/DST.PORT of a UDP ASSOCIATE request
+	// carries the address the client expects to send UDP datagrams *from*,
+	// and the server MAY use it to restrict the association. It is not the
+	// proxy target — filling the target in made source-checking servers drop
+	// every proxied datagram while DNS kept working through its TCP fallback
+	// (daeuniverse/dae#1144). dae cannot know its post-NAT source address, so
+	// the RFC's all-zeros form ("address unspecified") is the only correct
+	// value.
+	uAddr, err := s.connect(ctrlConn, "0.0.0.0:0", socks.CmdUDPAssociate, buf)
 	if err != nil {
 		ctrlConn.Close()
 		return nil, err
