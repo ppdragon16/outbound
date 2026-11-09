@@ -21,8 +21,15 @@ import (
 // (fallback DNS, mptcp, fwmark) during daemon startup.
 var Direct netproxy.Dialer = NewDirectDialer(Option{})
 
+// TfoDirect is the TCP-Fast-Open variant of Direct, initialized alongside it
+// by InitDirectDialers (or as a zero-option dialer before that). Callers use
+// it only for first-hop node connections whose configuration opted into TFO;
+// every other use keeps Direct.
+var TfoDirect netproxy.Dialer = NewDirectDialer(Option{TFO: true})
+
 func InitDirectDialers(fallbackDNS string, mptcp bool, mark int) {
 	Direct = NewDirectDialer(Option{FallbackDNS: fallbackDNS, Mptcp: mptcp, Mark: mark})
+	TfoDirect = NewDirectDialer(Option{FallbackDNS: fallbackDNS, Mptcp: mptcp, Mark: mark, TFO: true})
 }
 
 type Option struct {
@@ -30,6 +37,10 @@ type Option struct {
 	Mptcp       bool
 	Mark        int
 	CacheTTL    time.Duration
+	// TFO enables TCP Fast Open on TCP dials (Linux only; TCP_FASTOPEN_CONNECT).
+	// The connection establishment is deferred to the first write, which rides
+	// the SYN. Requires the server side to have TFO enabled on its listener.
+	TFO bool
 }
 
 type directDialer struct {
@@ -63,9 +74,18 @@ func NewDirectDialer(option Option) netproxy.Dialer {
 	if option.Mptcp {
 		dialer.SetMultipathTCP(true)
 	}
-	if option.Mark != 0 {
-		control := func(_, _ string, c syscall.RawConn) error {
-			return netproxy.SoMarkControl(c, option.Mark)
+	if option.Mark != 0 || option.TFO {
+		control := func(_, _ string, c syscall.RawConn) (err error) {
+			if option.Mark != 0 {
+				err = netproxy.SoMarkControl(c, option.Mark)
+				if err != nil {
+					return err
+				}
+			}
+			if option.TFO {
+				return netproxy.TfoControl(c)
+			}
+			return nil
 		}
 		dialer.Control = control
 	}
