@@ -24,7 +24,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"reflect"
 	"regexp"
 	"runtime/debug"
 	"strconv"
@@ -32,7 +31,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"github.com/daeuniverse/outbound/netproxy"
 	"github.com/daeuniverse/outbound/pkg/logger"
@@ -175,14 +173,22 @@ type RealityUConn struct {
 	Verified   bool
 }
 
-var p, _ = reflect.TypeFor[utls.Conn]().FieldByName("peerCertificates")
-
-func (c *RealityUConn) VerifyPeerCertificate(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-	certs := *(*[]*x509.Certificate)(unsafe.Add(unsafe.Pointer(c.Conn), p.Offset))
+// verifyConnection authenticates the REALITY server through the public uTLS
+// callback: the server's certificate public key must HMAC to the embedded
+// signature under the auth key. Port of the same-shape fix in the dae-next
+// tree: reading utls.Conn's private peerCertificates field by reflect offset
+// breaks silently whenever the struct layout changes, so use ConnectionState.
+// An empty chain is rejected instead of panicking on certs[0], and the
+// fallback to ordinary X.509 verification is retained.
+func (c *RealityUConn) verifyConnection(state utls.ConnectionState) error {
+	certs := state.PeerCertificates
+	if len(certs) == 0 {
+		return errors.New("REALITY: server sent no certificates")
+	}
 	if pub, ok := certs[0].PublicKey.(ed25519.PublicKey); ok {
 		h := hmac.New(sha512.New, c.AuthKey)
 		h.Write(pub)
-		if bytes.Equal(h.Sum(nil), certs[0].Signature) {
+		if hmac.Equal(h.Sum(nil), certs[0].Signature) {
 			c.Verified = true
 			return nil
 		}
@@ -318,7 +324,7 @@ func (x *Reality) DialContext(ctx context.Context, network, addr string) (c net.
 		}
 		uConn := &RealityUConn{}
 		utlsConfig := &utls.Config{
-			VerifyPeerCertificate:  uConn.VerifyPeerCertificate,
+			VerifyConnection:       uConn.verifyConnection,
 			ServerName:             x.serverName,
 			InsecureSkipVerify:     true,
 			SessionTicketsDisabled: true,

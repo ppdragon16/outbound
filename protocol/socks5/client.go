@@ -113,8 +113,18 @@ func (s *Socks5) ListenPacket(ctx context.Context, addr string) (net.PacketConn,
 // and commands the server to extend that connection to target,
 // which must be a canonical address with a host and port.
 func (s *Socks5) connect(conn net.Conn, target string, cmd byte, buf []byte) (addr socks.Addr, err error) {
+	// Credentials must come in pairs or not at all, and fit the protocol's
+	// 1..255 byte limits, checked before the greeting: a password alone (or
+	// an over-length field) would otherwise silently select anonymous
+	// authentication and fail against auth-requiring servers with a
+	// confusing "requires authentication" error. Port of the same-shape fix
+	// in the dae-next tree.
+	hasAuth := len(s.user) > 0
+	if len(s.user) > 255 || len(s.password) > 255 || hasAuth != (len(s.password) > 0) {
+		return nil, fmt.Errorf("socks5 username/password must contain 1 to 255 bytes")
+	}
 	buf = append(buf[:0], Version)
-	if len(s.user) > 0 && len(s.user) < 256 && len(s.password) < 256 {
+	if hasAuth {
 		buf = append(buf, 2 /* num auth methods */, socks.AuthNone, socks.AuthPassword)
 	} else {
 		buf = append(buf, 1 /* num auth methods */, socks.AuthNone)
