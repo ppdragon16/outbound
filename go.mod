@@ -48,4 +48,4 @@ require (
 
 replace github.com/daeuniverse/quic-go => github.com/ppdragon16/quic-go v0.0.0-next.utls.17
 
-replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled.15
+replace github.com/refraction-networking/utls => github.com/ppdragon16/utls v1.8.2-pooled.16
