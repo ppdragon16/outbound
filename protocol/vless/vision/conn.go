@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/subtle"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -20,6 +21,13 @@ import (
 
 	"github.com/daeuniverse/outbound/netproxy"
 )
+
+// lenReader is the read-only view of a buffered byte source that Vision needs
+// (both *bytes.Buffer and the utls fork's pooled BytesBuffer satisfy it).
+type lenReader interface {
+	Len() int
+	Read(p []byte) (int, error)
+}
 
 var (
 	_ io.Writer = (*writeWrapper)(nil)
@@ -59,15 +67,27 @@ type Conn struct {
 	overlayConn net.Conn // (vless.Conn)
 	userUUID    []byte
 
-	tlsConn  net.Conn
-	input    *bytes.Reader
-	rawInput *bytes.Buffer
+	tlsConn net.Conn
+	input   *bytes.Reader
+	// rawInput is the underlay's buffered raw input. The utls fork exposes it
+	// as a pooled BytesBuffer interface rather than *bytes.Buffer, so it is
+	// kept as a small read-only interface: the unsafe *bytes.Buffer cast this
+	// code used before reads the interface header as buffer fields and
+	// desynchronizes the Vision direct-copy handoff on real traffic.
+	rawInput lenReader
 
-	needHandshake              bool
-	packetsToFilter            int
-	isTLS                      bool
-	isTLS12orAbove             bool
-	enableXTLS                 bool
+	needHandshake   bool
+	packetsToFilter int
+	isTLS           bool
+	isTLS12orAbove  bool
+	enableXTLS      bool
+	// readBuffersUnsafe is set when this TLS implementation does not let us
+	// reach the bytes it has already buffered. The peer chooses the direct
+	// transition on its own, so the connection stays usable (handshake,
+	// framed relay) until a direct command arrives; at that point the handoff
+	// cannot be done safely and the read fails loudly instead of corrupting
+	// the stream.
+	readBuffersUnsafe          bool
 	cipher                     uint16
 	remainingServerHello       uint16
 	readRemainingContent       int
@@ -234,6 +254,11 @@ func (vc *Conn) read(b []byte) (int, error) {
 			return vc.read(b)
 		case commandPaddingDirect:
 			// logrus.Infoln("commandPaddingDirect")
+			if vc.readBuffersUnsafe {
+				return 0, errors.New("XTLS Vision: server requested direct copy, but this TLS " +
+					"implementation does not expose its buffered input (upgrade the utls fork); " +
+					"refusing to corrupt the stream")
+			}
 			needReturn := false
 			if vc.input != nil {
 				// logrus.Infoln("commandPaddingDirect: 1", vc.input.Len())
